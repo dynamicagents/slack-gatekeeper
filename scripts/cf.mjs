@@ -9,6 +9,7 @@
 //   wf     [name [instance]]   Workflows: list defs / list instances / one instance
 //   ai     [flags | <logId>]   AI Gateway calls: digest, or one call's prompt + reply
 //   fields [--worker <name>]   discover available log fields for a dataset
+//   containers [name]          container apps: image, version, rollout progress
 //
 // logs flags:
 //   --since <30m|2h|1d>   time window back from now (default 1h)
@@ -64,6 +65,8 @@ const USAGE = `cf.mjs — Cloudflare API proxy (credentials from ${ENV_FILE})
      [--limit 20] [--json|--raw]
   ai <logId> [--full] [--max N]          one call: prompt + reply (bodies)
   fields [--worker <name>]               list available log fields
+  containers [name] [--json|--raw]       container apps: which image is actually
+                                         serving, and any rollout still moving
   [METHOD] <path> [-d <json|@file>]      raw passthrough (path is account-relative
        [-q <k=v>]... [--raw]             unless it starts with "/")`;
 
@@ -551,6 +554,102 @@ async function cmdAiDetail(gw, id, flags) {
   }
 }
 
+/** Enough of a digest to tell two builds apart; the rest is noise in a table. */
+const shortDigest = (image) => {
+  const at = String(image ?? "").lastIndexOf(":");
+  return at === -1 ? "?" : String(image).slice(at + 1, at + 8);
+};
+
+const hhmmssIso = (iso) => (iso ? hhmmss(Date.parse(iso)) : "?");
+
+/**
+ * What each container application is actually running, and whether it is still
+ * moving.
+ *
+ * This exists because `wrangler deploy` returning is **not** the same as the new
+ * image serving, and nothing else says so. A deploy pushes an image and starts a
+ * progressive rollout that takes minutes; a container started during it comes up
+ * on whichever version its instance still holds. Testing inside that window
+ * produces a failure indistinguishable from the fix not working — which has
+ * already cost a full debugging round here.
+ *
+ * So the line that matters is the comparison: the image on the application
+ * versus the image the active rollout is heading for. When they differ, some
+ * instances are still serving the old one and nothing you test is conclusive.
+ */
+async function cmdContainers(args) {
+  const { flags, pos } = parseFlags(args, { bool: ["--json", "--raw"] });
+  const [name] = pos;
+
+  const { res, text } = await request("GET", acct("containers/applications"), {
+    query: [["per_page", "50"]]
+  });
+  ensureOk(res, text);
+  if (flags.json || flags.raw) return void printBody(text, { raw: flags.raw });
+
+  const apps = (parseJson(text)?.result ?? []).filter(
+    (a) => !name || String(a.name ?? "").includes(name)
+  );
+  if (apps.length === 0)
+    return void out(
+      name ? `no app matching "${name}"` : "no container applications"
+    );
+
+  for (const app of apps) {
+    const health = app.health?.instances ?? {};
+    out(app.name ?? "?");
+    out(
+      `  version ${app.version ?? "?"} · image ${shortDigest(app.configuration?.image)} · ` +
+        `${health.healthy ?? "?"}/${app.instances ?? "?"} healthy · updated ${app.updated_at ?? "?"}`
+    );
+
+    // Fetched per app rather than in one call because the API has no bulk
+    // rollout endpoint. There are a handful of apps; this is a debugging tool.
+    const r = await request(
+      "GET",
+      acct(`containers/applications/${app.id}/rollouts`)
+    );
+    if (!r.res.ok) {
+      out("  rollouts: unreadable");
+      out("");
+      continue;
+    }
+    const rollouts = parseJson(r.text)?.result ?? [];
+    const latest = rollouts[0];
+    if (!latest) {
+      out("  no rollouts");
+      out("");
+      continue;
+    }
+
+    const target = shortDigest(latest.target_configuration?.image);
+    const serving = shortDigest(app.configuration?.image);
+    out(
+      `  rollout ${String(latest.id ?? "?").slice(0, 8)} · ${latest.status ?? "?"} · ` +
+        `to ${target}${target === serving ? "" : `  ⚠ differs from ${serving}`}`
+    );
+    for (const step of latest.steps ?? []) {
+      const pct = step.step_size?.percentage;
+      out(
+        `    step ${step.id ?? "?"}  ${(step.status ?? "?").padEnd(10)} ` +
+          `${String(pct === undefined ? "?" : `${pct}%`).padEnd(5)} ` +
+          `${hhmmssIso(step.started_at)} → ${step.completed_at ? hhmmssIso(step.completed_at) : "…"}`
+      );
+    }
+    const p = latest.progress;
+    if (p)
+      out(
+        `    ${p.updated_instances ?? "?"}/${p.total_instances ?? "?"} instances on the target version`
+      );
+    // The only sentence anybody actually needs before testing.
+    if (latest.status !== "completed")
+      out(
+        "    ⚠ still rolling — a container started now may be on the old image"
+      );
+    out("");
+  }
+}
+
 async function cmdRaw(args) {
   let method = "GET";
   if (METHODS.has(args[0]?.toUpperCase())) method = args.shift().toUpperCase();
@@ -610,6 +709,8 @@ if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
   await cmdAi(argv.slice(1));
 } else if (cmd === "fields") {
   await cmdFields(argv.slice(1));
+} else if (cmd === "containers") {
+  await cmdContainers(argv.slice(1));
 } else {
   await cmdRaw(argv);
 }
