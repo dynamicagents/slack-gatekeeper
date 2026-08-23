@@ -563,6 +563,14 @@ const shortDigest = (image) => {
 const hhmmssIso = (iso) => (iso ? hhmmss(Date.parse(iso)) : "?");
 
 /**
+ * A rollout only says something about what is serving *now* while it is still
+ * moving. `completed`, `reverted` and `replaced` are all terminal (the enum is
+ * pending | progressing | completed | reverted | replaced), and a replaced one
+ * was simply superseded by a newer deploy.
+ */
+const ROLLOUT_ACTIVE = new Set(["pending", "progressing"]);
+
+/**
  * What each container application is actually running, and whether it is still
  * moving.
  *
@@ -585,17 +593,51 @@ async function cmdContainers(args) {
     query: [["per_page", "50"]]
   });
   ensureOk(res, text);
-  if (flags.json || flags.raw) return void printBody(text, { raw: flags.raw });
 
   const apps = (parseJson(text)?.result ?? []).filter(
     (a) => !name || String(a.name ?? "").includes(name)
   );
+  // Fetched per app rather than in one call because the API has no bulk
+  // rollout endpoint. There are a handful of apps; this is a debugging tool.
+  const fetched = [];
+  for (const app of apps) {
+    const r = await request(
+      "GET",
+      acct(`containers/applications/${app.id}/rollouts`)
+    );
+    fetched.push({ app, ok: r.res.ok, text: r.text });
+  }
+
+  // The structured modes have to answer the same question as the digest, so
+  // they carry the rollouts too — an app list alone cannot say whether the new
+  // image is serving. --raw stays verbatim bodies (as in `ai <id> --raw`);
+  // --json is the composite, filtered to what was asked for.
+  if (flags.raw) {
+    out(text);
+    for (const f of fetched) out(`\n———\n${f.text}`);
+    return;
+  }
+  if (flags.json) {
+    out(
+      JSON.stringify(
+        fetched.map((f) => ({
+          application: f.app,
+          rollouts: f.ok ? (parseJson(f.text)?.result ?? []) : null,
+          rollouts_error: f.ok ? undefined : (parseJson(f.text) ?? f.text)
+        })),
+        null,
+        2
+      )
+    );
+    return;
+  }
+
   if (apps.length === 0)
     return void out(
       name ? `no app matching "${name}"` : "no container applications"
     );
 
-  for (const app of apps) {
+  for (const { app, ok, text: rolloutText } of fetched) {
     const health = app.health?.instances ?? {};
     out(app.name ?? "?");
     out(
@@ -603,18 +645,12 @@ async function cmdContainers(args) {
         `${health.healthy ?? "?"}/${app.instances ?? "?"} healthy · updated ${app.updated_at ?? "?"}`
     );
 
-    // Fetched per app rather than in one call because the API has no bulk
-    // rollout endpoint. There are a handful of apps; this is a debugging tool.
-    const r = await request(
-      "GET",
-      acct(`containers/applications/${app.id}/rollouts`)
-    );
-    if (!r.res.ok) {
+    if (!ok) {
       out("  rollouts: unreadable");
       out("");
       continue;
     }
-    const rollouts = parseJson(r.text)?.result ?? [];
+    const rollouts = parseJson(rolloutText)?.result ?? [];
     const latest = rollouts[0];
     if (!latest) {
       out("  no rollouts");
@@ -641,11 +677,27 @@ async function cmdContainers(args) {
       out(
         `    ${p.updated_instances ?? "?"}/${p.total_instances ?? "?"} instances on the target version`
       );
-    // The only sentence anybody actually needs before testing.
-    if (latest.status !== "completed")
+    // The only sentence anybody actually needs before testing. Terminal
+    // statuses get their own line: a reverted rollout left instances off the
+    // target image, and a replaced one was superseded so it says nothing about
+    // what is serving. An unrecognised status is treated as inconclusive
+    // rather than silently as fine — silence here is what cost the debugging
+    // round this command exists to prevent.
+    const status = latest.status ?? "?";
+    if (ROLLOUT_ACTIVE.has(status))
       out(
         "    ⚠ still rolling — a container started now may be on the old image"
       );
+    else if (status === "reverted")
+      out(
+        `    ⚠ reverted — instances were rolled back off ${target}, and are on ${serving}`
+      );
+    else if (status === "replaced")
+      out(
+        "    superseded by a newer rollout — this one says nothing about what is serving"
+      );
+    else if (status !== "completed")
+      out(`    ⚠ unrecognised status "${status}" — treat as inconclusive`);
     out("");
   }
 }
