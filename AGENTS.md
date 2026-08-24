@@ -47,6 +47,31 @@ Follow Cloudflare's generated-types flow (https://developers.cloudflare.com/work
 - After changing bindings or compat settings in `wrangler.jsonc`, run `npm run types` and commit the regenerated `worker-configuration.d.ts`.
 - `npm run check` (pre-commit + CI) runs `wrangler types --check` first and fails if the committed types are stale — so never hand-edit the generated file.
 
+## Updating Packages
+
+Bump `package.json` to the latest versions, then `npm install` to refresh the lockfile.
+
+- **TypeScript** stays pinned — a compiler bump is its own PR, not a dependency sweep.
+- **`slackify-markdown`** stays a GitHub reference (`github:Looping-AI/slackify-markdown#…`); it is not npm-versioned, so bump the tag deliberately, never as part of a sweep.
+
+For every **non-patch** bump, read the package's changelog before running anything:
+
+- **Breaking changes and deprecations** that reach our code — a deprecated call we still make gets fixed in the same PR.
+- **New best-practice patterns** — a new entrypoint, helper, or exported type that replaces something we hand-roll.
+- **Refactor opportunities.** Small and clearly beneficial → apply it here. Larger than the bump → note it in the PR description and leave the code alone.
+
+Skip changelog reading for **wrangler** and **eslint** — both are high-frequency, low-signal for us; their breakage surfaces in `npm run check` instead.
+
+Then verify, in order:
+
+| Command         | Why                                                                                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run types` | Regenerates `worker-configuration.d.ts` — a wrangler bump ships a new workerd, so runtime types drift even when nothing else changed. Commit the result. |
+| `npm run check` | `wrangler types --check` + prettier + eslint + both `tsc` projects                                                                                       |
+| `npm test`      | Full vitest run against the Workers runtime                                                                                                              |
+
+`npm run types` must come first: `npm run check` fails on stale committed types, and running it before regenerating just reports drift the bump itself caused.
+
 ## Node.js Compatibility
 
 https://developers.cloudflare.com/workers/runtime-apis/nodejs/
