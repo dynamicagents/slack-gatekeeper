@@ -32,7 +32,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.0.1",
-    "@chat-adapter/slack": "^4.37.0",
+    "@chat-adapter/slack": "^4.38.1",
     "@loopingai/a2a-protocol": "^0.2.1",
     "agents": "^0.20.1",
     "ai": "^7.0.62",
