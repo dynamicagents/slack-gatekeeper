@@ -45,15 +45,15 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.1",
-    "@types/node": "^26.2.0",
-    "@typescript-eslint/utils": "^8.67.0",
+    "@types/node": "^26.4.0",
+    "@typescript-eslint/utils": "^8.68.0",
     "drizzle-kit": "^0.31.10",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.1",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.67.0",
-    "vitest": "^4.1.10",
+    "typescript": "^7.0.2",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^4.1.11",
     "wrangler": "^4.121.0"
   },
   "overrides": {
