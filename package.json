@@ -38,7 +38,7 @@
     "ai": "^7.0.62",
     "chat": "^4.37.0",
     "drizzle-orm": "^0.45.2",
-    "jose": "^6.2.8",
+    "jose": "^6.2.10",
     "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
     "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
