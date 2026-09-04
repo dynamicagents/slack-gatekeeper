@@ -13,7 +13,7 @@ import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
-import { signGatewayToken } from "@/auth/agent-outbound";
+import { signGatekeeperToken } from "@/auth/agent-outbound";
 import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
@@ -192,7 +192,7 @@ export class AdminAgentExecutor implements AgentExecutor {
         tenantId,
         allowedDomains,
         authToken: (audience, tenant) =>
-          signGatewayToken({
+          signGatekeeperToken({
             audience,
             issuer,
             tenant,

@@ -1,4 +1,4 @@
-import { A2A_JWS_ALG } from "@loopingai/a2a-protocol";
+import { A2A_JWS_ALG } from "@dynamicagents/g2a-protocol";
 import {
   AGENT_CARD_PATH,
   A2A_PROTOCOL_VERSION,

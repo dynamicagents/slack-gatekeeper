@@ -203,7 +203,7 @@ export function originOf(endpoint: string): string {
  * The `aud` a dispatch token carries: the agent's **exact endpoint**, which is
  * the URL its own card advertises as its JSONRPC interface.
  *
- * From `@loopingai/a2a-protocol`, because it is one half of a two-sided rule.
+ * From `@dynamicagents/g2a-protocol`, because it is one half of a two-sided rule.
  * The receiving side derives its expected audience from the same place — it
  * composes its card's interface URL with `endpointUrl` and verifies that same
  * string — and the package pins `audienceFor(endpointUrl(o, p)) === endpointUrl(o, p)`
@@ -218,7 +218,7 @@ export function originOf(endpoint: string): string {
  * Re-exported here so the rest of the gateway keeps importing it from the
  * module that owns endpoint policy.
  */
-export { audienceFor } from "@loopingai/a2a-protocol";
+export { audienceFor } from "@dynamicagents/g2a-protocol";
 
 /**
  * The card's JSONRPC interface — where to POST, and what the audience is built

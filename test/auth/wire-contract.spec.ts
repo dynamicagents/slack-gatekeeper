@@ -6,10 +6,10 @@ import {
   jwksUrl,
   readIdentityClaim,
   readTenantClaim
-} from "@loopingai/a2a-protocol";
+} from "@dynamicagents/g2a-protocol";
 import gatewayPkg from "../../package.json";
-import protocolPkg from "@loopingai/a2a-protocol/package.json";
-import { signGatewayToken } from "@/auth/agent-outbound";
+import protocolPkg from "@dynamicagents/g2a-protocol/package.json";
+import { signGatekeeperToken } from "@/auth/agent-outbound";
 import { audienceFor } from "@/a2a/endpoint";
 
 /**
@@ -18,12 +18,12 @@ import { audienceFor } from "@/a2a/endpoint";
  * ## What changed, and why this file still exists
  *
  * These values used to be asserted here as literals, because the other half of
- * the contract lived in `@loopingai/core` and the gateway must not import it.
+ * the contract lived in `@dynamicagents/core` and the gateway must not import it.
  * That made this file the only mechanism holding the two repos together, and a
  * weak one: it could prove the gateway was self-consistent, never that the
  * remote agreed.
  *
- * Both sides now derive the contract from `@loopingai/a2a-protocol`, so drift
+ * Both sides now derive the contract from `@dynamicagents/g2a-protocol`, so drift
  * is no longer possible by construction and pinning the strings again here
  * would test nothing — the package's own specs pin them, once, at the source.
  *
@@ -35,7 +35,7 @@ import { audienceFor } from "@/a2a/endpoint";
  * than against a copy of what the package says.
  *
  * The rule that produced all of this is unchanged and still absolute: **the
- * gateway never imports `@loopingai/core`.** The protocol package is a
+ * gateway never imports `@dynamicagents/core`.** The protocol package is a
  * zero-dependency leaf holding names and pure string rules — no crypto, no
  * verification logic, no agent runtime.
  */
@@ -52,9 +52,9 @@ const IDENTITY = {
 };
 
 async function mint(
-  overrides: Partial<Parameters<typeof signGatewayToken>[0]> = {}
+  overrides: Partial<Parameters<typeof signGatekeeperToken>[0]> = {}
 ) {
-  return signGatewayToken({
+  return signGatekeeperToken({
     audience: audienceFor(ENDPOINT),
     issuer: ISSUER,
     identity: IDENTITY,
@@ -65,7 +65,7 @@ async function mint(
 
 describe("a minted token, read back through the protocol package", () => {
   it("carries both claims where the package says to look for them", async () => {
-    // Read with the package's own readers — the same ones `@loopingai/core`
+    // Read with the package's own readers — the same ones `@dynamicagents/core`
     // verifies with. If the gateway ever spelled a claim key by hand and got it
     // wrong, these come back empty, which is exactly what the remote would see.
     const payload = decodeJwt(await mint()) as Record<string, unknown>;
@@ -150,14 +150,16 @@ describe("the boundary that made a shared package possible", () => {
     );
 
   it("never depends on the agent runtime", () => {
-    // The rule everything here rests on: `@loopingai/core` is the agent
+    // The rule everything here rests on: `@dynamicagents/core` is the agent
     // runtime, a gateway is not an agent, and it must never import core. It was
     // a review convention; the shared package makes it tempting to relax
     // ("we already share one thing"), so it is a test now — dev dependencies
     // included, since a test importing the runtime reaches it just as surely.
-    expect(namesIn(gatewayPkg, EVERY_FIELD)).not.toContain("@loopingai/core");
+    expect(namesIn(gatewayPkg, EVERY_FIELD)).not.toContain(
+      "@dynamicagents/core"
+    );
     expect(namesIn(gatewayPkg, EVERY_FIELD)).toContain(
-      "@loopingai/a2a-protocol"
+      "@dynamicagents/g2a-protocol"
     );
   });
 

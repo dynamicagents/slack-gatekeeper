@@ -3,7 +3,7 @@ import { decodeProtectedHeader, jwtVerify, type JWK } from "jose";
 import {
   IDENTITY_CLAIM,
   getPublicJwks,
-  signGatewayToken
+  signGatekeeperToken
 } from "@/auth/agent-outbound";
 import { audienceFor } from "@/a2a/endpoint";
 import { importGatewayPublicKey } from "../helpers/auth";
@@ -33,9 +33,9 @@ describe("getPublicJwks", () => {
   });
 });
 
-describe("signGatewayToken", () => {
+describe("signGatekeeperToken", () => {
   it("round-trips: verifies against the public JWKS with correct claims", async () => {
-    const token = await signGatewayToken({
+    const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       tenant: TENANT,
@@ -74,7 +74,7 @@ describe("signGatewayToken", () => {
   });
 
   it("carries gateway-agent identity only, not user auth fields", async () => {
-    const token = await signGatewayToken({
+    const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       tenant: TENANT,
@@ -97,7 +97,7 @@ describe("signGatewayToken", () => {
   });
 
   it("rejects a token presented to the wrong audience", async () => {
-    const token = await signGatewayToken({
+    const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       tenant: TENANT,
@@ -131,7 +131,7 @@ describe("signGatewayToken", () => {
     const ENDPOINT = `${ORIGIN}/proactive/a2a`;
 
     const verifyAs = async (audience: string) => {
-      const token = await signGatewayToken({
+      const token = await signGatekeeperToken({
         audience: audienceFor(ENDPOINT),
         issuer: PUBLIC_URL,
         tenant: TENANT,
@@ -161,7 +161,7 @@ describe("signGatewayToken", () => {
 
     it("is rejected by anything verifying the bare origin", async () => {
       // The breaking half, asserted rather than left implicit: an agent on
-      // @loopingai/core < 0.2.0 will refuse these tokens.
+      // @dynamicagents/core < 0.2.0 will refuse these tokens.
       await expect(verifyAs(ORIGIN)).rejects.toThrow();
     });
 
@@ -173,7 +173,7 @@ describe("signGatewayToken", () => {
   });
 
   it("rejects a tampered signature", async () => {
-    const token = await signGatewayToken({
+    const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       tenant: TENANT,
@@ -199,7 +199,7 @@ describe("signGatewayToken", () => {
   it("rejects an expired token", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
-    const token = await signGatewayToken({
+    const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
       tenant: TENANT,

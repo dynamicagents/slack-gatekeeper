@@ -1,4 +1,4 @@
-import { NOTIFICATION_TOKEN_HEADER } from "@loopingai/a2a-protocol";
+import { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
@@ -19,15 +19,15 @@ import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 /**
  * Header carrying the per-task validation token set in pushNotificationConfig.
  *
- * From `@loopingai/a2a-protocol`, which the remote agent also reads it from —
- * it used to be declared here and again in `@loopingai/core`, each pointing a
+ * From `@dynamicagents/g2a-protocol`, which the remote agent also reads it from —
+ * it used to be declared here and again in `@dynamicagents/core`, each pointing a
  * comment at the other. Slightly different from the claim names: the value is
  * `@a2a-js/sdk`'s own default for `tokenHeaderName`, but the SDK never exports
  * it, so neither side could import it and both wrote it down.
  *
  * Re-exported so the rest of the gateway keeps importing it from here.
  */
-export { NOTIFICATION_TOKEN_HEADER } from "@loopingai/a2a-protocol";
+export { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 
 /**
  * The gateway path remote agents POST A2A Task snapshots to.
