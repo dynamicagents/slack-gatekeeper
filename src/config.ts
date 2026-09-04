@@ -1,5 +1,5 @@
 /** Name of the Slack channel whose members are org-level admins. */
-export const ORG_ADMIN_CHANNEL_NAME = "looping-org-admin";
+export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
 
 /** Workers AI model used by all in-repo agents. Must support function calling. */
 export const CHAT_MODEL_ID = "@cf/zai-org/glm-5.2";

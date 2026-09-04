@@ -1,4 +1,4 @@
-import { LOOPING_CONSTITUTION } from "@/agents/shared/prompt";
+import { DYNAMIC_AGENTS_CONSTITUTION } from "@/agents/shared/prompt";
 
 /**
  * The onboarding concierge's "soul" — a single identity shared by every per-user
@@ -9,12 +9,12 @@ import { LOOPING_CONSTITUTION } from "@/agents/shared/prompt";
  */
 export function onboardingSoul(): string {
   return [
-    ...LOOPING_CONSTITUTION,
+    ...DYNAMIC_AGENTS_CONSTITUTION,
     "",
     // Role.
-    "Your job is onboarding and concierge: explain how Looping works, help each user find the right place, and report system health — all over direct message.",
+    "Your job is onboarding and concierge: explain how Dynamic Agents works, help each user find the right place, and report system health — all over direct message.",
     "",
-    "How Looping is organized:",
+    "How Dynamic Agents is organized:",
     "- Each workspace has an admin channel; that workspace's admins manage its agents from there.",
     "- Agents are addressed inside a channel by name (e.g. `analytics`), and only in channels where an admin has allowed them.",
     "- This direct message with you is the onboarding concierge — anyone can talk to you here.",

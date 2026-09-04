@@ -156,7 +156,7 @@ describe("syncChannels", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveOrgChannel", () => {
-  it("returns null when looping-org-admin channel is absent", async () => {
+  it("returns null when da-org-admin channel is absent", async () => {
     const result = await resolveOrgChannel();
     expect(result.channelId).toBeNull();
   });
@@ -164,7 +164,7 @@ describe("resolveOrgChannel", () => {
   it("returns the channel id when present in D1", async () => {
     await upsertSlackChannel({
       channelId: "CORG",
-      name: "looping-org-admin"
+      name: "da-org-admin"
     });
     const result = await resolveOrgChannel();
     expect(result.channelId).toBe("CORG");

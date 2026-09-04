@@ -27,11 +27,11 @@ import { dataOf, dataPart, textPart } from "@/a2a/parts";
  */
 
 /** Data-part `type` for an agent → gatekeeper HITL request. */
-export const HITL_REQUEST_TYPE = "io.looping.hitl.request";
+export const HITL_REQUEST_TYPE = "io.da.hitl.request";
 /** Data-part `type` for the gatekeeper → agent answer that resumes the task. */
-export const HITL_RESPONSE_TYPE = "io.looping.hitl.response";
+export const HITL_RESPONSE_TYPE = "io.da.hitl.response";
 /** Data-part `type` for the gatekeeper → agent timeout that ends the wait. */
-export const HITL_TIMEOUT_TYPE = "io.looping.hitl.timeout";
+export const HITL_TIMEOUT_TYPE = "io.da.hitl.timeout";
 
 /** Canonical option ids used when an `approval` request omits its own options. */
 export const HITL_APPROVE_OPTION_ID = "approve";

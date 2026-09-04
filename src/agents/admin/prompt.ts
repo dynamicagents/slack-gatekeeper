@@ -1,5 +1,5 @@
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
-import { LOOPING_CONSTITUTION } from "@/agents/shared/prompt";
+import { DYNAMIC_AGENTS_CONSTITUTION } from "@/agents/shared/prompt";
 
 // Per-caller context is identical across agents — re-export the shared helper so
 // existing admin imports keep working.
@@ -21,7 +21,7 @@ export function adminSoul(workspaceId: number): string {
       "agents only — you cannot create or configure workspaces (that is the org admin's job).";
 
   return [
-    ...LOOPING_CONSTITUTION,
+    ...DYNAMIC_AGENTS_CONSTITUTION,
     "",
     // Role.
     "Your job is administration: managing the agent registry (register / update / unregister agents, attach or detach them to channels) and — for the org admin — managing workspaces.",

@@ -1,22 +1,27 @@
 import { describe, it, expect } from "vitest";
-import { LOOPING_CONSTITUTION, callerContext } from "@/agents/shared/prompt";
+import {
+  DYNAMIC_AGENTS_CONSTITUTION,
+  callerContext
+} from "@/agents/shared/prompt";
 import { makeAuthCtx } from "../../helpers/workspace";
 
 const baseCtx = makeAuthCtx({ slackUserId: "U123", displayName: "Alice" });
 
-describe("LOOPING_CONSTITUTION", () => {
+describe("DYNAMIC_AGENTS_CONSTITUTION", () => {
   it("is an array of exactly 4 strings", () => {
-    expect(Array.isArray(LOOPING_CONSTITUTION)).toBe(true);
-    expect(LOOPING_CONSTITUTION).toHaveLength(4);
-    LOOPING_CONSTITUTION.forEach((line) => expect(typeof line).toBe("string"));
+    expect(Array.isArray(DYNAMIC_AGENTS_CONSTITUTION)).toBe(true);
+    expect(DYNAMIC_AGENTS_CONSTITUTION).toHaveLength(4);
+    DYNAMIC_AGENTS_CONSTITUTION.forEach((line) =>
+      expect(typeof line).toBe("string")
+    );
   });
 
-  it("opens with the Looping AI identity line", () => {
-    expect(LOOPING_CONSTITUTION[0]).toContain("Looping AI");
+  it("opens with the Dynamic Agents identity line", () => {
+    expect(DYNAMIC_AGENTS_CONSTITUTION[0]).toContain("Dynamic Agents");
   });
 
   it("references Slack as the interaction channel", () => {
-    expect(LOOPING_CONSTITUTION.join(" ")).toContain("Slack");
+    expect(DYNAMIC_AGENTS_CONSTITUTION.join(" ")).toContain("Slack");
   });
 });
 

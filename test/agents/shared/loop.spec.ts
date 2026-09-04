@@ -700,7 +700,7 @@ describe("executeAgentTurn — cancellation", () => {
 
 describe("executeAgentTurn — HITL park", () => {
   const request = {
-    type: "io.looping.hitl.request",
+    type: "io.da.hitl.request",
     requestId: "req-1",
     requestKind: "choice",
     prompt: "Which environment?",
@@ -768,7 +768,7 @@ describe("executeAgentTurn — HITL park", () => {
         const data = dataOf(p) as
           { type?: string; requestId?: string } | undefined;
         return (
-          data?.type === "io.looping.hitl.request" && data.requestId === "req-1"
+          data?.type === "io.da.hitl.request" && data.requestId === "req-1"
         );
       })
     ).toBe(true);
@@ -1066,7 +1066,7 @@ describe("executeAgentTurn — forced final_reply", () => {
   it("lets a park out-rank a final_reply emitted in the same step", async () => {
     const session = new FakeSession();
     const request = {
-      type: "io.looping.hitl.request",
+      type: "io.da.hitl.request",
       requestId: "req-1",
       requestKind: "choice",
       prompt: "Which environment?",
@@ -1244,7 +1244,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
   it("keeps calls that ran before a HITL park", async () => {
     const session = new FakeSession();
     const request = {
-      type: "io.looping.hitl.request",
+      type: "io.da.hitl.request",
       requestId: "req-1",
       requestKind: "approval",
       prompt: "Delete arc-player?"
