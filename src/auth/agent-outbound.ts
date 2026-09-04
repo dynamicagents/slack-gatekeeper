@@ -29,7 +29,7 @@ import {
  * comment saying it must match the other, because the gateway deliberately does
  * **not** import core — core is the agent runtime, and a gateway is not an
  * agent. That comment was the whole mechanism, and it failed: one side moved to
- * the `dynamicagents.dev` namespace while the other still minted
+ * the `loopingai.org` namespace while the other still minted
  * `https://looping.ai/tenant`, the remote read an empty tenant, and every
  * request 401'd with both builds green.
  *
