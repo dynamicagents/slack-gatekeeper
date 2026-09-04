@@ -25,15 +25,15 @@ import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
  * `@a2a-js/sdk`'s own default for `tokenHeaderName`, but the SDK never exports
  * it, so neither side could import it and both wrote it down.
  *
- * Re-exported so the rest of the gateway keeps importing it from here.
+ * Re-exported so the rest of the gatekeeper keeps importing it from here.
  */
 export { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 
 /**
- * The gateway path remote agents POST A2A Task snapshots to.
+ * The gatekeeper path remote agents POST A2A Task snapshots to.
  *
  * Deliberately **not** in the protocol package. It is not a shared constant at
- * all: the gateway hands each agent the full callback URL in the
+ * all: the gatekeeper hands each agent the full callback URL in the
  * `taskPushNotificationConfig`, and the agent POSTs to whatever it was given. No
  * remote ever spells this path, so nothing can drift from it.
  */
@@ -41,7 +41,7 @@ export const NOTIFICATIONS_PATH = "/a2a/notifications";
 
 const OK = () => new Response("ok", { status: 200 });
 
-/** Record a gateway-controlled callback rejection for the reaction backstop. */
+/** Record a gatekeeper-controlled callback rejection for the reaction backstop. */
 async function captureCallbackError(
   token: string,
   message: string
@@ -155,7 +155,7 @@ export async function handleRemoteAgentNotification(
   // A2A v1.0 push notifications carry the protobuf-JSON of a `StreamResponse`
   // (the same envelope the streaming transports use), not the bare `Task` v0.3
   // POSTed. Parse it through the generated decoder so enum names and part
-  // shapes are normalized, then flatten to the gateway's task view — an
+  // shapes are normalized, then flatten to the gatekeeper's task view — an
   // envelope that advances no task lifecycle (an artifact delta, or a
   // stand-alone message) carries nothing this callback can deliver.
   let body: unknown;

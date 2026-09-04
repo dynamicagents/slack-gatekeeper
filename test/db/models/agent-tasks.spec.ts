@@ -280,7 +280,7 @@ describe("agent-tasks model", () => {
     });
 
     it("never reopens a terminal row", async () => {
-      // The invariant behind dropping late callbacks: once the gateway has given
+      // The invariant behind dropping late callbacks: once the gatekeeper has given
       // up on a task, a reply arriving afterwards cannot resurrect it.
       await createAgentTask(input("cx-b"));
       await markAgentTaskCanceled("cx-b");

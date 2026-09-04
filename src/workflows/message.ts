@@ -107,12 +107,12 @@ async function runAgentTask(
   }
 
   // A non-accepted dispatch cannot emit task updates, so remove the prewritten
-  // correlation row before surfacing its gateway-controlled error to the user.
+  // correlation row before surfacing its gatekeeper-controlled error to the user.
   await step.do(`unrecord-task:${plan.agent.name}`, () =>
     deleteAgentTask(token)
   );
 
-  // The only non-accepted outcome is a gateway-controlled error reply: an agent
+  // The only non-accepted outcome is a gatekeeper-controlled error reply: an agent
   // that failed to acknowledge the task, an endpoint rejected by policy, or a
   // deterministic A2A protocol refusal (the agent answered with a JSON-RPC error
   // naming what it won't do). All three are verdicts rather than faults, so they

@@ -268,7 +268,7 @@ export async function cancelAndReconcile(
 /**
  * Notice posted when a stop wasn't honored — for both `unsupported` and `error`.
  * The cause differs but the user-visible consequence is identical, and the
- * gateway shouldn't leak transport detail into the thread.
+ * gatekeeper shouldn't leak transport detail into the thread.
  *
  * Says the reply is discarded rather than promising it will arrive: the row is
  * terminal from the moment the stop was issued, so a reply the agent still
@@ -284,16 +284,16 @@ export type CancelReason = "user" | "task-timeout";
 /** Who or what issued a stop, for the one log line that records it. */
 export interface CancelOrigin {
   reason: CancelReason;
-  /** Slack user id that tapped 🛑; null when the gateway timed the task out. */
+  /** Slack user id that tapped 🛑; null when the gatekeeper timed the task out. */
   actorUserId: string | null;
 }
 
 /**
  * Stop one non-terminal task via the standard A2A `tasks/cancel`, reconciling the
- * gateway ledger from the (synchronous) response — a conformant agent sends no
- * push callback after cancellation, so the gateway is the source of truth here.
+ * gatekeeper ledger from the (synchronous) response — a conformant agent sends no
+ * push callback after cancellation, so the gatekeeper is the source of truth here.
  *
- * Shared by both triggers: a human's 🛑 (`CancelWorkflow`) and the gateway's own
+ * Shared by both triggers: a human's 🛑 (`CancelWorkflow`) and the gatekeeper's own
  * processing-deadline cancel (`ReactionWorkflow`). They differ only in what the
  * user is told and in the `origin` recorded below.
  *

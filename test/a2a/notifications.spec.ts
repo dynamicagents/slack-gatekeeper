@@ -41,7 +41,7 @@ import {
 
 /**
  * The call context a v1.0 push-notification store/sender is threaded. The
- * gateway's own bridge builds one per request; a `1.0` wire version is what a
+ * gatekeeper's own bridge builds one per request; a `1.0` wire version is what a
  * conformant peer negotiates via the `A2A-Version` header.
  */
 const CTX = new ServerCallContext({ requestedVersion: "1.0" });
@@ -97,7 +97,7 @@ function stubFetch(key: TestKey, posts: SlackPost[]) {
   );
 }
 
-/** The gateway's flattened view of a Task, as the local sender would derive it. */
+/** The gatekeeper's flattened view of a Task, as the local sender would derive it. */
 function snapshotOfTask(task: Task) {
   return snapshotOf(taskEnvelope(task));
 }
@@ -225,7 +225,7 @@ describe("handleRemoteAgentNotification", () => {
   });
 
   it("drops a reply that lands after the task was canceled", async () => {
-    // A stop — a human's 🛑 or the gateway's processing deadline — ends the task
+    // A stop — a human's 🛑 or the gatekeeper's processing deadline — ends the task
     // here even if the agent runs on. Its eventual reply must not reach the
     // thread, and the 200 is deliberate: it retires the remote's retry ladder
     // rather than inviting it to keep re-posting a verdict that won't change.
@@ -842,7 +842,7 @@ describe("handleRemoteAgentNotification", () => {
     );
   });
 
-  it("surfaces a gateway notice and completes on a terminal failure with no text", async () => {
+  it("surfaces a gatekeeper notice and completes on a terminal failure with no text", async () => {
     const posts: SlackPost[] = [];
     stubFetch(key, posts);
     const bearer = await signJwt(key, { jku: JKU, sub: SUB, aud: AUD });

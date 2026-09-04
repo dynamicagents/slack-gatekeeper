@@ -361,7 +361,7 @@ export async function executeAgentTurn(
     } = await cfg.prepare(text, metadata, turn);
 
     // `text` already carries its `<turn>` provenance wrapper (applied by the
-    // Gateway in dispatch); persist it verbatim.
+    // Gatekeeper in dispatch); persist it verbatim.
     await session.appendMessage(userSessionMessage(text));
     const history = await session.getHistory();
     const soul = (await session.refreshSystemPrompt()) + systemSuffix;
@@ -419,7 +419,7 @@ export async function executeAgentTurn(
       );
     };
 
-    // The gateway's 🛑 workflow runs on its own request and cannot reach into
+    // The gatekeeper's 🛑 workflow runs on its own request and cannot reach into
     // this Durable Object mid-turn, so it records the stop on the task row and
     // the turn reads it back from there.
     const checkCanceled = async (): Promise<boolean> => {
@@ -635,7 +635,7 @@ export async function executeAgentTurn(
     await checkCanceled();
 
     // Stopped: whatever was produced is abandoned work, not an answer. Publish an
-    // empty terminal `canceled` — the gateway posts its own "🛑 Stopped." notice,
+    // empty terminal `canceled` — the gatekeeper posts its own "🛑 Stopped." notice,
     // and any partial output already went out as a step update — and close the
     // turn in history so the next one doesn't reopen it.
     if (canceled) {

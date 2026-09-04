@@ -8,7 +8,7 @@ import { isRecord } from "@/util/json";
 import { dataOf, dataPart, textPart } from "@/a2a/parts";
 
 /**
- * The gateway's human-in-the-loop (HITL) wire contract, carried inside A2A
+ * The gatekeeper's human-in-the-loop (HITL) wire contract, carried inside A2A
  * `data` parts. A2A does not standardize a form schema (a part's `data` content
  * is arbitrary JSON), so we namespace our own `data.type` discriminators — this
  * is spec-compliant and lets a non-HITL-aware client still read the sibling
@@ -18,19 +18,19 @@ import { dataOf, dataPart, textPart } from "@/a2a/parts";
  * - An agent that needs a human decision transitions its task to
  *   `input-required` and emits a status update whose `status.message.parts`
  *   include a {@link HITL_REQUEST_TYPE} data part (plus a human-readable text part).
- * - The gateway renders it in Slack, captures the answer, and resumes the task
+ * - The gatekeeper renders it in Slack, captures the answer, and resumes the task
  *   with a new message carrying a {@link HITL_RESPONSE_TYPE} data part.
- * - On TTL expiry the gateway sends a {@link HITL_TIMEOUT_TYPE} data part instead.
+ * - On TTL expiry the gatekeeper sends a {@link HITL_TIMEOUT_TYPE} data part instead.
  *
  * An "approval" is just a two-option "choice" (Approve/Reject), so one shape
  * covers both.
  */
 
-/** Data-part `type` for an agent → gateway HITL request. */
+/** Data-part `type` for an agent → gatekeeper HITL request. */
 export const HITL_REQUEST_TYPE = "io.looping.hitl.request";
-/** Data-part `type` for the gateway → agent answer that resumes the task. */
+/** Data-part `type` for the gatekeeper → agent answer that resumes the task. */
 export const HITL_RESPONSE_TYPE = "io.looping.hitl.response";
-/** Data-part `type` for the gateway → agent timeout that ends the wait. */
+/** Data-part `type` for the gatekeeper → agent timeout that ends the wait. */
 export const HITL_TIMEOUT_TYPE = "io.looping.hitl.timeout";
 
 /** Canonical option ids used when an `approval` request omits its own options. */
@@ -45,10 +45,10 @@ const optionSchema = z.object({
   style: z.enum(["primary", "danger", "default"]).optional()
 });
 
-/** An agent → gateway request to ask a human to approve or choose. */
+/** An agent → gatekeeper request to ask a human to approve or choose. */
 export const hitlRequestSchema = z.object({
   type: z.literal(HITL_REQUEST_TYPE),
-  /** Agent-chosen, unique per request — the Slack action + gateway correlation key. */
+  /** Agent-chosen, unique per request — the Slack action + gatekeeper correlation key. */
   requestId: z.string().min(1),
   requestKind: z.enum(["approval", "choice"]),
   prompt: z.string().min(1),
@@ -117,7 +117,7 @@ export function optionLabel(
 }
 
 /**
- * Build the parts of the resume message the gateway sends back onto the task.
+ * Build the parts of the resume message the gatekeeper sends back onto the task.
  * `humanText` (the chosen option's label, or the freeform text) is the text
  * part a non-HITL client sees; the data part carries the structured answer.
  */
@@ -151,7 +151,7 @@ export function buildHitlTimeoutParts(requestId: string): Part[] {
 /**
  * Build the parts of the `input-required` status message an agent emits to raise
  * a HITL prompt: a human-readable text part fallback plus the structured request
- * data part the gateway renders in Slack. Symmetric to {@link buildHitlResponseParts};
+ * data part the gatekeeper renders in Slack. Symmetric to {@link buildHitlResponseParts};
  * the data part round-trips through {@link parseHitlRequest}.
  */
 export function buildHitlRequestParts(req: HitlRequest): Part[] {
@@ -189,7 +189,7 @@ function parseDataPart<T>(
 }
 
 /**
- * Find and validate the gateway → agent answer that resumes a parked task.
+ * Find and validate the gatekeeper → agent answer that resumes a parked task.
  * Returns `null` when the message carries no HITL response data part.
  */
 export function parseHitlResponse(
@@ -204,7 +204,7 @@ const hitlTimeoutSchema = z.object({
 });
 
 /**
- * Find and validate the gateway → agent timeout that ends a parked task's wait.
+ * Find and validate the gatekeeper → agent timeout that ends a parked task's wait.
  * Returns `null` when the message carries no HITL timeout DataPart.
  */
 export function parseHitlTimeout(

@@ -50,7 +50,7 @@ export class CancelWorkflow extends WorkflowEntrypoint<
         // regardless, since the row is already terminal.
         const notHonored = results.filter((r) => r.kind !== "stopped");
 
-        // App-branded gateway notices (null username), never an agent reply.
+        // App-branded gatekeeper notices (null username), never an agent reply.
         if (stopped.length > 0) {
           await postReply(p.channelId, threadTs, "🛑 Stopped.", null, null);
         }

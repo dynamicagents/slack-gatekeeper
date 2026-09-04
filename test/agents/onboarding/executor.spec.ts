@@ -78,7 +78,7 @@ describe("OnboardingAgentExecutor", () => {
 
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(2);
-    // The state — not wording in the reply — is what tells the gateway this
+    // The state — not wording in the reply — is what tells the gatekeeper this
     // turn broke; v1.0 gives a failing task no other machine-readable signal.
     expect(terminalTaskState(t.published)).toBe(TaskState.TASK_STATE_FAILED);
     expect(terminalTaskText(t.published)).toBeTruthy();

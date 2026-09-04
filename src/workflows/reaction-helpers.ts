@@ -14,7 +14,7 @@ import { env } from "cloudflare:workers";
  */
 
 /**
- * Emoji reaction the gateway pre-adds to a trigger message while its agents work.
+ * Emoji reaction the gatekeeper pre-adds to a trigger message while its agents work.
  * It doubles as the **cancel affordance**: the human taps this same 🛑 to stop
  * the run (see the `reaction_added` → CancelWorkflow path), so there's a single
  * one-tap control instead of a separate "working" indicator and stop emoji.

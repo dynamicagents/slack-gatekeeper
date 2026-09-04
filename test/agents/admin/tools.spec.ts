@@ -690,7 +690,7 @@ describe("admin tools — derive displayName from card (iconUrl is never card-so
       tenantId: "main",
       notifyOn: "mention"
     });
-    // Give the agent a gateway-hosted avatar, then re-point the endpoint.
+    // Give the agent a gatekeeper-hosted avatar, then re-point the endpoint.
     const withSeams: AdminToolDeps = {
       ...d,
       generateImage: async () => ({
@@ -964,7 +964,7 @@ describe("admin tools — self_set_avatar", () => {
     expect(await getAdminIconUrl(wsId)).toBe(res.iconUrl);
   });
 
-  it("errors when the gateway public URL isn't known yet", async () => {
+  it("errors when the gatekeeper public URL isn't known yet", async () => {
     const wsId = await freshWsId("tools-ws-avatar-nourl");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
     expect(await selfSetAvatar(d, {})).toHaveProperty("error");
@@ -1137,7 +1137,7 @@ describe("admin tools — agents_regenerate_avatar", () => {
     expect(res.error).toContain("not available");
   });
 
-  it("errors when the gateway public URL isn't known yet", async () => {
+  it("errors when the gatekeeper public URL isn't known yet", async () => {
     const wsId = await freshWsId("tools-ws-agent-avatar-nourl");
     const d = avatarDeps(wsId, ctx({ adminWorkspaces: [wsId] }));
     await registerAgentFor(wsId, "nourl-agent", d);

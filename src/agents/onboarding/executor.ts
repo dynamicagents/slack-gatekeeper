@@ -66,7 +66,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
       models: this.models,
-      // The dispatch token is the A2A messageId, and the gateway records a 🛑
+      // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
       // Terse: this rides on a `failed` task, so the delivery boundary already

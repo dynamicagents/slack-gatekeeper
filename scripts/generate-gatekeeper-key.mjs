@@ -1,5 +1,5 @@
 /**
- * Generate an Ed25519 keypair for GATEWAY_JWT_PRIVATE_KEY.
+ * Generate an Ed25519 keypair for GATEKEEPER_JWT_PRIVATE_KEY.
  *
  * Usage:
  *   npm run keygen          # kid defaults to "gw-1"
@@ -25,7 +25,7 @@ priv.alg = pub.alg = "EdDSA";
 pub.use = "sig";
 
 const privJson = JSON.stringify(priv);
-const privLine = `GATEWAY_JWT_PRIVATE_KEY=${privJson}`;
+const privLine = `GATEKEEPER_JWT_PRIVATE_KEY=${privJson}`;
 const hr = "─".repeat(76);
 
 console.log(`\nGenerated Ed25519 keypair  (kid: ${kid})\n`);
@@ -42,9 +42,9 @@ console.log(
 );
 console.log("Or set just this secret, pasting the JSON below when prompted:\n");
 console.log(
-  `  npx wrangler secret put GATEWAY_JWT_PRIVATE_KEY              # default env`
+  `  npx wrangler secret put GATEKEEPER_JWT_PRIVATE_KEY              # default env`
 );
 console.log(
-  `  npx wrangler secret put GATEWAY_JWT_PRIVATE_KEY --env staging\n`
+  `  npx wrangler secret put GATEKEEPER_JWT_PRIVATE_KEY --env staging\n`
 );
 console.log(`${privJson}\n`);

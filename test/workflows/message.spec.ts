@@ -395,7 +395,7 @@ describe("MessageWorkflow — remote custom agents", () => {
       `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name, workspace_id)
        VALUES ('${REMOTE_CHANNEL}', '${AGENT_NAME}', 0)`
     ).run();
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["remote.example.com"]);
   });
 

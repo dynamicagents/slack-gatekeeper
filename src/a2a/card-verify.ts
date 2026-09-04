@@ -28,10 +28,10 @@ import {
  *
  * Signing contract: A2A v1.0 standardized this, so the canonicalization and JWS
  * verification are the SDK's (`canonicalizeAgentCard` / `verifyAgentCardSignature`)
- * rather than a gateway-local scheme — a detached-payload flattened JWS over the
+ * rather than a gatekeeper-local scheme — a detached-payload flattened JWS over the
  * **JCS (RFC 8785)** canonicalization of the card's protobuf-JSON encoding with
  * `signatures` removed, and a protected header carrying `alg`, `kid` and `typ`.
- * What stays gateway-specific is the trust policy layered on top: only `EdDSA`
+ * What stays gatekeeper-specific is the trust policy layered on top: only `EdDSA`
  * signatures count, the `jku` is fetched through the SSRF allowlist, and the key
  * must be an Ed25519 OKP JWK.
  */
@@ -297,7 +297,7 @@ export async function verifyAgentCardSignature(
  * The well-known path serves a **stub** describing the origin, because that URI
  * is per-authority (RFC 8615) and a host may serve many agents. A tenant's own
  * card — its name, skills and signature — is only reachable here, and the call
- * is authenticated: the agent verifies our gateway JWT before answering, so the
+ * is authenticated: the agent verifies our gatekeeper JWT before answering, so the
  * token has to name the tenant being asked about.
  */
 async function fetchExtendedAgentCard(
@@ -387,7 +387,7 @@ export interface VerifyRemoteAgentArgs {
   tenantId: string;
   allowedDomains?: string[];
   /**
-   * Mint the gateway JWT authorizing the extended-card call. Injected rather
+   * Mint the gatekeeper JWT authorizing the extended-card call. Injected rather
    * than imported so these handlers stay offline-testable, the same seam
    * `AdminToolDeps.verifyEndpoint` uses.
    */

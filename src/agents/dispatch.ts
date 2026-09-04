@@ -63,7 +63,7 @@ export type DispatchMetadata =
 
 /**
  * What rides on the A2A `message.metadata` and what the executor reads back.
- * Who/where/when is carried in the turn *text* (the Gateway-applied `<turn>`
+ * Who/where/when is carried in the turn *text* (the Gatekeeper-applied `<turn>`
  * wrapper), not here — this is only the caller (`user`, for authorization) plus
  * the per-kind routing extras.
  */
@@ -95,7 +95,7 @@ export interface DispatchPayload {
 }
 
 /**
- * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host).
+ * Isolate-level memo of the gatekeeper's public origin (the JWT `iss` + `jku` host).
  * Written to D1 by the fetch isolate on first verified Slack request; the Workflow
  * isolate reads it once here and caches it for its lifetime. Resets on cold start
  * (redeploy / domain change), so a changed origin is picked up by the new isolate.
@@ -107,7 +107,7 @@ export function _resetIssuerCacheForTest(): void {
   cachedIssuer = null;
 }
 
-/** Read (and memoize) the gateway issuer origin from D1. */
+/** Read (and memoize) the gatekeeper issuer origin from D1. */
 async function resolveIssuer(): Promise<string | null> {
   if (cachedIssuer !== null) return cachedIssuer;
   const issuer = await getPublicUrl();
@@ -162,7 +162,7 @@ export function buildAgentInstanceKey(
   return `${agent.kind}:${agent.workspaceId}:${agent.name}`;
 }
 
-/** Canonical signed identity of the gateway-agent instance calling remotely. */
+/** Canonical signed identity of the gatekeeper-agent instance calling remotely. */
 export function buildRemoteIdentity(
   agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
 ): RemoteIdentity {
@@ -196,7 +196,7 @@ export function buildRemoteContextId(
  *
  * Two decisions, deliberately kept on two different fields:
  *
- *  - **`kind` decides local vs remote.** It is set by the gateway when the row
+ *  - **`kind` decides local vs remote.** It is set by the gatekeeper when the row
  *    is created and no admin can choose it.
  *  - **`tenantId` decides which local agent**, the same field that picks which
  *    agent at a remote endpoint. So one column means "which agent" on both
@@ -205,7 +205,7 @@ export function buildRemoteContextId(
  *
  * The `kind` guard has to come first and has to stay on `kind`. Routing
  * local-vs-remote off `tenantId` alone would let a **remote agent registered
- * with `tenantId: "admin"` be dispatched into this gateway's own AdminAgent** —
+ * with `tenantId: "admin"` be dispatched into this gatekeeper's own AdminAgent** —
  * privilege escalation through a field an org admin types. `dispatch.spec.ts`
  * asserts that directly.
  *
@@ -251,7 +251,7 @@ export function instanceNameFor(metadata: AgentTurnMetadata): string {
 }
 
 /**
- * The push-notification config handed to a remote agent: the gateway's public
+ * The push-notification config handed to a remote agent: the gatekeeper's public
  * callback URL plus the per-task validation token it must echo back. v1.0
  * flattened v0.3's nested config into `TaskPushNotificationConfig`; `id` and
  * `taskId` are assigned by the agent when it registers the config, so they go
@@ -290,7 +290,7 @@ export type DispatchResult =
  *
  * The copy lives here rather than in `@/a2a/errors` because `a2a/` owns protocol
  * facts while dispatch owns what a user is told — and only dispatch knows whose
- * fault it is. On the *local* path the refusal comes from the gateway's own A2A
+ * fault it is. On the *local* path the refusal comes from the gatekeeper's own A2A
  * server (`src/a2a/serve.ts`), so "contact the agent developer" would be wrong.
  */
 function protocolErrorText(
@@ -310,26 +310,26 @@ function protocolErrorText(
       break;
     case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
     case A2A_ERROR_CODE.METHOD_NOT_FOUND:
-      reason = `${who} doesn't support the message-send operation the gateway uses.`;
+      reason = `${who} doesn't support the message-send operation the gatekeeper uses.`;
       break;
     case A2A_ERROR_CODE.PUSH_NOTIFICATION_NOT_SUPPORTED:
-      // Not a "try again later": the gateway is push-only by construction, so
+      // Not a "try again later": the gatekeeper is push-only by construction, so
       // this agent cannot deliver a reply through it at all.
       reason =
-        `${who} doesn't support push notifications, which the gateway ` +
-        `requires to deliver replies — it can't be used with the gateway.`;
+        `${who} doesn't support push notifications, which the gatekeeper ` +
+        `requires to deliver replies — it can't be used with the gatekeeper.`;
       break;
     case A2A_ERROR_CODE.CONTENT_TYPE_NOT_SUPPORTED:
       reason = `${who} doesn't accept plain-text messages.`;
       break;
     case A2A_ERROR_CODE.EXTENSION_SUPPORT_REQUIRED:
-      reason = `${who} requires an A2A extension the gateway doesn't implement.`;
+      reason = `${who} requires an A2A extension the gatekeeper doesn't implement.`;
       break;
     default:
       reason = `${who} rejected the request (A2A error ${code}).`;
   }
   return localNamespaceFor(agent)
-    ? `${reason} This is a gateway bug — please check the error logs.`
+    ? `${reason} This is a gatekeeper bug — please check the error logs.`
     : `${reason} Please contact the agent developer.`;
 }
 
@@ -378,7 +378,7 @@ export async function dispatchToAgent(
   // remotes, the push `token`. Stable across retries so re-delivery is idempotent.
   const dispatchId = await buildDispatchId(payload.eventId, agent);
 
-  // The Gateway owns provenance: who/where/when is inlined into the turn text via
+  // The Gatekeeper owns provenance: who/where/when is inlined into the turn text via
   // the `<turn>` wrapper, once, identically for local and remote agents. Nothing
   // structured rides alongside — downstream agents (and the recall archiver) read
   // it back from the text. See renderTurn / parseTurn in shared/messages.
@@ -386,7 +386,7 @@ export async function dispatchToAgent(
 
   if (!ns) {
     // Custom agent → real HTTP. The caller's identity travels in a short-lived,
-    // EdDSA-signed gateway JWT (verified by the remote against our public JWKS),
+    // EdDSA-signed gatekeeper JWT (verified by the remote against our public JWKS),
     // NOT as plaintext `message.metadata` — so a remote agent can neither read
     // the full `UserAuthContext` nor forge the caller's permissions.
     const allowedDomains = await getAllowedRemoteAgentDomains();
@@ -396,11 +396,11 @@ export async function dispatchToAgent(
     const issuer = await resolveIssuer();
     if (!issuer) {
       throw new Error(
-        "Gateway public URL has not been discovered yet. " +
+        "Gatekeeper public URL has not been discovered yet. " +
           "Ensure the worker has received at least one Slack event before registering remote agents."
       );
     }
-    const gatewayToken = await signGatekeeperToken({
+    const gatekeeperToken = await signGatekeeperToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity,
@@ -419,21 +419,21 @@ export async function dispatchToAgent(
         payload.threadTs
       ),
       // The signed token is the only authority — it names the calling
-      // gateway-agent instance, not any Slack user. The turn's who/where/when
-      // lives in the `<turn>` text; no gateway authorization or permission
+      // gatekeeper-agent instance, not any Slack user. The turn's who/where/when
+      // lives in the `<turn>` text; no gatekeeper authorization or permission
       // context ever crosses this boundary.
       metadata: { ...payload.metadata }
     });
 
     // Push-notification validation token = the same deterministic dispatch id. The
-    // remote echoes it on the callback so the gateway correlates it to the pending
+    // remote echoes it on the callback so the gatekeeper correlates it to the pending
     // task (A2A §13.2); the webhook still verifies the remote's signature against
     // its pinned card key (that JWT is the real authenticator — this token is the
     // correlation/dedupe key, stable across retries so they collapse to one row).
     const accept = await sendA2ARemote(
       {
         endpoint: agent.a2aEndpoint,
-        authToken: gatewayToken,
+        authToken: gatekeeperToken,
         tenant: agent.tenantId
       },
       remoteMessage,
@@ -495,8 +495,8 @@ export interface HitlAnswer {
  * local agent finalize, never perform a privileged write on nobody's behalf.
  */
 const SYSTEM_CALLER: UserAuthContext = {
-  slackUserId: "gateway",
-  displayName: "gateway",
+  slackUserId: "gatekeeper",
+  displayName: "gatekeeper",
   isPrimaryOwner: false,
   isOrgAdmin: false,
   adminWorkspaces: []
@@ -505,7 +505,7 @@ const SYSTEM_CALLER: UserAuthContext = {
 /**
  * Whether a parked task was successfully handed back to its agent. `failed`
  * covers every reason the continuation could not be delivered (agent gone, no
- * endpoint, or a non-accept). `detail` carries a gateway-authored sentence when
+ * endpoint, or a non-accept). `detail` carries a gatekeeper-authored sentence when
  * the agent gave an actual A2A verdict, so the notice can say what went wrong
  * instead of guessing "unreachable"; it is absent when there is nothing more
  * specific to report.
@@ -514,7 +514,7 @@ type ContinuationOutcome =
   { kind: "resumed" } | { kind: "failed"; detail?: string };
 
 /**
- * Why a continuation could not be handed back, as a gateway-authored sentence,
+ * Why a continuation could not be handed back, as a gatekeeper-authored sentence,
  * or `undefined` when the generic unreachable notice is the honest answer.
  *
  * `TASK_NOT_FOUND` is meaningful on this path and nowhere else: the agent is
@@ -586,9 +586,12 @@ async function sendTaskContinuation(
     validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
     const issuer = await resolveIssuer();
     if (!issuer) {
-      console.error("[hitl] continuation: gateway public URL not discovered", {
-        requestId: row.requestId
-      });
+      console.error(
+        "[hitl] continuation: gatekeeper public URL not discovered",
+        {
+          requestId: row.requestId
+        }
+      );
       return { kind: "failed" };
     }
     const ref: DispatchAgentRef = {
@@ -598,7 +601,7 @@ async function sendTaskContinuation(
       tenantId: agent.tenantId,
       workspaceId: agent.workspaceId
     };
-    const gatewayToken = await signGatekeeperToken({
+    const gatekeeperToken = await signGatekeeperToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity: buildRemoteIdentity(ref),
@@ -622,7 +625,7 @@ async function sendTaskContinuation(
     const accept = await sendA2ARemote(
       {
         endpoint: agent.a2aEndpoint,
-        authToken: gatewayToken,
+        authToken: gatekeeperToken,
         tenant: agent.tenantId
       },
       message,
@@ -751,12 +754,12 @@ export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
 /**
  * Ask an agent to cancel an in-flight task via the standard A2A `tasks/cancel`.
  * Mirrors the remote branch of {@link dispatchToAgent}: SSRF/allowlist validation
- * plus a freshly signed gateway-identity JWT (audience = the endpoint origin),
- * then the cancel call. The response is authoritative — the gateway reconciles
+ * plus a freshly signed gatekeeper-identity JWT (audience = the endpoint origin),
+ * then the cancel call. The response is authoritative — the gatekeeper reconciles
  * from it and expects no push callback afterwards.
  *
  * Local built-ins now run their turn in the background (accept-first), and the
- * gateway stops them via the in-loop `isCancelRequested(token)` poll rather than
+ * gatekeeper stops them via the in-loop `isCancelRequested(token)` poll rather than
  * A2A `tasks/cancel` — so `tasks/cancel` stays a no-op here, reported as
  * `not_cancelable` so the caller still reconciles its ledger row without
  * contacting anything.
@@ -775,10 +778,10 @@ export async function cancelAgentTask(
   const issuer = await resolveIssuer();
   if (!issuer) {
     throw new Error(
-      "Gateway public URL has not been discovered yet; cannot sign a cancel request."
+      "Gatekeeper public URL has not been discovered yet; cannot sign a cancel request."
     );
   }
-  const gatewayToken = await signGatekeeperToken({
+  const gatekeeperToken = await signGatekeeperToken({
     audience: audienceFor(agent.a2aEndpoint),
     issuer,
     identity: buildRemoteIdentity(agent),
@@ -788,7 +791,7 @@ export async function cancelAgentTask(
   return cancelA2ARemote(
     {
       endpoint: agent.a2aEndpoint,
-      authToken: gatewayToken,
+      authToken: gatekeeperToken,
       tenant: agent.tenantId
     },
     taskId

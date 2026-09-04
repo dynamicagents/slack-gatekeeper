@@ -54,7 +54,7 @@ export async function handleMemberLeft(
 // ---------------------------------------------------------------------------
 
 /**
- * Durable, retriable handler for non-agent lifecycle events. The gateway
+ * Durable, retriable handler for non-agent lifecycle events. The gatekeeper
  * triggers one instance per Slack `event_id`. Writes the D1 registry
  * (users/workspaces/admins); reconcile (cron) is the convergence backstop.
  */

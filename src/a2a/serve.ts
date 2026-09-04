@@ -93,7 +93,7 @@ export async function serveA2A(
  * same way it would under the Express binding.
  *
  * The caller is deliberately left unauthenticated: these DOs are reached over
- * `stub.fetch` from the gateway itself, so the trust boundary is the Worker,
+ * `stub.fetch` from the gatekeeper itself, so the trust boundary is the Worker,
  * not this handler. `tenant` is likewise unset — one DO instance *is* the
  * tenant (`admin:{wsId}` / `onboarding:{userId}`), keyed by the caller.
  */

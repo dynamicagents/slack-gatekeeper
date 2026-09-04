@@ -66,7 +66,7 @@ export const COMPACT_TAIL_TOKENS = 4_000;
 
 /**
  * How long a human-in-the-loop prompt (an `input-required` task parked on a
- * Slack approval/question) stays open before the gateway expires it. On expiry
+ * Slack approval/question) stays open before the gatekeeper expires it. On expiry
  * the maintenance sweep marks the request `expired`, updates the Slack message
  * to an expired state, and signals a timeout back onto the A2A task so the agent
  * can finalize. Fixed at 7 days: long enough that a genuine escalation is never
@@ -76,7 +76,7 @@ export const HITL_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * How long an agent has to finish **one processing leg** — from the moment it is
- * handed the turn to the moment it delivers — before the gateway cancels the task
+ * handed the turn to the moment it delivers — before the gatekeeper cancels the task
  * itself and tells the user. The 🛑 stop reaction lives for exactly this long, so
  * the human keeps a working stop control for the whole run.
  *

@@ -6,12 +6,12 @@ import {
   signGatekeeperToken
 } from "@/auth/agent-outbound";
 import { audienceFor } from "@/a2a/endpoint";
-import { importGatewayPublicKey } from "../helpers/auth";
+import { importGatekeeperPublicKey } from "../helpers/auth";
 
 const AUD = "https://agent.example.com";
 /** Which agent at `AUD` the token authorizes — required on every mint. */
 const TENANT = "main";
-const PUBLIC_URL = "https://gateway.test";
+const PUBLIC_URL = "https://gatekeeper.test";
 const EXPECTED_JKU = `${PUBLIC_URL}/.well-known/jwks.json`;
 
 afterEach(() => {
@@ -55,11 +55,15 @@ describe("signGatekeeperToken", () => {
     expect(header.jku).toBe(EXPECTED_JKU);
     expect(header.kid).toBeTruthy();
 
-    const { payload } = await jwtVerify(token, await importGatewayPublicKey(), {
-      issuer: PUBLIC_URL,
-      audience: AUD,
-      algorithms: ["EdDSA"]
-    });
+    const { payload } = await jwtVerify(
+      token,
+      await importGatekeeperPublicKey(),
+      {
+        issuer: PUBLIC_URL,
+        audience: AUD,
+        algorithms: ["EdDSA"]
+      }
+    );
     expect(payload.iss).toBe(PUBLIC_URL);
     expect(payload.aud).toBe(AUD);
     expect(payload.sub).toBe("custom:7:analytics");
@@ -73,7 +77,7 @@ describe("signGatekeeperToken", () => {
     });
   });
 
-  it("carries gateway-agent identity only, not user auth fields", async () => {
+  it("carries gatekeeper-agent identity only, not user auth fields", async () => {
     const token = await signGatekeeperToken({
       audience: AUD,
       issuer: PUBLIC_URL,
@@ -85,11 +89,15 @@ describe("signGatekeeperToken", () => {
         workspaceId: 0
       }
     });
-    const { payload } = await jwtVerify(token, await importGatewayPublicKey(), {
-      issuer: PUBLIC_URL,
-      audience: AUD,
-      algorithms: ["EdDSA"]
-    });
+    const { payload } = await jwtVerify(
+      token,
+      await importGatekeeperPublicKey(),
+      {
+        issuer: PUBLIC_URL,
+        audience: AUD,
+        algorithms: ["EdDSA"]
+      }
+    );
     const identity = payload[IDENTITY_CLAIM] as Record<string, unknown>;
     expect(identity).not.toHaveProperty("slackUserId");
     expect(identity).not.toHaveProperty("displayName");
@@ -109,7 +117,7 @@ describe("signGatekeeperToken", () => {
       }
     });
     await expect(
-      jwtVerify(token, await importGatewayPublicKey(), {
+      jwtVerify(token, await importGatekeeperPublicKey(), {
         issuer: PUBLIC_URL,
         audience: "https://someone-else.example.com",
         algorithms: ["EdDSA"]
@@ -124,7 +132,7 @@ describe("signGatekeeperToken", () => {
      *
      * This is the breaking half of the change: the token names one agent's exact
      * endpoint, so a sibling on the same host rejects it — and so does anything
-     * still verifying the bare origin, which is why the gateway and its
+     * still verifying the bare origin, which is why the gatekeeper and its
      * registered agents have to deploy together.
      */
     const ORIGIN = "https://agent.example.com";
@@ -142,7 +150,7 @@ describe("signGatekeeperToken", () => {
           workspaceId: 7
         }
       });
-      return jwtVerify(token, await importGatewayPublicKey(), {
+      return jwtVerify(token, await importGatekeeperPublicKey(), {
         issuer: PUBLIC_URL,
         audience,
         algorithms: ["EdDSA"]
@@ -188,7 +196,7 @@ describe("signGatekeeperToken", () => {
     const flipped = s[0] === "A" ? "B" : "A";
     const tampered = `${h}.${p}.${flipped}${s.slice(1)}`;
     await expect(
-      jwtVerify(tampered, await importGatewayPublicKey(), {
+      jwtVerify(tampered, await importGatekeeperPublicKey(), {
         issuer: PUBLIC_URL,
         audience: AUD,
         algorithms: ["EdDSA"]
@@ -213,7 +221,7 @@ describe("signGatekeeperToken", () => {
     // Advance past the 120s TTL.
     vi.setSystemTime(new Date("2025-01-01T00:05:00Z"));
     await expect(
-      jwtVerify(token, await importGatewayPublicKey(), {
+      jwtVerify(token, await importGatekeeperPublicKey(), {
         issuer: PUBLIC_URL,
         audience: AUD,
         algorithms: ["EdDSA"]

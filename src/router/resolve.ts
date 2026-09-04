@@ -27,7 +27,7 @@ export function isDmChannel(channelId: string): boolean {
 }
 
 /**
- * Resolve which agents should receive a Slack message. The Gateway no longer
+ * Resolve which agents should receive a Slack message. The Gatekeeper no longer
  * decides who replies — it fans the turn out to every agent woken by the event
  * and each agent classifies internally whether to respond.
  *

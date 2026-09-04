@@ -149,11 +149,11 @@ export async function markHitlPromptResolved(
  * contract), so the task will not resume. Mirrors how a *fresh* dispatch surfaces
  * a non-accept to the user (the MessageWorkflow error-reply path) — a parked task
  * deserves the same visibility so the user knows to fix the agent. Any recorded
- * answer still stands; only the handoff failed. Posted under the gateway's own
+ * answer still stands; only the handoff failed. Posted under the gatekeeper's own
  * identity, not the agent's — the agent is the thing that's broken. Best-effort: a
  * failed post is logged, never thrown.
  *
- * `detail` is a gateway-authored sentence naming an actual A2A verdict the agent
+ * `detail` is a gatekeeper-authored sentence naming an actual A2A verdict the agent
  * returned. Without one we fall back to "looks unreachable", which is only an
  * inference — so it must not be stated when the agent demonstrably answered.
  */

@@ -18,7 +18,7 @@ export class TaskDeliveryValidationError extends Error {}
 
 /**
  * What the user sees when an agent ends a turn in a failure state (`failed` or
- * `rejected`). The marker is gateway-authored and prefixed; `text`, when present,
+ * `rejected`). The marker is gatekeeper-authored and prefixed; `text`, when present,
  * is the agent's own already-sanitized message.
  *
  * A2A v1.0 has no structured task-level error — `TaskStatus` is only
@@ -76,7 +76,7 @@ export async function deliverTaskToSlack(
     const updateId = snapshot.statusMessage?.messageId;
     if (!updateId) {
       throw new TaskDeliveryValidationError(
-        "non-terminal task updates must include a status.message.messageId; the gateway uses this to deduplicate at-least-once delivery"
+        "non-terminal task updates must include a status.message.messageId; the gatekeeper uses this to deduplicate at-least-once delivery"
       );
     }
 

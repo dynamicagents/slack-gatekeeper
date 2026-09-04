@@ -8,37 +8,39 @@ import {
 } from "@dynamicagents/g2a-protocol";
 
 /**
- * Gateway outbound identity for remote (custom) A2A agents.
+ * Gatekeeper outbound identity for remote (custom) A2A agents.
  *
- * Zero-trust, no shared secrets: the gateway holds an Ed25519 private key and
+ * Zero-trust, no shared secrets: the gatekeeper holds an Ed25519 private key and
  * publishes only the matching *public* JWKS (see `getPublicJwks` +
  * `/.well-known/jwks.json`). When dispatching to a remote agent it mints a
  * short-lived signed JWT; the remote verifies it against the public JWKS. This
- * proves "this request really came from the gateway" (the remote authenticates
- * the caller, A2A spec §7.4) and carries the calling gateway-agent instance in
+ * proves "this request really came from the gatekeeper" (the remote authenticates
+ * the caller, A2A spec §7.4) and carries the calling gatekeeper-agent instance in
  * tamper-proof claims — so endpoint sharing never aliases two logical agents.
  *
  * Algorithm is **EdDSA (Ed25519)**. The private key is a JWK stored in the
- * `GATEWAY_JWT_PRIVATE_KEY` secret; its `kid` identifies the key for rotation.
+ * `GATEKEEPER_JWT_PRIVATE_KEY` secret; its `kid` identifies the key for rotation.
  */
 
 /**
  * The claim names and the algorithm come from `@dynamicagents/g2a-protocol`.
  *
  * They used to be declared here and again in `@dynamicagents/core`, each with a
- * comment saying it must match the other, because the gateway deliberately does
- * **not** import core — core is the agent runtime, and a gateway is not an
- * agent. That comment was the whole mechanism, and it failed: one side moved to
- * the `dynamicagents.dev` namespace while the other still minted
- * `https://looping.ai/tenant`, the remote read an empty tenant, and every
- * request 401'd with both builds green.
+ * comment saying it must match the other, because the gatekeeper deliberately does
+ * **not** import core — core is the agent runtime, and a gatekeeper is not an
+ * agent. Two copies kept in step by a comment is fragile: nothing but review
+ * stops them drifting, and a drifted claim key fails as an empty claim at the
+ * remote rather than as a build error.
  *
- * The protocol package is the shared artifact that rule permits — zero
- * dependencies, no crypto, no agent runtime, so depending on it commits this
- * gateway to nothing. The rule itself is unchanged and still absolute: **the
- * gateway must never import `@dynamicagents/core`.**
+ * The protocol package is the shared artifact that rule permits, created to
+ * remove that duplication — zero dependencies, no crypto, no agent runtime, so
+ * depending on it commits this gatekeeper to nothing. Owning the claim names in
+ * one place is also what let the namespace move from `looping.ai` to
+ * `dynamicagents.dev`, as part of the rename from Looping to Dynamic Agents, be
+ * a single deliberate edit. The rule itself is unchanged and still absolute:
+ * **the gatekeeper must never import `@dynamicagents/core`.**
  *
- * Re-exported so this module stays the place the rest of the gateway imports
+ * Re-exported so this module stays the place the rest of the gatekeeper imports
  * them from.
  */
 export { IDENTITY_CLAIM, TENANT_CLAIM } from "@dynamicagents/g2a-protocol";
@@ -47,7 +49,7 @@ export { IDENTITY_CLAIM, TENANT_CLAIM } from "@dynamicagents/g2a-protocol";
 const TOKEN_TTL_SECONDS = 120;
 
 /**
- * Stable identity of the logical gateway-agent instance making a remote call.
+ * Stable identity of the logical gatekeeper-agent instance making a remote call.
  * Derived from the registered agent row, not from the endpoint URL, so two
  * distinct agents can safely share one remote service.
  *
@@ -67,11 +69,11 @@ interface SignGatekeeperTokenArgs {
    */
   audience: string;
   /**
-   * This gateway's public origin — stored in D1 by the fetch isolate on first
+   * This gatekeeper's public origin — stored in D1 by the fetch isolate on first
    * request and passed in here so Workflow context (no `Request`) can sign correctly.
    */
   issuer: string;
-  /** Stable gateway-agent identity embedded under {@link IDENTITY_CLAIM}. */
+  /** Stable gatekeeper-agent identity embedded under {@link IDENTITY_CLAIM}. */
   identity: RemoteIdentity;
   /**
    * Which agent at `audience` this token authorizes, under {@link TENANT_CLAIM}.
@@ -88,32 +90,32 @@ interface SignGatekeeperTokenArgs {
 
 /** Parse + validate the configured private JWK (throws if misconfigured). */
 function privateJwk(): JWK & { kid: string } {
-  const raw = env.GATEWAY_JWT_PRIVATE_KEY;
+  const raw = env.GATEKEEPER_JWT_PRIVATE_KEY;
   if (!raw) {
-    throw new Error("GATEWAY_JWT_PRIVATE_KEY is not configured");
+    throw new Error("GATEKEEPER_JWT_PRIVATE_KEY is not configured");
   }
   let jwk: JWK;
   try {
     jwk = JSON.parse(raw) as JWK;
   } catch {
-    throw new Error("GATEWAY_JWT_PRIVATE_KEY is not valid JSON");
+    throw new Error("GATEKEEPER_JWT_PRIVATE_KEY is not valid JSON");
   }
   if (!jwk.kid) {
-    throw new Error("GATEWAY_JWT_PRIVATE_KEY must include a `kid`");
+    throw new Error("GATEKEEPER_JWT_PRIVATE_KEY must include a `kid`");
   }
   if (!jwk.d) {
     throw new Error(
-      "GATEWAY_JWT_PRIVATE_KEY must be a private key (missing `d`)"
+      "GATEKEEPER_JWT_PRIVATE_KEY must be a private key (missing `d`)"
     );
   }
   return jwk as JWK & { kid: string };
 }
 
 /**
- * Mint a short-lived gateway identity JWT for one remote dispatch. Signed with
- * EdDSA; carries `iss`/`aud`/`sub`/`iat`/`exp`/`jti` plus the gateway-agent
+ * Mint a short-lived gatekeeper identity JWT for one remote dispatch. Signed with
+ * EdDSA; carries `iss`/`aud`/`sub`/`iat`/`exp`/`jti` plus the gatekeeper-agent
  * identity and tenant claims. The remote agent verifies it against the
- * gateway's public JWKS.
+ * gatekeeper's public JWKS.
  */
 export async function signGatekeeperToken(
   args: SignGatekeeperTokenArgs
@@ -127,7 +129,7 @@ export async function signGatekeeperToken(
   // visible instead of at the far end of an HTTP hop.
   if (!args.tenant) {
     throw new Error(
-      `refusing to sign a gateway token with no tenant for '${args.audience}'`
+      `refusing to sign a gatekeeper token with no tenant for '${args.audience}'`
     );
   }
 
@@ -155,7 +157,7 @@ export async function signGatekeeperToken(
 }
 
 /**
- * The gateway's public JWKS — the only key material ever exposed. Derived from
+ * The gatekeeper's public JWKS — the only key material ever exposed. Derived from
  * the configured private JWK by dropping the private component (`d`). Served at
  * `/.well-known/jwks.json` for remote agents to fetch and cache.
  */

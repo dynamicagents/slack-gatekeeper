@@ -20,7 +20,7 @@ import { isRecord, jsonOf } from "@/util/json";
  */
 
 /**
- * Who authored a turn — the WHO the Gateway renders into the `<turn>` wrapper.
+ * Who authored a turn — the WHO the Gatekeeper renders into the `<turn>` wrapper.
  * Used to attribute "who said what" in multi-actor channels (e.g. the admin
  * channel) where a flat `role: "user"` is ambiguous.
  */
@@ -70,7 +70,7 @@ function escAttr(value: string): string {
 
 /**
  * Strip any `<turn …>` / `</turn>` lookalikes from user body text so a crafted
- * message cannot inject gateway-authored provenance wrappers into model context.
+ * message cannot inject gatekeeper-authored provenance wrappers into model context.
  */
 function sanitizeBody(text: string): string {
   return text.replace(/<\s*\/?\s*turn(\s[^>]*)?\s*>/gi, "");
@@ -83,7 +83,7 @@ export function slackTsToIso(ts: string): string {
 
 /**
  * Project a {@link TurnContext} into the authoritative `<turn>` wrapper the
- * Gateway inlines into the outbound message text — the single source of
+ * Gatekeeper inlines into the outbound message text — the single source of
  * who/where/when read by the model, by remote agents, and (via {@link parseTurn})
  * by the recall archiver. Attributes are escaped with {@link escAttr}; the body
  * is sanitized with {@link sanitizeBody} to strip any `<turn>`/`</turn>` lookalikes
@@ -99,7 +99,7 @@ export function renderTurn(text: string, ctx: TurnContext): string {
   );
 }
 
-/** Build the {@link TurnContext} the Gateway wraps each outbound turn with. */
+/** Build the {@link TurnContext} the Gatekeeper wraps each outbound turn with. */
 export function turnContextFromPayload(p: {
   user: { slackUserId: string; displayName: string | null };
   channelId: string;
@@ -149,7 +149,7 @@ function parseAttrs(raw: string): Record<string, string> {
 
 /**
  * Inverse of {@link renderTurn}: recover the structured provenance from a
- * Gateway-authored turn. Returns null for any text that isn't a `<turn>` wrapper
+ * Gatekeeper-authored turn. Returns null for any text that isn't a `<turn>` wrapper
  * (assistant replies, plain text), so callers can treat the fields as optional.
  */
 export function parseTurn(text: string): ParsedTurn | null {

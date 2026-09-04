@@ -379,7 +379,7 @@ describe("stop reaction (cancel)", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("does not cancel on the gateway's own 🛑 (self-reaction filter)", async () => {
+  it("does not cancel on the gatekeeper's own 🛑 (self-reaction filter)", async () => {
     // auth.test resolves the bot user id; a reaction by that same user is ours.
     stubSlack((method) =>
       method === "auth.test"
@@ -1055,7 +1055,7 @@ describe("public url discovery", () => {
     _resetPublicUrlCacheForTest();
   });
 
-  it("persists the gateway public origin after a verified request", async () => {
+  it("persists the gatekeeper public origin after a verified request", async () => {
     _resetPublicUrlCacheForTest();
     const body = JSON.stringify({ type: "url_verification", challenge: "x" });
     const res = await post(body);

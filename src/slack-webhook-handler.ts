@@ -53,7 +53,7 @@ interface MessageEdit {
   /**
    * Bot id of the edited/deleted message's author, when it was posted by an app.
    * A `message_changed` carries this on the nested `message` (not the top-level
-   * event), so the outer bot filter misses it. Present ⇒ the gateway's own edit
+   * event), so the outer bot filter misses it. Present ⇒ the gatekeeper's own edit
    * (e.g. swapping a HITL prompt to its answered state); such edits are dropped,
    * never fed back as a turn.
    */
@@ -113,7 +113,7 @@ function isNoOpEdit(edit: MessageEdit): boolean {
 /**
  * Map a parsed Slack webhook payload to the Workflow it should drive.
  *
- * Exported for unit-testing in isolation. The gateway calls this via
+ * Exported for unit-testing in isolation. The gatekeeper calls this via
  * handleSlackEvent — not directly.
  *
  * Note: parseSlackWebhookBody only types app_mention, direct_message,
@@ -148,7 +148,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       : { kind: "ignore", reason: `interactive: ${payload.kind}` };
   }
 
-  // `event_id` is Slack's idempotency key and this gateway's dedupe anchor — the
+  // `event_id` is Slack's idempotency key and this gatekeeper's dedupe anchor — the
   // Message/Reaction/Cancel workflow instance ids and the `agent_tasks` token PK
   // all derive from it. Minting a substitute (a random UUID) would make a Slack
   // retry miss every one of those and double-dispatch the whole fan-out, so an
@@ -250,7 +250,7 @@ export function classifyEvent(payload: SlackWebhookPayload): Classification {
       // 🛑 stop reaction → cancel the reacted message's in-flight fan-out. Only
       // the STOP_REACTION on a message item is actionable; every other emoji and
       // `reaction_removed` falls through to `ignore`. The reactor (event.user) is
-      // carried so the handler can drop the gateway's own initial reaction.
+      // carried so the handler can drop the gatekeeper's own initial reaction.
       if (eventType === "reaction_added" && event) {
         const reaction = str(event.reaction);
         if (reaction !== STOP_REACTION) {
@@ -421,10 +421,10 @@ async function triggerWorkflow(
     await workflow.create({ id, params });
   } catch (err) {
     if (isInstanceExistsError(err)) {
-      console.log("[gateway] duplicate event — skipping", { eventId: id });
+      console.log("[gatekeeper] duplicate event — skipping", { eventId: id });
       return;
     }
-    console.error("[gateway] failed to create workflow instance", {
+    console.error("[gatekeeper] failed to create workflow instance", {
       eventId: id,
       err: String(err)
     });
@@ -442,7 +442,7 @@ async function addStopReaction(params: ClassifiedMessageParams): Promise<void> {
   try {
     await addReaction(params.channelId, params.ts, STOP_REACTION);
   } catch (err) {
-    console.error("[gateway] failed to add stop reaction", {
+    console.error("[gatekeeper] failed to add stop reaction", {
       eventId: params.eventId,
       err: String(err)
     });
@@ -471,7 +471,7 @@ async function triggerReactionWorkflow(
     });
   } catch (err) {
     if (isInstanceExistsError(err)) return; // duplicate delivery — already running
-    console.error("[gateway] failed to start reaction workflow", {
+    console.error("[gatekeeper] failed to start reaction workflow", {
       eventId: params.eventId,
       err: String(err)
     });
@@ -499,10 +499,10 @@ export function _resetAnchorCacheForTest(): void {
 }
 
 /**
- * Isolate-level memo of the gateway's public origin (the JWT `iss` + `jku` host
+ * Isolate-level memo of the gatekeeper's public origin (the JWT `iss` + `jku` host
  * for remote agents). Discovered from the first *signature-verified* Slack
  * request and persisted to D1 once per isolate, so the Message Workflow (which
- * has no `Request` in scope) can read it when signing gateway tokens. Resets to
+ * has no `Request` in scope) can read it when signing gatekeeper tokens. Resets to
  * null on cold start (new deploy, domain change), triggering a fresh write.
  */
 let cachedPublicUrl: string | null = null;
@@ -513,7 +513,7 @@ export function _resetPublicUrlCacheForTest(): void {
 }
 
 /**
- * Persist the gateway's public origin, derived from a request that has already
+ * Persist the gatekeeper's public origin, derived from a request that has already
  * passed Slack signature verification — so an unauthenticated caller can never
  * set or poison this trust anchor. Cheap after the first write: the isolate memo
  * short-circuits every subsequent request.
@@ -549,13 +549,13 @@ export async function guardTeamId(
   if (cachedAnchorTeamId === null) {
     // Anchor not yet pinned — bootstrap grace; reconcile will set it on its next run.
     console.log(
-      "[gateway] team_id anchor not yet set — skipping guard (bootstrap grace)"
+      "[gatekeeper] team_id anchor not yet set — skipping guard (bootstrap grace)"
     );
     return null;
   }
 
   if (eventTeamId !== cachedAnchorTeamId) {
-    console.error("[gateway] team_id mismatch — rejecting event", {
+    console.error("[gatekeeper] team_id mismatch — rejecting event", {
       eventTeamId,
       anchor: cachedAnchorTeamId
     });
@@ -566,7 +566,7 @@ export async function guardTeamId(
 }
 
 // ---------------------------------------------------------------------------
-// Entry point — called by the gateway fetch handler
+// Entry point — called by the gatekeeper fetch handler
 // ---------------------------------------------------------------------------
 
 /**
@@ -595,7 +595,7 @@ export async function handleSlackEvent(
     throw err;
   }
 
-  // Signature verified above — safe to record the gateway's public origin now.
+  // Signature verified above — safe to record the gatekeeper's public origin now.
   await discoverPublicUrl(request);
 
   const payload = parseSlackWebhookBody(rawBody, { headers: request.headers });
@@ -603,7 +603,7 @@ export async function handleSlackEvent(
 
   switch (classification.kind) {
     case "challenge":
-      console.log("[gateway] url_verification challenge");
+      console.log("[gatekeeper] url_verification challenge");
       return Response.json({ challenge: classification.challenge });
 
     case "message": {
@@ -624,7 +624,7 @@ export async function handleSlackEvent(
               : base.text
           });
           if (targets.length === 0) {
-            console.log("[gateway] no agent woken — staying silent", {
+            console.log("[gatekeeper] no agent woken — staying silent", {
               eventId: base.eventId,
               channelId: base.channelId
             });
@@ -656,7 +656,7 @@ export async function handleSlackEvent(
       const guardResponse = await guardTeamId(classification.params.teamId);
       if (guardResponse) return guardResponse;
       const params = classification.params;
-      // The gateway pre-adds the 🛑 itself, which fires a reaction_added for the
+      // The gatekeeper pre-adds the 🛑 itself, which fires a reaction_added for the
       // bot. Filter it here (getBotUserId is cached) so we don't spin a workflow
       // — and never self-cancel — on our own reaction. Off-path so the ack is
       // never delayed; the CancelWorkflow dedupes Slack retries by event_id.
@@ -671,14 +671,16 @@ export async function handleSlackEvent(
     }
 
     case "ignore":
-      console.log("[gateway] event ignored", { reason: classification.reason });
+      console.log("[gatekeeper] event ignored", {
+        reason: classification.reason
+      });
       return OK();
 
     // Malformed enough that acking 200 would hide it. Slack retries a non-2xx up
     // to 3×, but the defect is deterministic so those also fail and the delivery
     // surfaces in the app dashboard — which is the point.
     case "invalid":
-      console.warn("[gateway] event rejected", {
+      console.warn("[gatekeeper] event rejected", {
         reason: classification.reason
       });
       return new Response("Bad Request", { status: 400 });

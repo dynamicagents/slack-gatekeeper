@@ -39,7 +39,7 @@ export interface RegisterAgentInput {
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
-  /** Gateway-hosted, admin-generated avatar URL (never sourced from the AgentCard). */
+  /** Gatekeeper-hosted, admin-generated avatar URL (never sourced from the AgentCard). */
   iconUrl?: string | null;
 }
 
@@ -67,7 +67,7 @@ export interface AgentChannelEntry {
  * `displayName` is sanitized here, at the write, so no unsafe name can enter the
  * table in the first place — see {@link sanitizeDisplayName}. This is the last
  * writer in the path, and the admin tools reject a *human-chosen* name outright
- * rather than silently rewriting it; sanitizing here covers the names the gateway
+ * rather than silently rewriting it; sanitizing here covers the names the gatekeeper
  * does not control (a remote agent's own A2A card).
  */
 export async function registerAgent(

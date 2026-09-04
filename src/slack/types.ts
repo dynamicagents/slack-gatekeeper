@@ -44,7 +44,7 @@ export interface LifecycleWorkflowParams {
  * CancelWorkflow input — a human tapped the 🛑 stop reaction on a trigger
  * message. Carries the reacted message's coordinates (`channelId` + `ts`) so the
  * workflow can look up that message's pending fan-out, plus the reactor (`userId`,
- * so the gateway's own initial 🛑 can be filtered out).
+ * so the gatekeeper's own initial 🛑 can be filtered out).
  */
 export interface CancelWorkflowParams {
   /** The reaction event's own Slack `event_id` (dedupe key for Slack retries). */

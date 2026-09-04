@@ -1,4 +1,4 @@
-# looping-gateway
+# slack-gatekeeper
 
 > A Cloudflare Workers template for building Slack-anchored multi-agent systems — receive Slack messages, route them to the right AI agent, and loop responses back.
 
@@ -65,14 +65,14 @@ cp .env.example .env
 
 `wrangler dev` loads variables from `.env` locally. Keep this file uncommitted.
 
-### 6. Generate gateway identity key
+### 6. Generate gatekeeper identity key
 
 ```bash
 npm run keygen
 ```
 
 This prints a private JWK and ready-to-paste commands for both routes.
-Set the printed key as `GATEWAY_JWT_PRIVATE_KEY` in `.env` for local dev, and
+Set the printed key as `GATEKEEPER_JWT_PRIVATE_KEY` in `.env` for local dev, and
 deploy it with `wrangler deploy --secrets-file .env` or `wrangler secret put`.
 
 ### 7. Deploy
@@ -81,19 +81,19 @@ deploy it with `wrangler deploy --secrets-file .env` or `wrangler secret put`.
 npx wrangler deploy
 ```
 
-Your worker URL will be: `https://looping-gateway.<your-subdomain>.workers.dev`
+Your worker URL will be: `https://slack-gatekeeper.<your-subdomain>.workers.dev`
 
 ### 8. Finish Slack configuration
 
 In your Slack App settings, go to **Event Subscriptions → Request URL** and paste:
 
 ```
-https://looping-gateway.<your-subdomain>.workers.dev/slack/events
+https://slack-gatekeeper.<your-subdomain>.workers.dev/slack/events
 ```
 
 Save the changes. Slack will verify the URL automatically.
 
-Your gateway is live. Mention the bot in a channel (`@your-bot`) or send it a DM.
+Your gatekeeper is live. Mention the bot in a channel (`@your-bot`) or send it a DM.
 
 ---
 
@@ -126,14 +126,14 @@ You first need a domain managed by Cloudflare. Once you have one, create a named
 **One-time setup:**
 
 ```bash
-npx wrangler tunnel create looping-gateway-dev
-npx wrangler tunnel route dns looping-gateway-dev some-random-string.yourdomain.com
+npx wrangler tunnel create slack-gatekeeper-dev
+npx wrangler tunnel route dns slack-gatekeeper-dev some-random-string.yourdomain.com
 ```
 
 **Daily dev** (single command — tunnel starts alongside the dev server):
 
 ```bash
-npx wrangler dev --tunnel --tunnel-name looping-gateway-dev
+npx wrangler dev --tunnel --tunnel-name slack-gatekeeper-dev
 ```
 
 > **Prerequisite:** your domain must be added to your Cloudflare account (free).
@@ -146,7 +146,7 @@ Use `https://some-random-string.yourdomain.com/slack/events` as your Slack Reque
 
 ```
 src/
-  server.ts       # Gateway: Slack webhook handling, AI handler, scheduling
+  server.ts       # Gatekeeper: Slack webhook handling, AI handler, scheduling
 
 wrangler.jsonc    # Worker name, Durable Object bindings, AI binding
 package.json      # Dependencies and scripts
@@ -163,19 +163,19 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 
 ---
 
-## Building an agent for this gateway
+## Building an agent for this gatekeeper
 
 Use **[Looping-AI/looping-starter](https://github.com/Looping-AI/looping-starter)** — a working, deployable agent on Cloudflare Workers.
 
-It ships the whole zero-trust A2A edge (gateway-JWT verification, AgentCard signing, JSON-RPC routing, the push-notification callback) via [`@loopingai/core`](https://github.com/Looping-AI/looping-core), so what you write is your agent's identity, its capabilities, and its config. `npm run agent:new <tenant>` scaffolds one.
+It ships the whole zero-trust A2A edge (gatekeeper-JWT verification, AgentCard signing, JSON-RPC routing, the push-notification callback) via [`@loopingai/core`](https://github.com/Looping-AI/looping-core), so what you write is your agent's identity, its capabilities, and its config. `npm run agent:new <tenant>` scaffolds one.
 
-Register it with this gateway using its **endpoint** and its **tenant id** — several agents share one endpoint and are told apart by the tenant claim in the token this gateway mints. See [`test/auth/wire-contract.spec.ts`](test/auth/wire-contract.spec.ts) for the exact contract the two sides share.
+Register it with this gatekeeper using its **endpoint** and its **tenant id** — several agents share one endpoint and are told apart by the tenant claim in the token this gatekeeper mints. See [`test/auth/wire-contract.spec.ts`](test/auth/wire-contract.spec.ts) for the exact contract the two sides share.
 
 ---
 
 ## Workspace invariant — one Worker, one Slack workspace
 
-A deployed instance of this gateway is **permanently bound to a single Slack workspace** (team ID). On the first `reconcile()` run, the bot's workspace is pinned as a write-once anchor in D1. Every subsequent reconcile, and every inbound Slack event, asserts this anchor. A mismatch causes an immediate abort — no registry writes occur.
+A deployed instance of this gatekeeper is **permanently bound to a single Slack workspace** (team ID). On the first `reconcile()` run, the bot's workspace is pinned as a write-once anchor in D1. Every subsequent reconcile, and every inbound Slack event, asserts this anchor. A mismatch causes an immediate abort — no registry writes occur.
 
 This is intentional. Every channel ID, user ID, primary-owner flag, and auth assumption stored in D1 and Vectorize is workspace-specific. Swapping the bot token to a different workspace while reusing the same Worker state would silently corrupt all of that data.
 
@@ -203,7 +203,7 @@ PRs are welcome. To contribute:
 
 ## Feedback
 
-Found a bug, have a question, or want to suggest a feature? [Open an issue](https://github.com/Looping-AI/looping-gateway/issues) — all feedback is welcome.
+Found a bug, have a question, or want to suggest a feature? [Open an issue](https://github.com/Looping-AI/slack-gatekeeper/issues) — all feedback is welcome.
 
 ---
 

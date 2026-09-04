@@ -177,7 +177,7 @@ describe("Worker routing", () => {
     });
   });
 
-  it("serves the gateway public JWKS at /.well-known/jwks.json", async () => {
+  it("serves the gatekeeper public JWKS at /.well-known/jwks.json", async () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
       new Request("http://localhost/.well-known/jwks.json"),

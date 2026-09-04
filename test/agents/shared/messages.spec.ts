@@ -22,7 +22,7 @@ const ctx: TurnContext = {
 
 describe("userSessionMessage", () => {
   it("produces a user-role message storing the text verbatim", () => {
-    // The Gateway already applied any <turn> wrapper; the loop stores as-is.
+    // The Gatekeeper already applied any <turn> wrapper; the loop stores as-is.
     const m = userSessionMessage("hello");
     expect(m.role).toBe("user");
     expect(m.parts).toHaveLength(1);
