@@ -1,6 +1,6 @@
 import { handleSlackEvent } from "@/slack-webhook-handler";
 import { handleSlackInteractivity } from "@/slack-interactivity-handler";
-import { JWKS_PATH } from "@loopingai/a2a-protocol";
+import { JWKS_PATH } from "@dynamicagents/g2a-protocol";
 import { getPublicJwks } from "@/auth/agent-outbound";
 import {
   handleRemoteAgentNotification,

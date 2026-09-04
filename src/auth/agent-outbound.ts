@@ -2,10 +2,10 @@ import { SignJWT, importJWK, type JWK } from "jose";
 import { env } from "cloudflare:workers";
 import {
   A2A_JWS_ALG,
-  gatewayTokenClaims,
+  gatekeeperTokenClaims,
   jwksUrl,
   type RemoteIdentity
-} from "@loopingai/a2a-protocol";
+} from "@dynamicagents/g2a-protocol";
 
 /**
  * Gateway outbound identity for remote (custom) A2A agents.
@@ -23,25 +23,25 @@ import {
  */
 
 /**
- * The claim names and the algorithm come from `@loopingai/a2a-protocol`.
+ * The claim names and the algorithm come from `@dynamicagents/g2a-protocol`.
  *
- * They used to be declared here and again in `@loopingai/core`, each with a
+ * They used to be declared here and again in `@dynamicagents/core`, each with a
  * comment saying it must match the other, because the gateway deliberately does
  * **not** import core — core is the agent runtime, and a gateway is not an
  * agent. That comment was the whole mechanism, and it failed: one side moved to
- * the `loopingai.org` namespace while the other still minted
+ * the `dynamicagents.dev` namespace while the other still minted
  * `https://looping.ai/tenant`, the remote read an empty tenant, and every
  * request 401'd with both builds green.
  *
  * The protocol package is the shared artifact that rule permits — zero
  * dependencies, no crypto, no agent runtime, so depending on it commits this
  * gateway to nothing. The rule itself is unchanged and still absolute: **the
- * gateway must never import `@loopingai/core`.**
+ * gateway must never import `@dynamicagents/core`.**
  *
  * Re-exported so this module stays the place the rest of the gateway imports
  * them from.
  */
-export { IDENTITY_CLAIM, TENANT_CLAIM } from "@loopingai/a2a-protocol";
+export { IDENTITY_CLAIM, TENANT_CLAIM } from "@dynamicagents/g2a-protocol";
 
 /** Token lifetime — short, since each dispatch mints a fresh one. */
 const TOKEN_TTL_SECONDS = 120;
@@ -53,14 +53,14 @@ const TOKEN_TTL_SECONDS = 120;
  *
  * From the protocol package, where it is the **minted** half of the pair: every
  * field required, because an issuer knows all of them. The remote parses the
- * same claim into a `GatewayIdentity` with every field optional, since a
+ * same claim into a `GatekeeperIdentity` with every field optional, since a
  * signature proves a payload was not altered and never that it was well-formed.
  * That asymmetry is asserted at the type level over there, so this staying
  * assignable to what the remote accepts is checked rather than assumed.
  */
 export type { RemoteIdentity };
 
-interface SignGatewayTokenArgs {
+interface SignGatekeeperTokenArgs {
   /**
    * Intended recipient — the remote agent's **exact endpoint**, not its origin.
    * See `audienceFor` in {@link file://../a2a/endpoint.ts}.
@@ -115,8 +115,8 @@ function privateJwk(): JWK & { kid: string } {
  * identity and tenant claims. The remote agent verifies it against the
  * gateway's public JWKS.
  */
-export async function signGatewayToken(
-  args: SignGatewayTokenArgs
+export async function signGatekeeperToken(
+  args: SignGatekeeperTokenArgs
 ): Promise<string> {
   const jwk = privateJwk();
   const { issuer } = args;
@@ -135,7 +135,7 @@ export async function signGatewayToken(
     // The claim keys are spelled by the package that owns them rather than
     // here, so the shape the remote parses and the shape this builds cannot
     // drift apart field by field.
-    new SignJWT(gatewayTokenClaims(args.identity, args.tenant))
+    new SignJWT(gatekeeperTokenClaims(args.identity, args.tenant))
       // jku (RFC 7515 §4.1.2): the URL of our public JWKS, embedded in the token so
       // remote agents can locate the verification key without separate configuration.
       .setProtectedHeader({

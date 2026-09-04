@@ -1,5 +1,5 @@
 {
-  "name": "looping-gateway",
+  "name": "slack-gatekeeper",
   "version": "1.0.0",
   "private": true,
   "description": "Slack Agent Template: Cloudflare hosted, Slack-anchored multi-agent gateway with A2A routing",
@@ -33,13 +33,13 @@
   "dependencies": {
     "@a2a-js/sdk": "^1.0.1",
     "@chat-adapter/slack": "^4.37.0",
-    "@loopingai/a2a-protocol": "^0.2.1",
+    "@dynamicagents/g2a-protocol": "^0.3.0",
     "agents": "^0.20.1",
     "ai": "^7.0.62",
     "chat": "^4.37.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.8",
-    "slackify-markdown": "github:Looping-AI/slackify-markdown#5.0.0",
+    "slackify-markdown": "github:dynamicagents/slackify-markdown#5.0.0",
     "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },

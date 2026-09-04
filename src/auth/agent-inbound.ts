@@ -5,7 +5,7 @@ import {
   type JWK,
   type JWTPayload
 } from "jose";
-import { A2A_JWS_ALG } from "@loopingai/a2a-protocol";
+import { A2A_JWS_ALG } from "@dynamicagents/g2a-protocol";
 import { resolveSigningKey } from "@/a2a/card-verify";
 
 /** The pinned signing identity of a remote agent, from its registry row. */

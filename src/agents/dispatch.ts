@@ -5,7 +5,10 @@ import {
 } from "@a2a-js/sdk";
 import { buildUserAuthContext, type UserAuthContext } from "@/auth";
 import { env } from "cloudflare:workers";
-import { signGatewayToken, type RemoteIdentity } from "@/auth/agent-outbound";
+import {
+  signGatekeeperToken,
+  type RemoteIdentity
+} from "@/auth/agent-outbound";
 import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import { resumeFromInput } from "@/db/models/agent-tasks";
@@ -397,7 +400,7 @@ export async function dispatchToAgent(
           "Ensure the worker has received at least one Slack event before registering remote agents."
       );
     }
-    const gatewayToken = await signGatewayToken({
+    const gatewayToken = await signGatekeeperToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity,
@@ -595,7 +598,7 @@ async function sendTaskContinuation(
       tenantId: agent.tenantId,
       workspaceId: agent.workspaceId
     };
-    const gatewayToken = await signGatewayToken({
+    const gatewayToken = await signGatekeeperToken({
       audience: audienceFor(agent.a2aEndpoint),
       issuer,
       identity: buildRemoteIdentity(ref),
@@ -775,7 +778,7 @@ export async function cancelAgentTask(
       "Gateway public URL has not been discovered yet; cannot sign a cancel request."
     );
   }
-  const gatewayToken = await signGatewayToken({
+  const gatewayToken = await signGatekeeperToken({
     audience: audienceFor(agent.a2aEndpoint),
     issuer,
     identity: buildRemoteIdentity(agent),
