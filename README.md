@@ -165,9 +165,9 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 
 ## Building an agent for this gatekeeper
 
-Use **[dynamicagents/da-starter](https://github.com/dynamicagents/da-starter)** — a working, deployable agent on Cloudflare Workers.
+Use **[dynamicagents/starter](https://github.com/dynamicagents/starter)** — a working, deployable agent on Cloudflare Workers.
 
-It ships the whole zero-trust A2A edge (gatekeeper-JWT verification, AgentCard signing, JSON-RPC routing, the push-notification callback) via [`@dynamicagents/core`](https://github.com/dynamicagents/da-core), so what you write is your agent's identity, its capabilities, and its config. `npm run agent:new <tenant>` scaffolds one.
+It ships the whole zero-trust A2A edge (gatekeeper-JWT verification, AgentCard signing, JSON-RPC routing, the push-notification callback) via [`@dynamicagents/core`](https://github.com/dynamicagents/core), so what you write is your agent's identity, its capabilities, and its config. `npm run agent:new <tenant>` scaffolds one.
 
 Register it with this gatekeeper using its **endpoint** and its **tenant id** — several agents share one endpoint and are told apart by the tenant claim in the token this gatekeeper mints. See [`test/auth/wire-contract.spec.ts`](test/auth/wire-contract.spec.ts) for the exact contract the two sides share.
 
