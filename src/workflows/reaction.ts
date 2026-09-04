@@ -20,7 +20,7 @@ export {
 } from "@/workflows/reaction-helpers";
 
 /**
- * How long the first wait runs before the gateway speaks up about deliveries it
+ * How long the first wait runs before the gatekeeper speaks up about deliveries it
  * explicitly rejected. Derived from when the last retry is expected, not chosen:
  * a remote's push callback is a Workflow step inheriting Cloudflare's default
  * retry policy (`limit: 5, delay: 10s, backoff: exponential`), so its ladder is
@@ -82,7 +82,7 @@ const TASK_DEADLINE_LABEL =
 
 /** Notice posted when a task burned its whole processing budget without replying. */
 function taskTimedOutText(agentName: string): string {
-  return `⏱️ *Agent ${agentName}* didn't reply within the ${TASK_DEADLINE_LABEL} limit, so the gateway stopped it. Any later reply will be discarded.`;
+  return `⏱️ *Agent ${agentName}* didn't reply within the ${TASK_DEADLINE_LABEL} limit, so the gatekeeper stopped it. Any later reply will be discarded.`;
 }
 
 /**
@@ -100,7 +100,7 @@ async function surfaceRejectedDeliveries(eventId: string): Promise<void> {
     for (const row of pending) {
       if (!row.lastError) continue;
       try {
-        // App branding (null) — this is a gateway error notice, not an agent reply.
+        // App branding (null) — this is a gatekeeper error notice, not an agent reply.
         await postReply(
           row.channelId,
           row.replyThreadTs,
@@ -161,7 +161,7 @@ async function cancelPendingTasks(eventId: string): Promise<void> {
           reason: "task-timeout",
           actorUserId: null
         });
-        // App branding (null) — a gateway notice, not an agent reply. One line per
+        // App branding (null) — a gatekeeper notice, not an agent reply. One line per
         // agent whatever the cancel outcome: "we stopped it" and "it refused to
         // stop" look identical from the thread, since either way no reply lands.
         await postReply(

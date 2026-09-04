@@ -160,7 +160,7 @@ describe("cancelTaskRow", () => {
     expect((await getAgentTaskByToken("t4"))?.status).toBe("canceled");
   });
 
-  it("records the same canceled status when the gateway times the task out", async () => {
+  it("records the same canceled status when the gatekeeper times the task out", async () => {
     stubCancelRemote((id) => ({ jsonrpc: "2.0", id, result: canceledTask }));
     await seedTask("t6", "task-9");
     const row = await getAgentTaskByToken("t6");

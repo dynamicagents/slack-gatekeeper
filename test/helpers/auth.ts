@@ -63,8 +63,8 @@ export async function signJwt(
     .sign(key.privateKey);
 }
 
-/** Imports the gateway's own public Ed25519 key from the public JWKS. */
-export async function importGatewayPublicKey() {
+/** Imports the gatekeeper's own public Ed25519 key from the public JWKS. */
+export async function importGatekeeperPublicKey() {
   const { keys } = getPublicJwks();
   return importJWK(keys[0], "EdDSA");
 }

@@ -113,7 +113,7 @@ export class AdminAgentExecutor implements AgentExecutor {
     const turnContext = await this.applyPendingApproval(requestContext);
     await executeAgentTurn(turnContext, eventBus, {
       models: this.models,
-      // The dispatch token is the A2A messageId, and the gateway records a 🛑
+      // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
       // Terse: this rides on a `failed` task, so the delivery boundary already
@@ -166,7 +166,7 @@ export class AdminAgentExecutor implements AgentExecutor {
   };
 
   /**
-   * The card verifier for one workspace, bound to this gateway's signing identity.
+   * The card verifier for one workspace, bound to this gatekeeper's signing identity.
    *
    * Shared by the tools that verify a card during a turn and by the approval resume
    * below, which re-verifies at the moment a human clicks Approve — one definition,
@@ -182,7 +182,7 @@ export class AdminAgentExecutor implements AgentExecutor {
       const issuer = await getPublicUrl();
       if (!issuer) {
         throw new Error(
-          "Gateway public URL has not been discovered yet. " +
+          "Gatekeeper public URL has not been discovered yet. " +
             "Ensure the worker has received at least one Slack event " +
             "before registering remote agents."
         );

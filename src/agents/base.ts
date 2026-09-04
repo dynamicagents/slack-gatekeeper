@@ -17,7 +17,7 @@ const SWEEP_MARKER_KEY = "a2a:swept-at";
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Base for in-repo agents. Each agent DO *is* its own A2A server: the gateway
+ * Base for in-repo agents. Each agent DO *is* its own A2A server: the gatekeeper
  * reaches it via `stub.fetch`, and `fetch` here answers the A2A protocol
  * (card discovery + JSON-RPC) through the SDK's `DefaultRequestHandler`.
  *

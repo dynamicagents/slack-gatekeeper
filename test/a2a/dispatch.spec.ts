@@ -20,7 +20,7 @@ import {
 import { slackTsToIso } from "@/agents/shared/messages";
 import type { UserAuthContext } from "@/auth";
 import { IDENTITY_CLAIM } from "@/auth/agent-outbound";
-import { importGatewayPublicKey } from "../helpers/auth";
+import { importGatekeeperPublicKey } from "../helpers/auth";
 import { buildAgentCard } from "@/a2a/card";
 import { HITL_TIMEOUT_TYPE } from "@/a2a/hitl";
 import { dataPart, partsText, textPart } from "@/a2a/parts";
@@ -61,7 +61,7 @@ interface RemotePost {
   tenant: string | undefined;
 }
 
-/** A `chat.postMessage` the gateway sent to the thread (e.g. a failure notice). */
+/** A `chat.postMessage` the gatekeeper sent to the thread (e.g. a failure notice). */
 interface SlackNotice {
   channel: string;
   text: string;
@@ -87,7 +87,7 @@ async function captureSlackNotice(
 /**
  * Record a captured A2A POST. The message arrives as protobuf-JSON, so it is
  * decoded through the generated codec — the specs then assert against the same
- * typed shape the gateway sent.
+ * typed shape the gatekeeper sent.
  */
 async function readRpc(
   request: Request,
@@ -240,7 +240,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   _resetIssuerCacheForTest();
-  await setPublicUrl("https://gateway.test");
+  await setPublicUrl("https://gatekeeper.test");
   await setAllowedRemoteAgentDomains([]);
 });
 
@@ -385,7 +385,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 
   it("namespaces remote identity and context per logical agent instance", async () => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
     stubRemote(posts);
@@ -463,7 +463,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
       })
     ).toBe(posts[0].message.messageId);
     // No structured provenance on the wire — who/where/when is inlined into the
-    // turn text by the Gateway. Metadata carries only routing extras.
+    // turn text by the Gatekeeper. Metadata carries only routing extras.
     expect(posts[0].message.metadata).toMatchObject({
       agentKind: "remote",
       workspaceId: 7
@@ -482,13 +482,13 @@ describe("dispatchToAgent (local Durable Object)", () => {
     const tokenA = posts[0].authorization?.split(" ")[1] ?? "";
     const tokenB = posts[1].authorization?.split(" ")[1] ?? "";
     const [{ payload: payloadA }, { payload: payloadB }] = await Promise.all([
-      jwtVerify(tokenA, await importGatewayPublicKey(), {
-        issuer: "https://gateway.test",
+      jwtVerify(tokenA, await importGatekeeperPublicKey(), {
+        issuer: "https://gatekeeper.test",
         audience: ENDPOINT,
         algorithms: ["EdDSA"]
       }),
-      jwtVerify(tokenB, await importGatewayPublicKey(), {
-        issuer: "https://gateway.test",
+      jwtVerify(tokenB, await importGatekeeperPublicKey(), {
+        issuer: "https://gatekeeper.test",
         audience: ENDPOINT,
         algorithms: ["EdDSA"]
       })
@@ -511,7 +511,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 
   it("returns contract_violation when required Task acceptance/id is missing", async () => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
     stubRemoteContractViolation(posts);
@@ -575,7 +575,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
   it("reports a version mismatch specifically, without throwing", async () => {
     // The migration case: an agent still on A2A v0.3 must be named as such,
     // not retried until it degrades into the generic "unreachable" notice.
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
     stubRemoteRpcError(-32009, posts);
@@ -592,7 +592,7 @@ describe("dispatchToAgent (local Durable Object)", () => {
   });
 
   it("says a push-less agent cannot be used at all, not 'try again'", async () => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     stubRemoteRpcError(-32003, []);
 
@@ -601,12 +601,12 @@ describe("dispatchToAgent (local Durable Object)", () => {
     expect(result.kind).toBe("error_reply");
     if (result.kind === "error_reply") {
       expect(result.text).toContain("push notifications");
-      expect(result.text).toContain("can't be used with the gateway");
+      expect(result.text).toContain("can't be used with the gatekeeper");
     }
   });
 
   it("throws on -32603 so the workflow step still retries", async () => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     stubRemoteRpcError(-32603, []);
 
@@ -643,7 +643,7 @@ describe("buildAgentInstanceKey", () => {
  */
 describe("dispatchToAgent (tenant)", () => {
   const dispatchAs = async (tenantId: string, posts: RemotePost[]) => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     stubRemote(posts);
     return dispatchToAgent(
@@ -680,8 +680,8 @@ describe("dispatchToAgent (tenant)", () => {
     expect(posts.at(-1)?.tenant).toBe("proactive");
   });
 
-  it("binds the same tenant into the gateway token", async () => {
-    // The body says which agent; the token says which agent the gateway
+  it("binds the same tenant into the gatekeeper token", async () => {
+    // The body says which agent; the token says which agent the gatekeeper
     // authorized. If these could disagree, `tenant` would be an unauthenticated
     // field and a token for one agent would work against any sibling — the
     // remote compares them precisely because both share one `aud`.
@@ -719,7 +719,7 @@ describe("dispatchToAgent (tenant)", () => {
     // exercised at its default value is not a convention that has been tested.
     const custom = "https://remote.example.com/api/v2/agent";
     const posts: RemotePost[] = [];
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     stubRemote(posts);
 
@@ -762,7 +762,7 @@ describe("dispatchToAgent (tenant)", () => {
     // — and it cost a round trip on every turn.
     const gets: string[] = [];
     const posts: RemotePost[] = [];
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     stubRemote(posts, undefined, gets);
 
@@ -797,8 +797,8 @@ describe("dispatchToAgent (tenant)", () => {
   it("dispatches a custom agent over HTTP even when its tenant names a built-in", async () => {
     // The escalation guard. `tenantId` is typed by an org admin at
     // registration, so if it alone decided local-vs-remote, registering a
-    // remote agent as tenant `admin` would route the call into this gateway's
-    // own AdminAgent Durable Object — with the gateway's own tools and
+    // remote agent as tenant `admin` would route the call into this gatekeeper's
+    // own AdminAgent Durable Object — with the gatekeeper's own tools and
     // permissions. `kind` decides that, and `kind` is never admin-supplied.
     const posts: RemotePost[] = [];
     const result = await dispatchAs("admin", posts);
@@ -830,8 +830,8 @@ describe("cancelAgentTask", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("signs a gateway JWT and cancels a remote task", async () => {
-    await setPublicUrl("https://gateway.test");
+  it("signs a gatekeeper JWT and cancels a remote task", async () => {
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
     const posts: RemotePost[] = [];
     stubRemote(posts);
@@ -852,7 +852,7 @@ describe("cancelAgentTask", () => {
 });
 
 // The TTL-timeout continuation: when a HITL prompt expires with no answer, the
-// gateway continues the parked task with a HITL_TIMEOUT DataPart so the agent can
+// gatekeeper continues the parked task with a HITL_TIMEOUT DataPart so the agent can
 // finalize, authorizing as the zero-permission SYSTEM_CALLER. This exercises the
 // remote branch of sendTaskContinuation (custom-agent HTTP), which the human-answer
 // path (resumeAgentTask) shares — the timeout branch was previously uncovered.
@@ -905,7 +905,7 @@ describe("timeoutAgentTask (remote continuation)", () => {
   }
 
   beforeEach(async () => {
-    await setPublicUrl("https://gateway.test");
+    await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
   });
 
@@ -918,8 +918,8 @@ describe("timeoutAgentTask (remote continuation)", () => {
 
     expect(posts).toHaveLength(1);
     const msg = posts[0].message;
-    // Authorized as the signed gateway identity (SYSTEM_CALLER never crosses the
-    // remote boundary — only the gateway-agent JWT does).
+    // Authorized as the signed gatekeeper identity (SYSTEM_CALLER never crosses the
+    // remote boundary — only the gatekeeper-agent JWT does).
     expect(posts[0].authorization?.startsWith("Bearer ")).toBe(true);
     // A2A multi-turn: continue the same task on the same thread of conversation.
     expect(msg.taskId).toBe(TASK_ID);

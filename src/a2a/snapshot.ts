@@ -7,7 +7,7 @@ import {
 import { partsText } from "@/a2a/parts";
 
 /**
- * The gateway's normalized view of "where a task stands right now".
+ * The gatekeeper's normalized view of "where a task stands right now".
  *
  * In A2A v1.0 a push notification carries a {@link StreamResponse} — the same
  * envelope the streaming transports use — rather than the full `Task` snapshot
@@ -18,7 +18,7 @@ import { partsText } from "@/a2a/parts";
  * they are flattened into the shape below and every downstream consumer works
  * off it instead of branching on the envelope.
  *
- * Artifact updates and stand-alone messages produce no snapshot: the gateway
+ * Artifact updates and stand-alone messages produce no snapshot: the gatekeeper
  * delivers replies from the status message, and a message with no task
  * association can't be correlated to a pending `agent_tasks` row.
  */

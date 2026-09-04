@@ -349,7 +349,7 @@ describe("verifyRemoteAgentEndpoint", () => {
   it("resolves an endpoint on a path nobody supplied", async () => {
     // The whole point. The admin gives a host and a tenant; the agent's card
     // says where it listens. `/a2a` is a default some agents happen to use, not
-    // something this gateway may assume — a custom agent picks its own path and
+    // something this gatekeeper may assume — a custom agent picks its own path and
     // both the POST target and the `aud` have to follow it.
     const key = await makeKey("k1");
     stubbedKeys = [key.publicJwk];
@@ -374,7 +374,7 @@ describe("verifyRemoteAgentEndpoint", () => {
 
   it("picks the JSONRPC interface rather than the first one", async () => {
     // `supportedInterfaces` is an ordered *preference* list and may advertise a
-    // transport this gateway does not speak first. Indexing [0] would take the
+    // transport this gatekeeper does not speak first. Indexing [0] would take the
     // gRPC address and try to POST JSON-RPC at it.
     const key = await makeKey("k1");
     stubbedKeys = [key.publicJwk];
@@ -445,7 +445,7 @@ describe("verifyRemoteAgentEndpoint", () => {
     // The card decides where we POST, so it must not be able to send us
     // somewhere its signature says nothing about. We pinned *this* origin's
     // key; honouring a cross-origin interface would let an approved agent
-    // redirect the gateway's dispatches at a host it never authenticated.
+    // redirect the gatekeeper's dispatches at a host it never authenticated.
     const key = await makeKey("k1");
     stubbedKeys = [key.publicJwk];
     stubHost({

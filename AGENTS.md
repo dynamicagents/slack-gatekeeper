@@ -29,7 +29,7 @@ redacts it from all output.
 | Command                                                   | Purpose                                          |
 | --------------------------------------------------------- | ------------------------------------------------ |
 | `npm run cf -- verify`                                    | Check the API token                              |
-| `npm run cf -- logs --worker looping-gateway --since 1h`  | Historical Worker logs (Observability), digest   |
+| `npm run cf -- logs --worker slack-gatekeeper --since 1h` | Historical Worker logs (Observability), digest   |
 | `npm run cf -- logs --level error --grep MessageWorkflow` | Filter logs by level / message substring         |
 | `npm run cf -- wf`                                        | List Workflow definitions                        |
 | `npm run cf -- wf message-workflow [instanceId]`          | Workflow instances / one instance's steps        |

@@ -168,7 +168,7 @@ export async function getBotUserId(): Promise<string | null> {
  * render the message under a custom name (the agent's display name) — requires
  * the `chat:write.customize` scope; a null/empty value is omitted so the default
  * app name is used. Stored agent names/display names are already trimmed at the
- * model layer, so no trimming happens here. The gateway owns the bot token, so
+ * model layer, so no trimming happens here. The gatekeeper owns the bot token, so
  * all agent replies flow through here.
  */
 export async function postReply(

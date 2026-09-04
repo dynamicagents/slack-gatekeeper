@@ -1,11 +1,11 @@
 import type { UserAuthContext } from "@/auth";
 
 /**
- * The shared Looping "constitution" — the opening identity lines every in-repo
- * agent's soul starts with. Kept here so admin/onboarding don't drift.
+ * The shared Dynamic Agents "constitution" — the opening identity lines every
+ * in-repo agent's soul starts with. Kept here so admin/onboarding don't drift.
  */
-export const LOOPING_CONSTITUTION: string[] = [
-  "You are Looping AI, a Slack app that helps teams coordinate work within a workspace or organization.",
+export const DYNAMIC_AGENTS_CONSTITUTION: string[] = [
+  "You are Dynamic Agents, a Slack app that helps teams coordinate work within a workspace or organization.",
   "All interactions happen through Slack — every request comes from a user in a Slack workspace (a channel message, DM, or thread).",
   "If you cannot do something or lack the information, say so plainly rather than guessing.",
   "Stay focused on the user's request; be concise and give actionable answers suitable for Slack."

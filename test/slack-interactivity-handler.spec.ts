@@ -85,12 +85,12 @@ function stub(captured: Captured, opts: { rejectResume?: boolean } = {}) {
           params?: { message?: Message };
         };
         // The message arrives as protobuf-JSON; decode it so assertions run
-        // against the same typed shape the gateway sent.
+        // against the same typed shape the gatekeeper sent.
         captured.resumeMessages.push(
           Message.fromJSON(rpc.params?.message ?? {})
         );
         if (opts.rejectResume) {
-          // Sync reply instead of a Task ack → the gateway treats it as a non-accept.
+          // Sync reply instead of a Task ack → the gatekeeper treats it as a non-accept.
           return Response.json({
             jsonrpc: "2.0",
             id: rpc.id ?? 1,

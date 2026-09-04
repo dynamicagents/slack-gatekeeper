@@ -15,7 +15,7 @@ const taskKey = (taskId: string): string => `${TASK_PREFIX}${taskId}`;
 const SWEEP_PAGE_SIZE = 128;
 
 /**
- * One persisted task. `savedAt` is the gateway's own write timestamp rather than
+ * One persisted task. `savedAt` is the gatekeeper's own write timestamp rather than
  * the Task's `status.timestamp`, which the protocol makes optional — a task that
  * arrived without one would otherwise never become sweepable.
  */
@@ -66,7 +66,7 @@ export class DurableTaskStore implements TaskStore {
   }
 
   /**
-   * Unsupported: these DOs are reached only over `stub.fetch` from the gateway,
+   * Unsupported: these DOs are reached only over `stub.fetch` from the gatekeeper,
    * which sends `message/send` and nothing else, so `tasks/list` has no caller —
    * the same reasoning by which `serveA2A` rejects streaming outright.
    *

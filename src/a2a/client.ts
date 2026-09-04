@@ -24,7 +24,7 @@ import { sanitizeSlackText } from "@/util/slack-text";
  *   Local agents return a Task acceptance and deliver replies through a trusted
  *   in-process push sender.
  * - `remote` — a base URL; the card is discovered over real HTTP, every request
- *   carries the gateway identity JWT (`authToken`). Remote agents reply
+ *   carries the gatekeeper identity JWT (`authToken`). Remote agents reply
  *   *asynchronously* via push notification — {@link sendA2ARemote} only waits
  *   for the accept (a Task ack), never for generation.
  */
@@ -53,7 +53,7 @@ export interface A2ARemoteTarget {
  * Abort a remote *accept* that hangs. This only covers the initial handshake
  * (the remote must return a `submitted`/`working` Task immediately, A2A §7.2), not
  * generation — so it can be short. The reply itself arrives later via the
- * push-notification callback, so no gateway request ever blocks on the model.
+ * push-notification callback, so no gatekeeper request ever blocks on the model.
  */
 const ACCEPT_TIMEOUT_MS = 30_000;
 
@@ -61,7 +61,7 @@ const ACCEPT_TIMEOUT_MS = 30_000;
 const MAX_REPLY_CHARS = 16_000;
 
 /**
- * Build a `fetchImpl` for a remote target: injects the gateway JWT as a Bearer
+ * Build a `fetchImpl` for a remote target: injects the gatekeeper JWT as a Bearer
  * token on every request and enforces the short accept timeout. Reuses the same
  * `fetchImpl` override seam the local (DO stub) path uses.
  */
@@ -187,7 +187,7 @@ export async function sendA2ALocal(
  * accepted the turn — the initial `submitted` Task, carrying the real
  * SDK-assigned task id — instead of holding the request open until generation
  * finishes. The reply arrives later on the push-notification callback, so no
- * gateway request ever blocks on a model.
+ * gatekeeper request ever blocks on a model.
  *
  * `tenant` names which agent at the endpoint the turn is for. A host may serve
  * several over one endpoint, so the endpoint alone does not identify one, and
@@ -288,7 +288,7 @@ function acceptedTask(
 
 /**
  * Send one A2A message to a **remote** agent for asynchronous processing. The
- * gateway supplies a `pushNotificationConfig` (webhook URL + validation token);
+ * gatekeeper supplies a `pushNotificationConfig` (webhook URL + validation token);
  * the remote MUST return immediately with a `submitted`/`working` Task and later
  * POST the terminal Task back to the webhook. We only wait for — and return — the
  * accept, never the generation. If the remote response does not contain the
@@ -313,13 +313,13 @@ export async function sendA2ARemote(
 /**
  * Outcome of asking a remote agent to cancel a task (A2A `tasks/cancel`).
  * Cancellation is *attempted*, not guaranteed (A2A §7.5): the terminal outcomes
- * below all mean "stop trying" from the gateway's side.
+ * below all mean "stop trying" from the gatekeeper's side.
  * - `canceled`      — the agent transitioned the task to a terminal `canceled`.
  * - `not_cancelable`— the task was already terminal (e.g. it just completed);
  *                     `TaskNotCancelableError` (-32002). Idempotent no-op.
  * - `not_found`     — the agent has no such task (-32001). Idempotent no-op.
  * - `unsupported`   — the agent doesn't implement cancellation (-32004); the task
- *                     keeps running and the gateway should say so.
+ *                     keeps running and the gatekeeper should say so.
  * - `error`         — transport/other failure; the caller may surface or retry.
  */
 export type CancelOutcome =
@@ -332,7 +332,7 @@ export type CancelOutcome =
 /**
  * Ask a **remote** agent to cancel a task via the standard A2A `tasks/cancel`
  * method. Synchronous by contract — the agent returns the updated Task
- * immediately — so the gateway self-reconciles from this response and does NOT
+ * immediately — so the gatekeeper self-reconciles from this response and does NOT
  * wait for a push callback (a conformant agent sends none after cancellation).
  * The SDK maps A2A error codes to typed errors, which we fold into a
  * {@link CancelOutcome} the caller can act on without touching the SDK surface.

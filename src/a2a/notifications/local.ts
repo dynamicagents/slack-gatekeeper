@@ -39,7 +39,7 @@ const DELIVERY_BACKOFF_MS = [250, 1000];
  * Deliberately **not** raised to match `TASK_DEADLINE_SECONDS` (1 hour), however
  * tempting the symmetry looks. This barrier keeps a Durable Object resident, and
  * Durable Objects bill wall-clock duration for their full 128 MB allocation for
- * as long as they are alive — so unlike the gateway's hour-long *wait* (a
+ * as long as they are alive — so unlike the gatekeeper's hour-long *wait* (a
  * hibernating Workflow, billed on CPU it never spends), every minute here is paid
  * for. The hour is an affordance for remote agents, whose compute runs on their
  * own Worker; a built-in has no business taking eight minutes, let alone sixty.
@@ -47,7 +47,7 @@ const DELIVERY_BACKOFF_MS = [250, 1000];
 const SETTLE_TIMEOUT_MS = 480_000;
 /** Cap on remembered already-settled task ids (guards a settle that beats whenSettled). */
 const SETTLED_MEMORY_MAX = 64;
-/** Gateway-controlled backstop notice recorded when delivery gives up. */
+/** Gatekeeper-controlled backstop notice recorded when delivery gives up. */
 const DELIVERY_FAILED_MESSAGE =
   "the local agent's reply could not be delivered";
 
@@ -118,7 +118,7 @@ export async function deliverLocalAgentTask(
 }
 
 /**
- * Bridges A2A push notifications directly into the gateway's durable delivery
+ * Bridges A2A push notifications directly into the gatekeeper's durable delivery
  * ledger. The SDK invokes `send` serially from its event processor, but the
  * explicit chain also preserves status-update order if an implementation ever
  * calls it concurrently.
@@ -154,7 +154,7 @@ export class LocalPushNotificationSender implements PushNotificationSender {
     context: ServerCallContext
   ): Promise<void> {
     // v1.0 dispatches the same `StreamResponse` envelope the streaming
-    // transports carry, so flatten it to the gateway's task view first. An
+    // transports carry, so flatten it to the gatekeeper's task view first. An
     // envelope that advances no task lifecycle (an artifact delta, or a
     // stand-alone message) has nothing to deliver.
     const snapshot = snapshotOf(streamResponse);

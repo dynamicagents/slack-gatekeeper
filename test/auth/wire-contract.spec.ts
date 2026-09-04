@@ -7,7 +7,7 @@ import {
   readIdentityClaim,
   readTenantClaim
 } from "@dynamicagents/g2a-protocol";
-import gatewayPkg from "../../package.json";
+import gatekeeperPkg from "../../package.json";
 import protocolPkg from "@dynamicagents/g2a-protocol/package.json";
 import { signGatekeeperToken } from "@/auth/agent-outbound";
 import { audienceFor } from "@/a2a/endpoint";
@@ -18,9 +18,9 @@ import { audienceFor } from "@/a2a/endpoint";
  * ## What changed, and why this file still exists
  *
  * These values used to be asserted here as literals, because the other half of
- * the contract lived in `@dynamicagents/core` and the gateway must not import it.
+ * the contract lived in `@dynamicagents/core` and the gatekeeper must not import it.
  * That made this file the only mechanism holding the two repos together, and a
- * weak one: it could prove the gateway was self-consistent, never that the
+ * weak one: it could prove the gatekeeper was self-consistent, never that the
  * remote agreed.
  *
  * Both sides now derive the contract from `@dynamicagents/g2a-protocol`, so drift
@@ -28,14 +28,14 @@ import { audienceFor } from "@/a2a/endpoint";
  * would test nothing — the package's own specs pin them, once, at the source.
  *
  * What is left is the part that is still genuinely two-sided: **that the
- * gateway actually uses the shared package everywhere it mints.** A token can
+ * gatekeeper actually uses the shared package everywhere it mints.** A token can
  * be built with a hand-written claim key, a hardcoded `jku`, or a hand-rolled
  * audience and still look perfectly correct in isolation. So every assertion
  * below reads the minted artifact and checks it against the package, rather
  * than against a copy of what the package says.
  *
  * The rule that produced all of this is unchanged and still absolute: **the
- * gateway never imports `@dynamicagents/core`.** The protocol package is a
+ * gatekeeper never imports `@dynamicagents/core`.** The protocol package is a
  * zero-dependency leaf holding names and pure string rules — no crypto, no
  * verification logic, no agent runtime.
  */
@@ -66,7 +66,7 @@ async function mint(
 describe("a minted token, read back through the protocol package", () => {
   it("carries both claims where the package says to look for them", async () => {
     // Read with the package's own readers — the same ones `@dynamicagents/core`
-    // verifies with. If the gateway ever spelled a claim key by hand and got it
+    // verifies with. If the gatekeeper ever spelled a claim key by hand and got it
     // wrong, these come back empty, which is exactly what the remote would see.
     const payload = decodeJwt(await mint()) as Record<string, unknown>;
 
@@ -112,7 +112,7 @@ describe("the audience rule, on both sides of it", () => {
   it("is a fixed point over the URL an agent's card advertises", async () => {
     // The load-bearing relationship. A remote composes its card's interface URL
     // with `endpointUrl` and verifies incoming tokens against that same string;
-    // the gateway reads that URL off the card and mints `aud` from it with
+    // the gatekeeper reads that URL off the card and mints `aud` from it with
     // `audienceFor`. The two agree only if this holds for every path.
     for (const path of ["/a2a", "/api/v2/agent", "/", "/deep/nested/rpc"]) {
       const advertised = endpointUrl(AGENT_ORIGIN, path);
@@ -151,14 +151,14 @@ describe("the boundary that made a shared package possible", () => {
 
   it("never depends on the agent runtime", () => {
     // The rule everything here rests on: `@dynamicagents/core` is the agent
-    // runtime, a gateway is not an agent, and it must never import core. It was
+    // runtime, a gatekeeper is not an agent, and it must never import core. It was
     // a review convention; the shared package makes it tempting to relax
     // ("we already share one thing"), so it is a test now — dev dependencies
     // included, since a test importing the runtime reaches it just as surely.
-    expect(namesIn(gatewayPkg, EVERY_FIELD)).not.toContain(
+    expect(namesIn(gatekeeperPkg, EVERY_FIELD)).not.toContain(
       "@dynamicagents/core"
     );
-    expect(namesIn(gatewayPkg, EVERY_FIELD)).toContain(
+    expect(namesIn(gatekeeperPkg, EVERY_FIELD)).toContain(
       "@dynamicagents/g2a-protocol"
     );
   });

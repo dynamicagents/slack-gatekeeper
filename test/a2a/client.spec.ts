@@ -23,7 +23,7 @@ const ENDPOINT = "https://remote.example.com/a2a";
 /** Which agent at that endpoint — one endpoint may serve several. */
 const TENANT = "main";
 
-/** The push config the gateway hands a remote agent (v1.0 flattened shape). */
+/** The push config the gatekeeper hands a remote agent (v1.0 flattened shape). */
 const PUSH: TaskPushNotificationConfig = {
   tenant: "",
   id: "",
@@ -119,7 +119,7 @@ afterEach(() => {
 });
 
 describe("sendA2ARemote — async remote accept", () => {
-  it("injects the gateway JWT as a Bearer header and sends the push config", async () => {
+  it("injects the gatekeeper JWT as a Bearer header and sends the push config", async () => {
     const calls: Captured[] = [];
     stubRemote("task-1", calls);
 

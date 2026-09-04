@@ -96,7 +96,7 @@ describe("iterateSlackChannels", () => {
       return body.get("cursor")
         ? {
             ok: true,
-            channels: [{ id: "C_TARGET", name: "looping-org-admin" }]
+            channels: [{ id: "C_TARGET", name: "da-org-admin" }]
           }
         : {
             ok: true,
@@ -108,7 +108,7 @@ describe("iterateSlackChannels", () => {
     for await (const c of iterateSlackChannels()) channels.push(c);
     expect(channels).toEqual([
       { id: "C_OTHER", name: "general" },
-      { id: "C_TARGET", name: "looping-org-admin" }
+      { id: "C_TARGET", name: "da-org-admin" }
     ]);
   });
 

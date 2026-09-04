@@ -198,14 +198,14 @@ describe("executeAgentTurn", () => {
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   });
 
-  it("persists the incoming turn text verbatim (Gateway owns wrapping)", async () => {
+  it("persists the incoming turn text verbatim (Gatekeeper owns wrapping)", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () => okResult("ok") as never
     });
     const bus = fakeEventBus();
 
-    // In production this arrives already wrapped by the Gateway; the loop must
+    // In production this arrives already wrapped by the Gatekeeper; the loop must
     // store it untouched, not re-wrap it.
     const wrapped =
       '<turn from="Grace" id="U2" channel="general" ' +
@@ -293,7 +293,7 @@ describe("executeAgentTurn", () => {
     expect(bus.finished).toHaveBeenCalledTimes(1);
     expect(bus.published).toHaveLength(2);
     // `failed`, not `completed`: A2A v1.0 has no structured task error, so the
-    // state is the only thing that tells the gateway this turn broke.
+    // state is the only thing that tells the gatekeeper this turn broke.
     expect(
       partsText(expectTerminalReply(bus, TaskState.TASK_STATE_FAILED)?.parts)
     ).toBe("Something went wrong. Please try again.");
@@ -583,7 +583,7 @@ describe("executeAgentTurn — cancellation", () => {
     expect(statusEventAt(bus, -1)).toMatchObject({
       status: { state: TaskState.TASK_STATE_CANCELED }
     });
-    // Empty: the gateway posts its own "🛑 Stopped." notice.
+    // Empty: the gatekeeper posts its own "🛑 Stopped." notice.
     expect(partsText(statusEventAt(bus, -1).status?.message?.parts)).toBe("");
     expect(bus.finished).toHaveBeenCalledTimes(1);
   });
@@ -600,7 +600,7 @@ describe("executeAgentTurn — cancellation", () => {
     );
     await done;
 
-    // `m1` is the messageId on the request context — the same value the gateway
+    // `m1` is the messageId on the request context — the same value the gatekeeper
     // uses as the task row's token.
     expect(seen).toEqual(["m1"]);
   });
@@ -700,7 +700,7 @@ describe("executeAgentTurn — cancellation", () => {
 
 describe("executeAgentTurn — HITL park", () => {
   const request = {
-    type: "io.looping.hitl.request",
+    type: "io.da.hitl.request",
     requestId: "req-1",
     requestKind: "choice",
     prompt: "Which environment?",
@@ -768,7 +768,7 @@ describe("executeAgentTurn — HITL park", () => {
         const data = dataOf(p) as
           { type?: string; requestId?: string } | undefined;
         return (
-          data?.type === "io.looping.hitl.request" && data.requestId === "req-1"
+          data?.type === "io.da.hitl.request" && data.requestId === "req-1"
         );
       })
     ).toBe(true);
@@ -1066,7 +1066,7 @@ describe("executeAgentTurn — forced final_reply", () => {
   it("lets a park out-rank a final_reply emitted in the same step", async () => {
     const session = new FakeSession();
     const request = {
-      type: "io.looping.hitl.request",
+      type: "io.da.hitl.request",
       requestId: "req-1",
       requestKind: "choice",
       prompt: "Which environment?",
@@ -1244,7 +1244,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
   it("keeps calls that ran before a HITL park", async () => {
     const session = new FakeSession();
     const request = {
-      type: "io.looping.hitl.request",
+      type: "io.da.hitl.request",
       requestId: "req-1",
       requestKind: "approval",
       prompt: "Delete arc-player?"

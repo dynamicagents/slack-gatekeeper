@@ -104,11 +104,11 @@ export const agents = sqliteTable(
     // Where this agent runs, and nothing else. `local` is reached in-process
     // through a Durable Object stub; `remote` over HTTP at `a2aEndpoint`.
     // *Which* agent it is — including which built-in — is `tenantId`, on both
-    // paths. The gateway sets this itself; no admin chooses it, which is what
+    // paths. The gatekeeper sets this itself; no admin chooses it, which is what
     // keeps a registered agent from claiming to be in-process.
     kind: text("kind", { enum: ["local", "remote"] }).notNull(),
     displayName: text("display_name"),
-    // Optional gateway-hosted, admin-generated avatar URL (never from the AgentCard).
+    // Optional gatekeeper-hosted, admin-generated avatar URL (never from the AgentCard).
     iconUrl: text("icon_url"),
     // Always set: custom agents carry a real HTTP endpoint; built-ins use an
     // `http://{name}.local` sentinel. Whether an agent is local is decided by
@@ -172,7 +172,7 @@ export const agentChannels = sqliteTable(
 
 /**
  * Pending agent tasks — the correlation store for async A2A push
- * notifications. When the gateway dispatches to a remote (custom) agent it no
+ * notifications. When the gatekeeper dispatches to a remote (custom) agent it no
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
  * A2A `pushNotificationConfig`, the remote returns a Task immediately, and later
  * POSTs Tasks back to `/a2a/notifications` — one or more intermediate progress
@@ -182,7 +182,7 @@ export const agentChannels = sqliteTable(
  * delivery time via `agentRenderIdentity` (the agent row, plus the workspace's
  * admin overrides), never carried over from dispatch.
  *
- * Keyed by the gateway-generated `token` (the value the remote echoes back).
+ * Keyed by the gatekeeper-generated `token` (the value the remote echoes back).
  * The row stays `pending` across intermediate updates and is marked `completed`
  * only by the terminal callback (which then clears the 🛑); rows are swept in the
  * maintenance workflow.
@@ -190,7 +190,7 @@ export const agentChannels = sqliteTable(
 export const agentTasks = sqliteTable(
   "agent_tasks",
   {
-    // Gateway-generated per-dispatch push-notification validation token (PK) —
+    // Gatekeeper-generated per-dispatch push-notification validation token (PK) —
     // the value the remote echoes back so we can correlate the callback.
     token: text("token").primaryKey(),
     // Remote-assigned A2A Task id captured from the accept response (null until
@@ -216,7 +216,7 @@ export const agentTasks = sqliteTable(
     // is a safe no-op until `resumeFromInput` flips it back to `pending`.
     // `canceled` is the other terminal state: a stop was issued and honored to the
     // ledger's satisfaction. One value for both triggers — a human's 🛑 and the
-    // gateway's own processing-deadline cancel are the same event here; *which*
+    // gatekeeper's own processing-deadline cancel are the same event here; *which*
     // fired is recorded in the `[cancel] canceling task` log line, since the
     // actor is not stored.
     status: text("status", {
@@ -228,7 +228,7 @@ export const agentTasks = sqliteTable(
     // returned its taskId. The dispatch honors it the moment the taskId is known
     // (or skips the send entirely if seen first). 0/1.
     cancelRequested: integer("cancel_requested").notNull().default(0),
-    // Last gateway-controlled reason a callback was rejected (auth/malformed),
+    // Last gatekeeper-controlled reason a callback was rejected (auth/malformed),
     // captured for the reaction backstop to surface. Never holds remote payload.
     lastError: text("last_error"),
     // Comma-delimited list of intermediate-update `messageId`s already received

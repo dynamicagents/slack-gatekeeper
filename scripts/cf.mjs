@@ -29,7 +29,7 @@
 // Examples:
 //   node scripts/cf.mjs verify
 //   node scripts/cf.mjs logs --since 2h --level error
-//   node scripts/cf.mjs logs --worker looping-gateway --grep MessageWorkflow
+//   node scripts/cf.mjs logs --worker slack-gatekeeper --grep MessageWorkflow
 //   node scripts/cf.mjs wf message-workflow
 //   node scripts/cf.mjs wf message-workflow message-27to4pc4w7eo0psa59o
 //   node scripts/cf.mjs ai --since 2h

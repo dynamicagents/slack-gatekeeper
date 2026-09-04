@@ -15,12 +15,12 @@ import {
  * `$case` (plus `filename`/`mediaType`), and a `Message` carries empty strings
  * and empty arrays rather than omitted optionals. Hand-writing those literals at
  * every call site is noisy and easy to get subtly wrong, so every part/message
- * the gateway emits is built through the helpers here.
+ * the gatekeeper emits is built through the helpers here.
  */
 
-/** Media type stamped on the text parts the gateway emits. */
+/** Media type stamped on the text parts the gatekeeper emits. */
 const TEXT_MEDIA_TYPE = "text/plain";
-/** Media type stamped on the structured (HITL) data parts the gateway emits. */
+/** Media type stamped on the structured (HITL) data parts the gatekeeper emits. */
 const DATA_MEDIA_TYPE = "application/json";
 
 /**
@@ -77,7 +77,7 @@ export function dataOf(part: Part): unknown {
   return part.content?.$case === "data" ? part.content.value : undefined;
 }
 
-/** The fields a gateway-authored A2A message needs; the rest get proto defaults. */
+/** The fields a gatekeeper-authored A2A message needs; the rest get proto defaults. */
 export interface MessageInput {
   messageId: string;
   role: Role;
@@ -89,7 +89,7 @@ export interface MessageInput {
 }
 
 /**
- * Build an A2A v1.0 `Message`, filling the proto-required fields the gateway
+ * Build an A2A v1.0 `Message`, filling the proto-required fields the gatekeeper
  * never sets (`extensions`, and the empty-string forms of the optional ids).
  */
 export function buildMessage(input: MessageInput): Message {

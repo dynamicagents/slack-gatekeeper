@@ -30,7 +30,7 @@ export function isTerminalTaskStatus(status: AgentTaskRow["status"]): boolean {
 
 /** Everything captured at dispatch so the async callback can correlate, route, and collect. */
 export interface CreateAgentTaskInput {
-  /** Gateway-generated push-notification validation token (PK, echoed by the remote). */
+  /** Gatekeeper-generated push-notification validation token (PK, echoed by the remote). */
   token: string;
   /** Agent-assigned A2A Task id from the accept response (null if omitted). */
   taskId: string | null;
@@ -207,7 +207,7 @@ export async function markCancelRequested(
 /**
  * Record why a callback was rejected, so the reaction backstop can surface the
  * reason instead of silence. Conditional on `pending` so a completed task is
- * never reopened. `message` must be a gateway-controlled string — never remote
+ * never reopened. `message` must be a gatekeeper-controlled string — never remote
  * payload — since it can be posted to Slack verbatim.
  */
 export async function recordAgentTaskError(
@@ -334,7 +334,7 @@ export async function resumeFromInput(token: string): Promise<string | null> {
  * `awaiting-input` (a task parked on a human prompt that then finished).
  *
  * The terminal guard is what stops a late callback from reopening a task the
- * gateway already gave up on: a `canceled` row stays canceled.
+ * gatekeeper already gave up on: a `canceled` row stays canceled.
  */
 export async function completeAgentTask(token: string): Promise<boolean> {
   const db = getDb();
@@ -353,7 +353,7 @@ export async function completeAgentTask(token: string): Promise<boolean> {
 
 /**
  * Mark a task canceled — the terminal state for a stop, whoever issued it: a
- * human tapping 🛑, or the gateway hitting `TASK_DEADLINE_SECONDS` on a leg that
+ * human tapping 🛑, or the gatekeeper hitting `TASK_DEADLINE_SECONDS` on a leg that
  * never delivered. The two are indistinguishable to the ledger; the actor is
  * captured in the `[cancel] canceling task` log line instead.
  *

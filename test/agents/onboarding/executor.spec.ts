@@ -29,7 +29,7 @@ const caller: UserAuthContext = {
 const onboardingRequest = () =>
   makeRequest({
     contextId: "D_ONB:thread-1",
-    text: "how does Looping work?",
+    text: "how does Dynamic Agents work?",
     metadata: { user: caller, agentKind: "local", tenant: "onboarding" }
   });
 
@@ -40,7 +40,7 @@ describe("OnboardingAgentExecutor", () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV3({
       doGenerate: async () =>
-        okResult("Looping routes work through Slack.") as never
+        okResult("Dynamic Agents routes work through Slack.") as never
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
@@ -53,7 +53,7 @@ describe("OnboardingAgentExecutor", () => {
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(2);
     expect(terminalTaskText(t.published)).toBe(
-      "Looping routes work through Slack."
+      "Dynamic Agents routes work through Slack."
     );
     // user turn + assistant turn persisted
     expect(session.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
@@ -78,7 +78,7 @@ describe("OnboardingAgentExecutor", () => {
 
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(2);
-    // The state — not wording in the reply — is what tells the gateway this
+    // The state — not wording in the reply — is what tells the gatekeeper this
     // turn broke; v1.0 gives a failing task no other machine-readable signal.
     expect(terminalTaskState(t.published)).toBe(TaskState.TASK_STATE_FAILED);
     expect(terminalTaskText(t.published)).toBeTruthy();

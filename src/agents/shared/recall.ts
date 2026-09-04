@@ -50,7 +50,7 @@ async function embed(texts: string[]): Promise<number[][]> {
  * **full** text is stored in metadata even though the embedding truncates at the
  * model's token limit — recall returns the exact quote, not a truncation.
  *
- * User turns carry a Gateway-authored `<turn>` wrapper; we parse it back out
+ * User turns carry a Gatekeeper-authored `<turn>` wrapper; we parse it back out
  * (the single source of who/where/when) into structured `channel`/`author`/`at`
  * metadata so future recall can filter a channel's history by speaker or origin.
  */

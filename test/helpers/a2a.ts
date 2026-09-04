@@ -121,7 +121,7 @@ export function notificationBody(response: StreamResponse): unknown {
   return StreamResponse.toJSON(response);
 }
 
-/** The gateway's flattened view of a task, for delivery-boundary tests. */
+/** The gatekeeper's flattened view of a task, for delivery-boundary tests. */
 export function makeSnapshot(fixture: TaskFixture): TaskSnapshot {
   const snapshot = snapshotOf(taskEnvelope(makeTask(fixture)));
   if (!snapshot) throw new Error("fixture produced no snapshot");

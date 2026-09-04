@@ -3,7 +3,7 @@
   "compilerOptions": {
     "types": ["node", "@cloudflare/vitest-pool-workers/types"],
     // For `wire-contract.spec.ts`, which reads dependency manifests to assert
-    // that this gateway never depends on the agent runtime. Import attributes
+    // that this gatekeeper never depends on the agent runtime. Import attributes
     // (`with { type: "json" }`) are the modern spelling but need `module` at
     // `esnext`/`node16`+, and the base config is on `es2022`; enabling this is
     // the smaller change, and it is scoped to the test project.

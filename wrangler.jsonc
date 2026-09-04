@@ -4,7 +4,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "looping-gateway",
+  "name": "slack-gatekeeper",
   "main": "src/server.ts",
   "compatibility_date": "2026-03-02",
   "compatibility_flags": ["nodejs_compat"],
@@ -45,7 +45,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "looping-registry",
+      "database_name": "da-registry",
       "database_id": "d477d975-6356-4233-9f50-89dc21df5e3a",
       "migrations_dir": "migrations"
     }
@@ -90,7 +90,7 @@
     "required": [
       "SLACK_BOT_TOKEN",
       "SLACK_SIGNING_SECRET",
-      "GATEWAY_JWT_PRIVATE_KEY"
+      "GATEKEEPER_JWT_PRIVATE_KEY"
     ]
   },
   "observability": {

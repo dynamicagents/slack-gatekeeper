@@ -368,7 +368,7 @@ export async function agentsCreate(
     name: args.name,
     kind: "remote",
     displayName: args.displayName ?? verified.displayName,
-    // No icon at registration — a custom agent's avatar is gateway-hosted and set
+    // No icon at registration — a custom agent's avatar is gatekeeper-hosted and set
     // later by the admin via `agents_regenerate_avatar` (never from the card).
     //
     // The *resolved* endpoint, not what was typed: only the origin of the input
@@ -407,7 +407,7 @@ export async function agentsUpdate(
   // A re-pointed endpoint is re-verified and must keep the SAME pinned
   // signing identity (Trust-On-First-Use) — a different signer is rejected.
   // `displayName` is refreshed from the new card unless the caller explicitly
-  // overrides it here. `iconUrl` is NOT touched — the avatar is gateway-hosted
+  // overrides it here. `iconUrl` is NOT touched — the avatar is gatekeeper-hosted
   // and admin-generated, so it survives endpoint changes.
   //
   // A changed *tenant* re-verifies for the same reason a changed endpoint does:
@@ -579,7 +579,7 @@ export type AgentsRepinArgs = { name: string };
  * token from *any other* key a rejection rather than a login, so every other path
  * treats a changed signer as an attack: `agentsUpdate` refuses outright, and
  * callback verification fails with "callback token key does not match the agent's
- * pinned signing key". But an operator who rotates their own gateway key is not an
+ * pinned signing key". But an operator who rotates their own gatekeeper key is not an
  * attacker, and their only recourse used to be deleting the agent and registering
  * it again — which drops its channel mappings and its avatar to fix a single
  * column.
@@ -629,7 +629,7 @@ export async function agentsRepin(
       `Pinned: \`${target.cardSigningKid ?? "(none)"}\`\n` +
       `Card now says: \`${kid}\`\n` +
       `Approve only if you rotated this agent's signing key yourself — ` +
-      `re-pinning is what makes the gateway trust it.`,
+      `re-pinning is what makes the gatekeeper trust it.`,
     action: { kind: "repin_agent", name: args.name, wsId: deps.wsId, jku, kid }
   });
 }
@@ -801,7 +801,7 @@ export async function agentsDomainsRemove(
 
 /**
  * Generate an avatar image and persist it in the admin DO under `name`, returning
- * its public gateway URL (`/icons/{wsId}/{name}/{key}.jpg`, served by the admin DO).
+ * its public gatekeeper URL (`/icons/{wsId}/{name}/{key}.jpg`, served by the admin DO).
  * Guards the image seams and the public-URL precondition. Shared by the admin's own
  * avatar (`name === "admin"`) and custom-agent avatars (`name === agent name`).
  */
@@ -817,7 +817,7 @@ async function generateAndStoreIcon(
   if (!publicUrl)
     return {
       error:
-        "The gateway's public URL isn't known yet (it's discovered after the " +
+        "The gatekeeper's public URL isn't known yet (it's discovered after the " +
         "first Slack event). Try again shortly."
     };
 

@@ -1,11 +1,11 @@
 import { A2A_PROTOCOL_VERSION, type AgentCard } from "@a2a-js/sdk";
 import type { AgentInterface } from "@a2a-js/sdk";
 
-/** The only transport this gateway speaks. Compared case-insensitively. */
+/** The only transport this gatekeeper speaks. Compared case-insensitively. */
 const JSONRPC_BINDING = "JSONRPC";
 
 /**
- * SSRF-safe validation for remote (custom) A2A endpoints. The gateway dials
+ * SSRF-safe validation for remote (custom) A2A endpoints. The gatekeeper dials
  * these URLs from inside Cloudflare, so an unvalidated endpoint is a
  * server-side request forgery vector: an attacker who can register an agent
  * could point it at internal addresses, cloud-metadata endpoints, or loopback.
@@ -215,7 +215,7 @@ export function originOf(endpoint: string): string {
  * convention exists to be wrong about — an agent serving on `/api/v2/agent`
  * works exactly as one on `/a2a`.
  *
- * Re-exported here so the rest of the gateway keeps importing it from the
+ * Re-exported here so the rest of the gatekeeper keeps importing it from the
  * module that owns endpoint policy.
  */
 export { audienceFor } from "@dynamicagents/g2a-protocol";
@@ -225,14 +225,14 @@ export { audienceFor } from "@dynamicagents/g2a-protocol";
  * from.
  *
  * `supportedInterfaces` is an ordered *preference* list that may advertise gRPC
- * or HTTP+JSON ahead of JSONRPC (A2A §8.3.1), and this gateway speaks only
+ * or HTTP+JSON ahead of JSONRPC (A2A §8.3.1), and this gatekeeper speaks only
  * JSONRPC, so taking `supportedInterfaces[0]` reads the wrong entry against any
  * agent that prefers another transport. Matching on `protocolBinding` is what
  * the SDK's own client does when it selects a transport.
  *
  * The version check keeps a v0.3-only agent from registering cleanly and then
  * failing on its first dispatch: the SDK would route it through the legacy
- * transport, which this gateway does not enable.
+ * transport, which this gatekeeper does not enable.
  */
 export function selectJsonRpcInterface(card: AgentCard): AgentInterface {
   const selected = (card.supportedInterfaces ?? []).find(
@@ -251,7 +251,7 @@ export function selectJsonRpcInterface(card: AgentCard): AgentInterface {
   if (selected.protocolVersion !== A2A_PROTOCOL_VERSION) {
     throw new InvalidEndpointError(
       `agent card advertises A2A ${selected.protocolVersion} on its ` +
-        `${JSONRPC_BINDING} interface; this gateway speaks ${A2A_PROTOCOL_VERSION}`
+        `${JSONRPC_BINDING} interface; this gatekeeper speaks ${A2A_PROTOCOL_VERSION}`
     );
   }
   return selected;

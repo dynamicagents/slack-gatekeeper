@@ -2,9 +2,9 @@
 
 ## Overview
 
-**looping-gateway** is the entry point for all Slack traffic in your agent network. When a message arrives, the gateway determines which agent owns it based on the source channel, invokes that agent, and posts the response back to Slack. This routing loop is what gives the gateway its name.
+**slack-gatekeeper** is the entry point for all Slack traffic in your agent network. When a message arrives, the gatekeeper determines which agent owns it based on the source channel, invokes that agent, and posts the response back to Slack. This routing loop is what gives the gatekeeper its name.
 
-Today the gateway is a single Cloudflare Durable Object that handles everything. The architecture below describes both the current implementation and the intended design as additional agents are introduced.
+Today the gatekeeper is a single Cloudflare Durable Object that handles everything. The architecture below describes both the current implementation and the intended design as additional agents are introduced.
 
 ---
 
@@ -21,7 +21,7 @@ A single `SlackAgent` Durable Object:
 
 ## Components
 
-### SlackAgent — the gateway
+### SlackAgent — the gatekeeper
 
 **Status: current**
 
@@ -38,7 +38,7 @@ Responsibilities:
 
 **Status: planned**
 
-Handles messages in the designated `#org_admin` Slack channel only. This is a restricted entry point for organizational management: registering A2A agents, managing channel mappings, and configuring gateway behaviour. Regular users do not interact with this agent directly.
+Handles messages in the designated `#org_admin` Slack channel only. This is a restricted entry point for organizational management: registering A2A agents, managing channel mappings, and configuring gatekeeper behaviour. Regular users do not interact with this agent directly.
 
 ### Onboarding Agent
 
@@ -50,9 +50,9 @@ Handles all direct messages (DMs) sent to the Slack app. This is the first point
 
 **Status: planned**
 
-Any message posted in a channel that is not `#org_admin` and not a DM is considered to be addressed to an external **Agent-to-Agent (A2A)** agent. The gateway resolves which registered agent owns that channel using [A2A name routing](#a2a-name-routing) and forwards the message to it. The response is posted back at channel level by default, and only goes into a thread when the incoming Slack event carries a real thread_ts different from the message ts.
+Any message posted in a channel that is not `#org_admin` and not a DM is considered to be addressed to an external **Agent-to-Agent (A2A)** agent. The gatekeeper resolves which registered agent owns that channel using [A2A name routing](#a2a-name-routing) and forwards the message to it. The response is posted back at channel level by default, and only goes into a thread when the incoming Slack event carries a real thread_ts different from the message ts.
 
-This design lets teams deploy domain-specific agents independently and register them with the gateway to make them accessible through Slack — without touching this codebase.
+This design lets teams deploy domain-specific agents independently and register them with the gatekeeper to make them accessible through Slack — without touching this codebase.
 
 ---
 
@@ -64,7 +64,7 @@ This design lets teams deploy domain-specific agents independently and register 
 | Direct message (DM)  | Onboarding Agent                        |
 | Any other channel    | A2A routing → registered external agent |
 
-The routing logic lives in the gateway's message handler and consults the agent registry to resolve the correct A2A target.
+The routing logic lives in the gatekeeper's message handler and consults the agent registry to resolve the correct A2A target.
 
 ---
 
@@ -77,7 +77,7 @@ The Durable Object's SQLite backend (already provisioned) will store:
 | Table      | Purpose                                          |
 | ---------- | ------------------------------------------------ |
 | `channels` | Registered channels and their A2A agent mappings |
-| `users`    | Slack user profiles seen by the gateway          |
+| `users`    | Slack user profiles seen by the gatekeeper       |
 | `messages` | Per-thread message history for context           |
 
 ---
@@ -86,13 +86,13 @@ The Durable Object's SQLite backend (already provisioned) will store:
 
 **Status: planned — to be detailed in a separate document**
 
-External agents register themselves with the gateway (via the OrgAdmin Agent) by providing:
+External agents register themselves with the gatekeeper (via the OrgAdmin Agent) by providing:
 
 - The Slack channel they own
 - A unique agent name users can mention in that channel
 - A communication endpoint (Cloudflare Service Binding, HTTP URL, or equivalent)
 
-When a message arrives in a registered channel, the gateway uses the mentioned agent name when one is present; otherwise it defaults to the single agent configured for that channel. If multiple agents are available and no name is mentioned, the gateway asks the user to address one by name. Once resolved, the gateway looks up the endpoint, forwards the message payload, and posts the response back to Slack. Registered agents are fully independent workers — they do not need access to this codebase to operate.
+When a message arrives in a registered channel, the gatekeeper uses the mentioned agent name when one is present; otherwise it defaults to the single agent configured for that channel. If multiple agents are available and no name is mentioned, the gatekeeper asks the user to address one by name. Once resolved, the gatekeeper looks up the endpoint, forwards the message payload, and posts the response back to Slack. Registered agents are fully independent workers — they do not need access to this codebase to operate.
 
 ---
 

@@ -7,7 +7,7 @@ import { OnboardingAgentExecutor } from "./executor";
 /**
  * Onboarding (DM) concierge. One Durable Object instance per user
  * (`onboarding:{slackUserId}`), each with isolated Sessions + memory. Runs a
- * read-only Workers-AI tool loop that explains how Looping works, routes users to
+ * read-only Workers-AI tool loop that explains how Dynamic Agents works, routes users to
  * the right channel/agent name, and surfaces registry health — all over direct
  * message.
  */
@@ -16,7 +16,7 @@ export class OnboardingAgent extends A2AAgent {
     return buildAgentCard({
       name: "Onboarding Agent",
       description:
-        "Looping onboarding concierge — explains the system, routes users, and surfaces health.",
+        "Dynamic Agents onboarding concierge — explains the system, routes users, and surfaces health.",
       pushNotifications: true
     });
   }

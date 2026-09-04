@@ -26,8 +26,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
-    // Public JWKS — the gateway's Ed25519 signing public key(s). Remote (custom)
-    // A2A agents fetch this to verify the gateway-identity JWT on each request.
+    // Public JWKS — the gatekeeper's Ed25519 signing public key(s). Remote (custom)
+    // A2A agents fetch this to verify the gatekeeper-identity JWT on each request.
     // Only public key material is ever exposed; no secret is shared.
     if (request.method === "GET" && url.pathname === JWKS_PATH) {
       return Response.json(getPublicJwks(), {
@@ -38,7 +38,7 @@ export default {
     // Slack webhook ingest — verify the signature, classify the event, trigger
     // the matching durable Workflow, and ack within Slack's 3s budget. All agent
     // work happens asynchronously inside the Workflow, never inline here. The
-    // gateway's public origin (JWT issuer/jku anchor) is discovered inside
+    // gatekeeper's public origin (JWT issuer/jku anchor) is discovered inside
     // handleSlackEvent, only after the Slack signature has been verified.
     if (request.method === "POST" && url.pathname === "/slack/events") {
       return handleSlackEvent(request, ctx);
@@ -57,7 +57,7 @@ export default {
     // A2A Task here when its (possibly long) generation is done. The handler
     // authenticates the caller against its pinned card key + per-task token before
     // posting the reply to Slack. This is what replaced the old synchronous
-    // "gateway blocks up to 30s for the reply" remote path.
+    // "gatekeeper blocks up to 30s for the reply" remote path.
     if (request.method === "POST" && url.pathname === NOTIFICATIONS_PATH) {
       return handleRemoteAgentNotification(request);
     }

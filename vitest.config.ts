@@ -8,7 +8,7 @@ import path from "path";
 // Test defaults for required secrets. Real env vars (CI/shell) take precedence via ??=.
 process.env.SLACK_BOT_TOKEN ??= "xoxb-test-token";
 process.env.SLACK_SIGNING_SECRET ??= "test-signing-secret";
-process.env.GATEWAY_JWT_PRIVATE_KEY ??= JSON.stringify({
+process.env.GATEKEEPER_JWT_PRIVATE_KEY ??= JSON.stringify({
   crv: "Ed25519",
   d: "1xgbYpMkLQ7HSsmNt-fKKJq2UFstxDxuzpZ_30tl7bs",
   x: "HozhHMwqLW4u9YAyv3UBLj3tcQrLi9lUA335i3xdFE8",
