@@ -5,10 +5,8 @@ import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 import { fallbackMiddleware } from "@/agents/model-fallback-middleware";
 import {
   AI_GATEWAY_ID,
-  CHAT_MODEL_ID,
-  CHAT_FALLBACK_MODEL_ID,
-  CHAT_FALLBACK_REASONING_EFFORT,
-  CHAT_REASONING_EFFORT,
+  CHAT_FALLBACK,
+  CHAT_PRIMARY,
   EMBED_MAX_PER_CALL,
   EMBED_MODEL_ID
 } from "@/config";
@@ -133,9 +131,9 @@ export function chatModel(
   const workersai = agentProvider();
   const gateway = gatewayFor(metadata);
   return wrapLanguageModel({
-    model: workersai(CHAT_MODEL_ID, {
+    model: workersai(CHAT_PRIMARY.id, {
       gateway,
-      reasoning_effort: CHAT_REASONING_EFFORT
+      reasoning_effort: CHAT_PRIMARY.reasoningEffort
     }),
     // Order matters: the first entry is the outermost. History is repaired
     // before the fallback is handed the same params, so the fallback model
@@ -145,8 +143,8 @@ export function chatModel(
     middleware: [
       normalizeToolInputMiddleware,
       fallbackMiddleware(
-        workersai(CHAT_FALLBACK_MODEL_ID, { gateway }),
-        CHAT_FALLBACK_REASONING_EFFORT
+        workersai(CHAT_FALLBACK.id, { gateway }),
+        CHAT_FALLBACK.reasoningEffort
       )
     ]
   });

@@ -9,10 +9,9 @@ import {
 } from "@/agents/model";
 import {
   AI_GATEWAY_ID,
-  CHAT_FALLBACK_MODEL_ID,
-  CHAT_FALLBACK_REASONING_EFFORT,
-  CHAT_MODEL_ID,
-  CHAT_REASONING_EFFORT,
+  CHAT_FALLBACK,
+  CHAT_MODELS,
+  CHAT_PRIMARY,
   EMBED_MODEL_ID
 } from "@/config";
 
@@ -62,6 +61,35 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("the chat model list", () => {
+  // The pairing of a model with its own reasoning ceiling is enforced by the
+  // compiler: an entry missing `reasoningEffort` fails `satisfies ChatModel[]`,
+  // and a primary given a level `workers-ai-provider` does not declare fails at
+  // the model settings. These two are the parts types cannot see.
+
+  it("declares exactly the primary and the one fallback the middleware takes", () => {
+    // `fallbackMiddleware` accepts a single fallback model. A third entry here
+    // would read as a chain and be silently ignored, which is the worst shape a
+    // config mistake can take.
+    expect(CHAT_MODELS).toHaveLength(2);
+    expect(CHAT_MODELS[0]).toBe(CHAT_PRIMARY);
+    expect(CHAT_MODELS[1]).toBe(CHAT_FALLBACK);
+  });
+
+  it("falls back to a different model than it started on", () => {
+    // The fallback exists for a model being unreachable or refusing to call a
+    // tool. Pointing it at the primary would spend a second call reproducing the
+    // first failure, and nothing else would notice.
+    expect(CHAT_FALLBACK.id).not.toBe(CHAT_PRIMARY.id);
+  });
+
+  it("gives every model a reasoning budget of its own", () => {
+    for (const model of CHAT_MODELS) {
+      expect(model.reasoningEffort.length).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("the gateway identity a model call carries", () => {
   it("labels a turn with the thread, the tenant and the workspace", async () => {
     const run = stubRun();
@@ -72,7 +100,7 @@ describe("the gateway identity a model call carries", () => {
       ...CHAT_CALL_OPTIONS
     });
 
-    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL_ID);
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_PRIMARY.id);
     expect(gatewayOf(run)).toEqual({
       id: AI_GATEWAY_ID,
       metadata: fullTurn
@@ -119,7 +147,7 @@ describe("the gateway identity a model call carries", () => {
     // were labelled, every fallback would land in the gateway log unattributed —
     // and those are the rows most worth finding.
     const run = stubRun((model) => {
-      if (model === CHAT_MODEL_ID)
+      if (model === CHAT_PRIMARY.id)
         throw new Error("primary is out of capacity");
       return { response: "from the fallback" };
     });
@@ -131,7 +159,7 @@ describe("the gateway identity a model call carries", () => {
       maxRetries: 0
     });
 
-    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK_MODEL_ID);
+    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
     expect(gatewayOf(run, 1)).toEqual({
       id: AI_GATEWAY_ID,
       metadata: fullTurn
@@ -169,7 +197,7 @@ describe("the gateway identity a model call carries", () => {
     // It goes through `providerOptions["workers-ai"]`, which the provider reads
     // ahead of any setting.
     const run = stubRun((model) => {
-      if (model === CHAT_MODEL_ID)
+      if (model === CHAT_PRIMARY.id)
         throw new Error("primary is out of capacity");
       return { response: "from the fallback" };
     });
@@ -181,13 +209,15 @@ describe("the gateway identity a model call carries", () => {
       maxRetries: 0
     });
 
-    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL_ID);
-    expect(effortOf(run, 0)).toBe(CHAT_REASONING_EFFORT);
-    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK_MODEL_ID);
-    expect(effortOf(run, 1)).toBe(CHAT_FALLBACK_REASONING_EFFORT);
-    // The two really are different words, which is the whole reason this is per
-    // model rather than one constant.
-    expect(CHAT_REASONING_EFFORT).not.toBe(CHAT_FALLBACK_REASONING_EFFORT);
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_PRIMARY.id);
+    expect(effortOf(run, 0)).toBe(CHAT_PRIMARY.reasoningEffort);
+    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
+    expect(effortOf(run, 1)).toBe(CHAT_FALLBACK.reasoningEffort);
+    // The two really are different words, which is the whole reason each model
+    // carries its own rather than sharing one constant.
+    expect(CHAT_PRIMARY.reasoningEffort).not.toBe(
+      CHAT_FALLBACK.reasoningEffort
+    );
   });
 
   it("lets a test seam replace the model without reaching the binding at all", async () => {
