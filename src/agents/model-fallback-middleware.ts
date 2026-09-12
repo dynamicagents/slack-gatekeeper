@@ -192,7 +192,38 @@ function violatesToolChoice(
  * Only `wrapGenerate` is implemented. Nothing here streams; a future `streamText`
  * would get no fallback until `wrapStream` is written to match.
  */
-export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
+/**
+ * The same params, with the fallback model's own reasoning budget on them.
+ *
+ * The two models do not share a `reasoning_effort` enum, so switching model has
+ * to switch budget with it — and `providerOptions` is the only route that can
+ * carry the fallback's, since `workers-ai-provider` types its `reasoning_effort`
+ * setting by the flash models' enum. The provider reads this key first, ahead of
+ * both the unified option and any setting, so it lands whatever the primary was
+ * configured with. Anything already under `workers-ai` is preserved.
+ */
+function withFallbackEffort(
+  params: CallOptions,
+  effort: string | undefined
+): CallOptions {
+  if (effort === undefined) return params;
+  return {
+    ...params,
+    providerOptions: {
+      ...params.providerOptions,
+      "workers-ai": {
+        ...params.providerOptions?.["workers-ai"],
+        reasoning_effort: effort
+      }
+    }
+  };
+}
+
+export function fallbackMiddleware(
+  fallback: Model,
+  /** The fallback's reasoning budget. Omitted, it keeps whatever the call had. */
+  effort?: string
+): LanguageModelMiddleware {
   return {
     wrapGenerate: async ({ doGenerate, params, model }) => {
       let result: GenerateResult;
@@ -207,7 +238,9 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
         });
         // A failure here is the end of the line: it propagates to the SDK, which
         // decides whether it is worth retrying the pair.
-        return marked(await fallback.doGenerate(params));
+        return marked(
+          await fallback.doGenerate(withFallbackEffort(params, effort))
+        );
       }
 
       if (!violatesToolChoice(params.toolChoice, result.content)) return result;
@@ -223,7 +256,10 @@ export function fallbackMiddleware(fallback: Model): LanguageModelMiddleware {
       // The primary's tokens ride along: unlike the throw above, this call
       // succeeded and was billed before its answer was rejected.
       return marked(
-        withBothUsages(await fallback.doGenerate(params), result.usage)
+        withBothUsages(
+          await fallback.doGenerate(withFallbackEffort(params, effort)),
+          result.usage
+        )
       );
     }
   };

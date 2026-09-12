@@ -2,25 +2,46 @@
 export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
 
 /** Workers AI model used by all in-repo agents. Must support function calling. */
-export const CHAT_MODEL_ID = "@cf/zai-org/glm-5.2";
+export const CHAT_MODEL_ID = "@cf/zai-org/glm-5.3-flash";
 
 /** Fallback model tried when the primary model throws an error. */
-export const CHAT_FALLBACK_MODEL_ID = "@cf/zai-org/glm-4.7-flash";
+export const CHAT_FALLBACK_MODEL_ID = "@cf/zai-org/glm-5.2";
 
 /**
- * Reasoning budget asked of both chat models. GLM reasons by default, but with
- * no budget attached the depth is the provider's — and left to itself it has
- * answered registry questions straight from the conversation instead of calling
- * the tool that would have checked. `medium` is the middle of the three levels
- * the provider accepts: enough deliberation to decide a tool call is needed,
- * without paying `high` on every Slack turn. `null` would disable thinking.
+ * Reasoning budget asked of each chat model — **the most each one offers**.
  *
- * Passed as the SDK's unified `reasoning` call option, which the provider maps to
- * Workers AI's `reasoning_effort`. It travels in `CHAT_CALL_OPTIONS`
- * ({@link file://./agents/model.ts model.ts}) so the tool loop and the Sessions
- * compaction summarizer cannot drift apart.
+ * Per model, not one shared value, because the two do not share an enum.
+ * Cloudflare documents `reasoning_effort` as `low | medium | high` for
+ * {@link CHAT_MODEL_ID} and as `none | high | max` for
+ * {@link CHAT_FALLBACK_MODEL_ID}. There is no level both accept above `high`, so
+ * "turn it up as far as it goes" is two different words.
+ *
+ * That divergence used to be invisible. A single `medium` was sent to GLM-5.2,
+ * whose enum has no `medium` at all, and every AI Gateway log shows Workers AI
+ * silently coercing it to `high` on the way through — so the constant said one
+ * thing, the wire said another, and the doc comment explaining the choice
+ * described a model the value never reached. Setting each model's own ceiling
+ * removes the guess.
+ *
+ * GLM reasons by default, but with no budget attached the depth is the
+ * provider's — and left to itself it has answered registry questions straight
+ * from the conversation instead of calling the tool that would have checked.
  */
-export const CHAT_REASONING_EFFORT = "medium";
+export const CHAT_REASONING_EFFORT = "high";
+
+/**
+ * {@link CHAT_FALLBACK_MODEL_ID}'s ceiling, which is a level above the primary's.
+ *
+ * It cannot travel the same route as {@link CHAT_REASONING_EFFORT}:
+ * `workers-ai-provider` types `reasoning_effort` as `"low" | "medium" | "high"`,
+ * the flash models' enum rather than the catalog's, so `max` does not typecheck
+ * as a model setting even though `binding.run` forwards it untouched. It is
+ * passed through `providerOptions["workers-ai"]` instead — the provider's own
+ * documented escape for values its typed surface does not cover, and the one the
+ * provider says wins over a setting — applied by the fallback middleware, which
+ * is where "we are now using the other model" is already known.
+ */
+export const CHAT_FALLBACK_REASONING_EFFORT = "max";
 
 /**
  * Workers AI text-to-image model for admin avatar generation. FLUX.2 [klein] 9B —

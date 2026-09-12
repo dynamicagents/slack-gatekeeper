@@ -7,6 +7,7 @@ import {
   AI_GATEWAY_ID,
   CHAT_MODEL_ID,
   CHAT_FALLBACK_MODEL_ID,
+  CHAT_FALLBACK_REASONING_EFFORT,
   CHAT_REASONING_EFFORT,
   EMBED_MAX_PER_CALL,
   EMBED_MODEL_ID
@@ -17,8 +18,14 @@ import {
  * tool loop and the Sessions compaction summarizer are two call sites of the same
  * model, and a setting applied to only one of them fails silently.
  *
- * `reasoning` is the SDK's unified option; the provider maps it to Workers AI's
- * `reasoning_effort`. Telemetry is off because on workerd its tracing span leaves a
+ * Reasoning is **not** here any more. The unified `reasoning` call option applies
+ * to whichever model serves the call, and the primary and the fallback no longer
+ * accept the same values — so a depth that is right for one is wrong for the
+ * other. It belongs to the model now, set where each model is built. (The unified
+ * option could not express the fallback's ceiling either: its enum stops at
+ * `xhigh`, which the provider clamps to `high`.)
+ *
+ * Telemetry is off because on workerd its tracing span leaves a
  * duplicate of every rejection unhandled — `isNodeRuntime()` is
  * `process.release?.name === "node"`, true under `nodejs_compat`, so the SDK enters
  * `runWithTracingChannelSpan` and workerd's `tracingChannel` never reports
@@ -29,7 +36,6 @@ import {
  * call options and run whatever telemetry is set to. See `shared/turn-log.ts`.
  */
 export const CHAT_CALL_OPTIONS = {
-  reasoning: CHAT_REASONING_EFFORT,
   telemetry: { isEnabled: false }
 } as const;
 
@@ -127,7 +133,10 @@ export function chatModel(
   const workersai = agentProvider();
   const gateway = gatewayFor(metadata);
   return wrapLanguageModel({
-    model: workersai(CHAT_MODEL_ID, { gateway }),
+    model: workersai(CHAT_MODEL_ID, {
+      gateway,
+      reasoning_effort: CHAT_REASONING_EFFORT
+    }),
     // Order matters: the first entry is the outermost. History is repaired
     // before the fallback is handed the same params, so the fallback model
     // needs no wrapper of its own — a shape the primary refused is one it
@@ -135,7 +144,10 @@ export function chatModel(
     // failed over is still the same turn's cost.
     middleware: [
       normalizeToolInputMiddleware,
-      fallbackMiddleware(workersai(CHAT_FALLBACK_MODEL_ID, { gateway }))
+      fallbackMiddleware(
+        workersai(CHAT_FALLBACK_MODEL_ID, { gateway }),
+        CHAT_FALLBACK_REASONING_EFFORT
+      )
     ]
   });
 }

@@ -241,7 +241,8 @@ function cap(value: unknown): unknown {
  * whole value the way {@link cap} does would put a *string* there: Workers AI
  * rejects that outright on `glm-5.2` ("Assistant tool call function.arguments must
  * be a JSON object"), and on `glm-4.7-flash` the chat template calls `.items()` on
- * it and dies with `'str object' has no attribute 'items'`. Because history is
+ * it and dies with `'str object' has no attribute 'items'`. Those two are what was
+ * running when it was found, not an exhaustive list. Because history is
  * replayed on every later turn, one such record fails *every* subsequent turn — a
  * durable break, not a blip.
  *

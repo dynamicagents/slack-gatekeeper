@@ -10,7 +10,9 @@ import {
 import {
   AI_GATEWAY_ID,
   CHAT_FALLBACK_MODEL_ID,
+  CHAT_FALLBACK_REASONING_EFFORT,
   CHAT_MODEL_ID,
+  CHAT_REASONING_EFFORT,
   EMBED_MODEL_ID
 } from "@/config";
 
@@ -32,6 +34,12 @@ function stubRun(impl?: (model: string) => unknown) {
     .spyOn(env.AI, "run")
     .mockImplementation((async (model: string) =>
       impl ? impl(model) : { response: "ok" }) as never);
+}
+
+/** The `reasoning_effort` on the inputs of the `n`th binding call. */
+function effortOf(run: ReturnType<typeof stubRun>, n = 0): unknown {
+  return (run.mock.calls[n]?.[1] as { reasoning_effort?: unknown } | undefined)
+    ?.reasoning_effort;
 }
 
 /** The gateway options the `n`th binding call ran under. */
@@ -148,6 +156,38 @@ describe("the gateway identity a model call carries", () => {
       id: AI_GATEWAY_ID,
       metadata: { call: "embed" }
     });
+  });
+
+  it("asks each model for the deepest reasoning that model offers", async () => {
+    // The two do not share an enum — Cloudflare documents `low|medium|high` for
+    // the primary and `none|high|max` for the fallback — so one shared value
+    // cannot be right for both. It used to be: `medium` went to a model with no
+    // `medium`, and Workers AI quietly coerced it.
+    //
+    // The fallback's ceiling cannot travel as a model setting at all, because
+    // `workers-ai-provider` types `reasoning_effort` by the flash models' enum.
+    // It goes through `providerOptions["workers-ai"]`, which the provider reads
+    // ahead of any setting.
+    const run = stubRun((model) => {
+      if (model === CHAT_MODEL_ID)
+        throw new Error("primary is out of capacity");
+      return { response: "from the fallback" };
+    });
+
+    await generateText({
+      model: chatModel(fullTurn),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS,
+      maxRetries: 0
+    });
+
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL_ID);
+    expect(effortOf(run, 0)).toBe(CHAT_REASONING_EFFORT);
+    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK_MODEL_ID);
+    expect(effortOf(run, 1)).toBe(CHAT_FALLBACK_REASONING_EFFORT);
+    // The two really are different words, which is the whole reason this is per
+    // model rather than one constant.
+    expect(CHAT_REASONING_EFFORT).not.toBe(CHAT_FALLBACK_REASONING_EFFORT);
   });
 
   it("lets a test seam replace the model without reaching the binding at all", async () => {
