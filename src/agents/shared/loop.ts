@@ -758,9 +758,10 @@ export async function executeAgentTurn(
         onStepEnd,
         onToolExecutionEnd,
         onLanguageModelCallEnd,
-        // `reasoning` and the telemetry opt-out travel together, shared with the
-        // compaction summarizer so the two call sites cannot drift — see
-        // {@link file://../model.ts model.ts}.
+        // The telemetry opt-out, shared with the compaction summarizer so the two
+        // call sites cannot drift. Reasoning depth is not here: it belongs to the
+        // model, because the primary and the fallback do not accept the same
+        // levels — see {@link file://../model.ts model.ts}.
         ...CHAT_CALL_OPTIONS
       });
 

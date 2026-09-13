@@ -10,7 +10,11 @@ import { isRecord, jsonOf } from "@/util/json";
  * string and the string is what the model receives — Workers AI rejects it outright
  * on `glm-5.2` ("Assistant tool call function.arguments must be a JSON object") and
  * crashes rendering it on `glm-4.7-flash` (`'str object' has no attribute 'items'`,
- * the chat template calling `.items()` on a `str`).
+ * the chat template calling `.items()` on a `str`). Both were observed on models
+ * this repo ran at the time; `glm-4.7-flash` is no longer one of them and
+ * `glm-5.3-flash` has not been checked. That changes nothing here — this exists
+ * for durable history written before `capInput`, which has to keep replaying
+ * whatever model reads it.
  *
  * What can put a non-object there is a **durable record capped past the size
  * ceiling** — fixed at the source in `capInput`
