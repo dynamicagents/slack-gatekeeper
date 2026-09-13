@@ -23,11 +23,13 @@ import { guardTeamId } from "@/slack-webhook-handler";
 import {
   getHitlRequest,
   claimHitlAnswer,
+  reopenHitlRequest,
   type HitlRequestRow
 } from "@/db/models/hitl-requests";
 import { optionLabel, type HitlAnswerChoice } from "@/a2a/hitl";
-import { resumeAgentTask } from "@/agents/dispatch";
+import { resumeAgentTask, type ResumeOutcome } from "@/agents/dispatch";
 import { postEphemeral, updateBlocks, openView } from "@/wrappers/slack";
+import { isRecord } from "@/util/json";
 
 const OK = () => new Response("ok", { status: 200 });
 
@@ -64,14 +66,79 @@ function promptSectionBlock(row: HitlRequestRow): unknown {
 }
 
 /**
+ * The `block_id` of the one line the gatekeeper adds to a prompt about its
+ * answer — on its way, or didn't arrive. Fixed, so each new line replaces the
+ * last instead of stacking under it when the same prompt fails more than once.
+ */
+const DELIVERY_NOTE_BLOCK_ID = "hitl-delivery-note";
+
+/** Longest answer label quoted in a delivery note; a typed answer can be long. */
+const MAX_NOTE_LABEL_CHARS = 200;
+
+/** Longest typed answer handed back to its author for pasting in again. */
+const MAX_RETURNED_ANSWER_CHARS = 30_000;
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function blockField(block: unknown, key: string): unknown {
+  return isRecord(block) ? block[key] : undefined;
+}
+
+/** A prompt's blocks with the gatekeeper's delivery note, if any, taken out. */
+function withoutDeliveryNote(blocks: readonly unknown[]): unknown[] {
+  return blocks.filter(
+    (b) => blockField(b, "block_id") !== DELIVERY_NOTE_BLOCK_ID
+  );
+}
+
+function deliveryNote(text: string): unknown {
+  return {
+    type: "context",
+    block_id: DELIVERY_NOTE_BLOCK_ID,
+    elements: [{ type: "mrkdwn", text }]
+  };
+}
+
+/**
+ * The prompt while its answer is being sent: as it was, minus every control
+ * (buttons, radios, selects and "Type your answer" are all `actions` blocks), plus
+ * a note saying whose answer is on its way.
+ */
+function sendingBlocks(blocks: readonly unknown[], note: string): unknown[] {
+  return [
+    ...withoutDeliveryNote(blocks).filter(
+      (b) => blockField(b, "type") !== "actions"
+    ),
+    deliveryNote(note)
+  ];
+}
+
+/** The prompt put back exactly as it was clicked, plus a note saying why. */
+function reopenedBlocks(blocks: readonly unknown[], note: string): unknown[] {
+  return [...withoutDeliveryNote(blocks), deliveryNote(note)];
+}
+
+/**
  * Record a human's answer to a HITL prompt and resume the task. First-click-wins
  * via the atomic claim: a losing racer (or a click on an already-resolved prompt)
- * gets an ephemeral notice instead. On a win, the Slack prompt is updated to an
- * answered state and the answer is sent back onto the paused A2A task.
+ * gets an ephemeral notice instead.
+ *
+ * Slack shows nothing once a click is acknowledged, so every sign of progress is
+ * an update we make. When the click carried the prompt's blocks, the prompt loses
+ * its controls and says the answer is on its way while it is sent; a typed answer
+ * arrives from a modal, which carries none, so its prompt is left alone.
+ *
+ * Only once the agent has accepted (or refused) does the prompt show the answered
+ * state. If the answer never got there, the claim is undone and the prompt comes
+ * back as it was clicked, with a note — or, with no blocks to put back, its author
+ * is told privately, with what they typed.
  */
 async function answerHitl(
   requestId: string,
-  input: HitlAnswerChoice & { answeredBy: string }
+  input: HitlAnswerChoice & { answeredBy: string },
+  clickedBlocks?: readonly unknown[]
 ): Promise<void> {
   const claimed = await claimHitlAnswer(requestId, {
     answeredBy: input.answeredBy,
@@ -97,13 +164,58 @@ async function answerHitl(
     input.text ??
     input.optionId ??
     "answered";
+  const noteLabel = clip(label, MAX_NOTE_LABEL_CHARS);
+  const ts = claimed.slackMessageTs;
+  const blocks = ts ? clickedBlocks : undefined;
 
-  // Swap the live buttons for a resolved state (chat.update by stored ts).
-  if (claimed.slackMessageTs) {
+  // Not awaited before the send: it is cosmetic, and the send is what the
+  // `waitUntil` budget is for. Awaited after, so it can never land on top of the
+  // final state.
+  const sending =
+    ts && blocks
+      ? updateBlocks({
+          channelId: claimed.channelId,
+          ts,
+          blocks: sendingBlocks(
+            blocks,
+            `⏳ Sending <@${input.answeredBy}>'s answer: *${noteLabel}*…`
+          ),
+          text: `Sending: ${noteLabel}`
+        }).catch((err: unknown) => {
+          console.error("[hitl] failed to show the answer as sending", {
+            requestId,
+            err: err instanceof Error ? err.message : String(err)
+          });
+        })
+      : undefined;
+
+  // Spread rather than re-listing the two fields: rebuilding them by hand loses
+  // the union's narrowing and lets an answer with neither back through.
+  const outcome: ResumeOutcome = await resumeAgentTask(claimed, {
+    ...input,
+    humanText: label
+  }).catch((err: unknown) => {
+    console.error("[hitl] resume failed before any verdict", {
+      requestId,
+      err: err instanceof Error ? err.message : String(err)
+    });
+    return "undelivered" as const;
+  });
+  await sending;
+
+  if (outcome === "undelivered" && (await reopenHitlRequest(requestId))) {
+    await offerAnswerAgain(claimed, input, noteLabel, blocks);
+    return;
+  }
+
+  // Delivered, refused (the answer stands, and the thread has been told), or
+  // never delivered to a task that has since ended. Either way someone answered,
+  // and the prompt must stop offering controls.
+  if (ts) {
     try {
       await updateBlocks({
         channelId: claimed.channelId,
-        ts: claimed.slackMessageTs,
+        ts,
         blocks: answeredSlackInputBlocks({
           answer: label,
           promptBlock: promptSectionBlock(claimed),
@@ -112,17 +224,62 @@ async function answerHitl(
         text: `Answered: ${label}`
       });
     } catch (err) {
-      // Cosmetic — never block the resume on a failed message update.
+      // Cosmetic — the answer is recorded whether or not the prompt says so.
       console.error("[hitl] failed to update answered prompt", {
         requestId,
         err: err instanceof Error ? err.message : String(err)
       });
     }
   }
+}
 
-  // Spread rather than re-listing the two fields: rebuilding them by hand loses
-  // the union's narrowing and lets an answer with neither back through.
-  await resumeAgentTask(claimed, { ...input, humanText: label });
+/**
+ * Tell people a re-opened prompt needs answering again. On the prompt itself when
+ * the click's blocks can be put back; otherwise — a typed answer, or a failed
+ * update — privately to whoever answered, with their typed text so it is not lost.
+ */
+async function offerAnswerAgain(
+  row: HitlRequestRow,
+  input: HitlAnswerChoice & { answeredBy: string },
+  noteLabel: string,
+  blocks: readonly unknown[] | undefined
+): Promise<void> {
+  if (row.slackMessageTs && blocks) {
+    try {
+      await updateBlocks({
+        channelId: row.channelId,
+        ts: row.slackMessageTs,
+        blocks: reopenedBlocks(
+          blocks,
+          `⚠️ <@${input.answeredBy}>'s answer (*${noteLabel}*) didn't reach *${row.agentName}* — please answer again.`
+        ),
+        text: row.promptText
+      });
+      return;
+    } catch (err) {
+      console.error("[hitl] failed to re-open prompt", {
+        requestId: row.requestId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  const failed = `didn't reach *${row.agentName}*, so the question is open again — please answer again.`;
+  try {
+    await postEphemeral({
+      channelId: row.channelId,
+      userId: input.answeredBy,
+      threadTs: row.threadTs,
+      text: input.text
+        ? `⚠️ Your answer ${failed} What you wrote:\n${clip(input.text, MAX_RETURNED_ANSWER_CHARS)}`
+        : `⚠️ Your answer (*${noteLabel}*) ${failed}`
+    });
+  } catch (err) {
+    console.error("[hitl] failed to tell the answerer to answer again", {
+      requestId: row.requestId,
+      err: err instanceof Error ? err.message : String(err)
+    });
+  }
 }
 
 /** Handle a button/select/radio click, or a "Something else…" freeform button. */
@@ -133,10 +290,11 @@ async function handleBlockActions(
     // A fixed-option answer (button, static_select, or radio).
     const parsed = parseSlackInputResponse(action);
     if (parsed?.optionId) {
-      await answerHitl(parsed.requestId, {
-        optionId: parsed.optionId,
-        answeredBy: payload.userId
-      });
+      await answerHitl(
+        parsed.requestId,
+        { optionId: parsed.optionId, answeredBy: payload.userId },
+        payload.messageBlocks
+      );
       continue;
     }
 
