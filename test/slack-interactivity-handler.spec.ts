@@ -23,8 +23,10 @@ import {
 import {
   createHitlRequest,
   setHitlSlackMessageTs,
-  getHitlRequest
+  getHitlRequest,
+  cancelHitlRequestsByToken
 } from "@/db/models/hitl-requests";
+import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
 import { _resetIssuerCacheForTest } from "@/agents/dispatch";
 import { buildAgentCard } from "@/a2a/card";
 import {
@@ -60,7 +62,12 @@ interface Captured {
  */
 function stub(
   captured: Captured,
-  opts: { rejectResume?: boolean; failResume?: number } = {}
+  opts: {
+    rejectResume?: boolean;
+    failResume?: number;
+    /** Runs before each `chat.update` is answered, to hold or interleave it. */
+    onUpdate?: (params: URLSearchParams) => Promise<void>;
+  } = {}
 ) {
   let failuresLeft = opts.failResume ?? 0;
   const card = buildAgentCard({
@@ -75,9 +82,9 @@ function stub(
         input instanceof Request ? input : new Request(input, init);
       const url = request.url;
       if (url.includes("chat.update")) {
-        captured.slackUpdates.push(
-          new URLSearchParams(await request.clone().text())
-        );
+        const params = new URLSearchParams(await request.clone().text());
+        captured.slackUpdates.push(params);
+        await opts.onUpdate?.(params);
         return Response.json({ ok: true, ts: "1700.9" });
       }
       if (url.includes("chat.postEphemeral")) {
@@ -535,6 +542,53 @@ describe("an answer that doesn't reach the agent", () => {
     expect((await getHitlRequest("req-again"))?.status).toBe("answered");
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("pending");
     expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
+  });
+
+  it("re-opens even while the 'sending' update is still hanging", async () => {
+    // A Slack call has no timeout, and a cosmetic one must not stand between a
+    // lost answer and the claim being undone.
+    await seedParkedRequest("req-hung");
+    const captured = emptyCapture();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    stub(captured, {
+      failResume: 3,
+      onUpdate: async (params) => {
+        if (params.get("text")?.startsWith("Sending:")) await held;
+      }
+    });
+
+    const done = click(buttonAction("req-hung", "approve"));
+    await vi.waitFor(async () => {
+      expect((await getHitlRequest("req-hung"))?.status).toBe("awaiting");
+    });
+    release();
+    await done;
+
+    expect(notesOf(captured.slackUpdates.at(-1))).toHaveLength(1);
+  });
+
+  it("closes the prompt again if the task ends between re-opening and restoring it", async () => {
+    await seedParkedRequest("req-race");
+    const captured = emptyCapture();
+    stub(captured, {
+      failResume: 3,
+      onUpdate: async (params) => {
+        // A final status closes the task's prompts while the restore is in flight.
+        if (params.get("text") === "Proceed?") {
+          await cancelHitlRequestsByToken("tok-1");
+        }
+      }
+    });
+
+    await click(buttonAction("req-race", "approve"));
+
+    expect((await getHitlRequest("req-race"))?.status).toBe("canceled");
+    const last = captured.slackUpdates.at(-1);
+    expect(last?.get("text")).toBe(TASK_ENDED_NOTE);
+    expect(blocksOf(last)).not.toContainEqual(
+      expect.objectContaining({ type: "actions" })
+    );
   });
 
   it("hands a typed answer back to its author, since there is no prompt to restore", async () => {

@@ -27,6 +27,10 @@ import {
   type HitlRequestRow
 } from "@/db/models/hitl-requests";
 import { optionLabel, type HitlAnswerChoice } from "@/a2a/hitl";
+import {
+  markHitlPromptResolved,
+  TASK_ENDED_NOTE
+} from "@/a2a/notifications/hitl";
 import { resumeAgentTask, type ResumeOutcome } from "@/agents/dispatch";
 import { postEphemeral, updateBlocks, openView } from "@/wrappers/slack";
 import { isRecord } from "@/util/json";
@@ -169,8 +173,9 @@ async function answerHitl(
   const blocks = ts ? clickedBlocks : undefined;
 
   // Not awaited before the send: it is cosmetic, and the send is what the
-  // `waitUntil` budget is for. Awaited after, so it can never land on top of the
-  // final state.
+  // `waitUntil` budget is for. Awaited before the final update, so it can never
+  // land on top of it — but only after anything durable, since a Slack call has
+  // no timeout of its own and a hung one must not strand the answer.
   const sending =
     ts && blocks
       ? updateBlocks({
@@ -201,12 +206,13 @@ async function answerHitl(
     });
     return "undelivered" as const;
   });
-  await sending;
 
   if (outcome === "undelivered" && (await reopenHitlRequest(requestId))) {
+    await sending;
     await offerAnswerAgain(claimed, input, noteLabel, blocks);
     return;
   }
+  await sending;
 
   // Delivered, refused (the answer stands, and the thread has been told), or
   // never delivered to a task that has since ended. Either way someone answered,
@@ -255,6 +261,7 @@ async function offerAnswerAgain(
         ),
         text: row.promptText
       });
+      await closeIfEndedMeanwhile(row.requestId);
       return;
     } catch (err) {
       console.error("[hitl] failed to re-open prompt", {
@@ -279,6 +286,21 @@ async function offerAnswerAgain(
       requestId: row.requestId,
       err: err instanceof Error ? err.message : String(err)
     });
+  }
+}
+
+/**
+ * Undo a restore that lost a race with the task ending.
+ *
+ * Between re-opening the row and restoring its controls, a final status or a 🛑
+ * can close the task's open prompts — this one included — and write the closed
+ * state first, which the restore would then paint over with live controls. Read
+ * after writing, so whichever order the two landed in, the closed state is last.
+ */
+async function closeIfEndedMeanwhile(requestId: string): Promise<void> {
+  const row = await getHitlRequest(requestId);
+  if (row?.status === "canceled") {
+    await markHitlPromptResolved(row, TASK_ENDED_NOTE);
   }
 }
 
