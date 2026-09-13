@@ -52,7 +52,7 @@ function alreadyResolvedText(row: HitlRequestRow): string {
     case "expired":
       return "That prompt has expired.";
     case "canceled":
-      return "That prompt was canceled.";
+      return "That prompt is closed — its task has already ended.";
     default:
       return "That prompt is no longer open.";
   }

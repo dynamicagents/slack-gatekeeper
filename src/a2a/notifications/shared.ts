@@ -9,7 +9,11 @@ import { isTerminalTaskState, taskStateLabel } from "@/a2a/parts";
 import { snapshotText, type TaskSnapshot } from "@/a2a/snapshot";
 import { sanitizeAgentReply } from "@/a2a/client";
 import { parseHitlRequest } from "@/a2a/hitl";
-import { deliverHitlRequest } from "@/a2a/notifications/hitl";
+import {
+  closeOpenHitlPrompts,
+  deliverHitlRequest,
+  TASK_ENDED_NOTE
+} from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import { collectIfEventDrained } from "@/workflows/message-helpers";
 
@@ -93,6 +97,15 @@ export async function deliverTaskToSlack(
     }
     return;
   }
+
+  // A terminal task can't be continued, so a question it still has open can no
+  // longer be answered — an agent that stopped waiting on one ends up here.
+  //
+  // Closed before the row goes terminal, not after: the boundaries drop every
+  // callback for a terminal row, so a failure past that point would never be
+  // retried and the prompt would stay live. Closing is idempotent, so a retry
+  // after a later failure repeats nothing.
+  await closeOpenHitlPrompts(token, TASK_ENDED_NOTE);
 
   // A stop is an outcome the user chose, not a failure to explain — and the
   // cancel workflow already posted "🛑 Stopped." Treat `canceled` like

@@ -121,9 +121,30 @@ export async function claimHitlAnswer(
 }
 
 /**
- * Cancel every still-open prompt for a task's correlation token (a 🛑 landed
- * while the task was parked on input). Returns the canceled rows so the caller
- * can update each Slack prompt to a canceled state.
+ * Cancel one still-open prompt by its id. For a prompt that was recorded but will
+ * never be shown, so it has no Slack message to update. Returns whether it was
+ * still `awaiting`.
+ */
+export async function cancelHitlRequest(requestId: string): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.hitlRequests)
+    .set({ status: "canceled" })
+    .where(
+      and(
+        eq(schema.hitlRequests.requestId, requestId),
+        eq(schema.hitlRequests.status, "awaiting")
+      )
+    )
+    .returning({ requestId: schema.hitlRequests.requestId });
+  return rows.length > 0;
+}
+
+/**
+ * Cancel every still-open prompt for a task's correlation token, because the task
+ * is over: a 🛑 landed while it was parked on input, or the agent reached a final
+ * status without the answer. Returns the canceled rows so the caller can update
+ * each Slack prompt to a closed state.
  */
 export async function cancelHitlRequestsByToken(
   token: string

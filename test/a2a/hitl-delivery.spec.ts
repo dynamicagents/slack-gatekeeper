@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { env } from "cloudflare:workers";
 import { TaskState } from "@a2a-js/sdk";
 import { registerAgent, getAgent } from "@/db/models/agents";
 import {
@@ -8,6 +9,7 @@ import {
 } from "@/db/models/agent-tasks";
 import { getHitlRequest } from "@/db/models/hitl-requests";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
+import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
 import { HITL_REQUEST_TYPE } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
@@ -19,9 +21,14 @@ interface SlackPost {
   text: string;
   blocks?: string;
   thread_ts?: string;
+  ts?: string;
 }
 
-function stubFetch(posts: SlackPost[]) {
+/**
+ * Record Slack posts and updates. `failReplies` makes every plain (block-less)
+ * post fail, the way a Slack outage fails an agent's final reply.
+ */
+function stubFetch(posts: SlackPost[], opts: { failReplies?: boolean } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -31,19 +38,27 @@ function stubFetch(posts: SlackPost[]) {
           : input instanceof URL
             ? input.toString()
             : input.url;
-      if (url.includes("chat.postMessage")) {
+      const method = ["chat.postMessage", "chat.update"].find((m) =>
+        url.includes(m)
+      );
+      if (method) {
         const raw =
           input instanceof Request
             ? await input.clone().text()
             : String(init?.body ?? "");
         const body = new URLSearchParams(raw);
-        posts.push({
-          method: "chat.postMessage",
+        const post: SlackPost = {
+          method,
           channel: body.get("channel") ?? "",
           text: body.get("text") ?? "",
           blocks: body.get("blocks") ?? undefined,
-          thread_ts: body.get("thread_ts") ?? undefined
-        });
+          thread_ts: body.get("thread_ts") ?? undefined,
+          ts: body.get("ts") ?? undefined
+        };
+        if (opts.failReplies && method === "chat.postMessage" && !post.blocks) {
+          return Response.json({ ok: false, error: "internal_error" });
+        }
+        posts.push(post);
         return Response.json({ ok: true, ts: "1700.9" });
       }
       return new Response("not found", { status: 404 });
@@ -72,6 +87,12 @@ function hitlTask(
 }
 
 beforeEach(async () => {
+  // A final status completes the row, which signals the ReactionWorkflow — an
+  // instance these tests never create, so miniflare emits engine noise. Nothing
+  // here asserts the 🛑's lifetime (that's reaction.spec), so stub the binding.
+  vi.spyOn(env.REACTION_WORKFLOW, "get").mockResolvedValue({
+    sendEvent: async () => {}
+  } as unknown as WorkflowInstance);
   await registerAgent({
     name: "remoteagent",
     kind: "remote",
@@ -93,6 +114,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 async function deliver(snapshot: TaskSnapshot) {
@@ -159,6 +181,25 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect(posts).toHaveLength(0);
     // The task stays terminal — the park was a no-op.
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("completed");
+    // And the request is closed, not left `awaiting` for the expiry sweep to send
+    // a timeout onto a task that is already over.
+    expect((await getHitlRequest("req-race"))?.status).toBe("canceled");
+  });
+
+  it("closes a second prompt that fails to park, and only that one", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-first"));
+
+    // The park fails here because the task is already parked, not because it is
+    // over — so the question it is parked on still stands.
+    await deliver(hitlTask("req-second"));
+
+    expect((await getHitlRequest("req-first"))?.status).toBe("awaiting");
+    // Never shown, so never left for the sweep to time out.
+    expect((await getHitlRequest("req-second"))?.status).toBe("canceled");
+    expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
+    expect(posts.filter((p) => p.blocks)).toHaveLength(1);
   });
 
   it("falls back to a plain reply for input-required without a HITL DataPart", async () => {
@@ -170,5 +211,76 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toBeUndefined();
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+  });
+});
+
+describe("deliverTaskToSlack — a final status closes the task's open prompt", () => {
+  it.each([
+    ["completed", TaskState.TASK_STATE_COMPLETED],
+    ["failed", TaskState.TASK_STATE_FAILED],
+    ["canceled", TaskState.TASK_STATE_CANCELED],
+    ["rejected", TaskState.TASK_STATE_REJECTED]
+  ])("closes it and strips its buttons when %s", async (_label, state) => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-final"));
+
+    // The agent stopped waiting on the question and ended the task itself.
+    await deliver(
+      makeSnapshot({ id: "task-1", state, text: "Gave up.", messageId: "f1" })
+    );
+
+    expect((await getHitlRequest("req-final"))?.status).toBe("canceled");
+    const updates = posts.filter((p) => p.method === "chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].ts).toBe("1700.9");
+    expect(updates[0].text).toBe(TASK_ENDED_NOTE);
+    expect(updates[0].blocks).not.toContain("req-final");
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("completed");
+  });
+
+  it("closes it before the task goes terminal, so a failed reply is retried", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-retry"));
+    const final = makeSnapshot({
+      id: "task-1",
+      state: TaskState.TASK_STATE_FAILED,
+      text: "No answer came.",
+      messageId: "f1"
+    });
+
+    // The final reply fails to post, so the delivery throws with the row still
+    // open — which is what lets the agent's retry through the boundary at all.
+    stubFetch(posts, { failReplies: true });
+    await expect(deliver(final)).rejects.toThrow();
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+    expect((await getHitlRequest("req-retry"))?.status).toBe("canceled");
+
+    // The retry posts the reply and completes, without editing the prompt again.
+    stubFetch(posts);
+    await deliver(final);
+    expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(1);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("completed");
+  });
+
+  it("leaves the prompt open on an update that is not final", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-open"));
+
+    await deliver(
+      makeSnapshot({
+        id: "task-1",
+        state: TaskState.TASK_STATE_WORKING,
+        text: "Still thinking.",
+        messageId: "w1"
+      })
+    );
+
+    expect((await getHitlRequest("req-open"))?.status).toBe("awaiting");
+    expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
   });
 });

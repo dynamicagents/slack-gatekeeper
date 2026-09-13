@@ -16,8 +16,7 @@ import {
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { getAgent } from "@/db/models/agents";
-import { cancelHitlRequestsByToken } from "@/db/models/hitl-requests";
-import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
+import { closeOpenHitlPrompts } from "@/a2a/notifications/hitl";
 import { renderEditDiff } from "@/util/text-diff";
 import { postReply } from "@/wrappers/slack";
 import { signalReactionSync } from "@/workflows/reaction-helpers";
@@ -351,10 +350,7 @@ export async function cancelTaskRow(
   // Close any human-in-the-loop prompt the task had open (the stop supersedes it),
   // and strip its now-dead buttons in Slack. Independent of the cancel outcome:
   // the run is over, so the pending question no longer stands.
-  const canceledPrompts = await cancelHitlRequestsByToken(row.token);
-  for (const prompt of canceledPrompts) {
-    await markHitlPromptResolved(prompt, "🛑 Canceled.");
-  }
+  await closeOpenHitlPrompts(row.token, "🛑 Canceled.");
 
   return { agentName: row.agentName, kind };
 }

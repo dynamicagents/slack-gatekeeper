@@ -5,7 +5,16 @@ import {
   setPublicUrl,
   setAllowedRemoteAgentDomains
 } from "@/db/models/workspace-configs";
-import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
+import {
+  createAgentTask,
+  getAgentTaskByToken,
+  suspendForInput
+} from "@/db/models/agent-tasks";
+import {
+  createHitlRequest,
+  getHitlRequest,
+  setHitlSlackMessageTs
+} from "@/db/models/hitl-requests";
 import { cancelTaskRow } from "@/workflows/message-helpers";
 import { buildAgentCard } from "@/a2a/card";
 import { makeTask } from "../helpers/a2a";
@@ -13,8 +22,14 @@ import { makeTask } from "../helpers/a2a";
 const ENDPOINT = "https://agent.example.com/a2a";
 const ISSUER = "https://gw.example.com";
 
-/** Serve the agent card on GET and a fixed JSON-RPC payload on POST (tasks/cancel). */
-function stubCancelRemote(postPayload: (id: unknown) => unknown) {
+/**
+ * Serve the agent card on GET and a fixed JSON-RPC payload on POST (tasks/cancel).
+ * Slack `chat.update` bodies are recorded into `slackUpdates` when given.
+ */
+function stubCancelRemote(
+  postPayload: (id: unknown) => unknown,
+  slackUpdates: URLSearchParams[] = []
+) {
   const card = buildAgentCard({
     name: "Remote",
     description: "remote test agent",
@@ -24,10 +39,15 @@ function stubCancelRemote(postPayload: (id: unknown) => unknown) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const isReq = input instanceof Request;
+      const url = isReq ? input.url : String(input);
       const method = init?.method ?? (isReq ? input.method : "GET");
       const body = isReq
         ? await input.clone().text()
         : String(init?.body ?? "");
+      if (url.includes("chat.update")) {
+        slackUpdates.push(new URLSearchParams(body));
+        return Response.json({ ok: true, ts: "1700.9" });
+      }
       if (method.toUpperCase() === "POST") {
         let id: unknown = 1;
         try {
@@ -96,6 +116,39 @@ describe("cancelTaskRow", () => {
     const res = await cancelTaskRow(row!, USER_ORIGIN);
     expect(res).toEqual({ agentName: "remoteagent", kind: "stopped" });
     expect((await getAgentTaskByToken("t1"))?.status).toBe("canceled");
+  });
+
+  it("closes the prompt a parked task has open and strips its buttons", async () => {
+    const slackUpdates: URLSearchParams[] = [];
+    stubCancelRemote(
+      (id) => ({ jsonrpc: "2.0", id, result: canceledTask }),
+      slackUpdates
+    );
+    await seedTask("t7", "task-9");
+    await createHitlRequest({
+      requestId: "req-stop",
+      token: "t7",
+      taskId: "task-9",
+      contextId: "C1:T1",
+      agentName: "remoteagent",
+      channelId: "C1",
+      threadTs: null,
+      requestKind: "approval",
+      promptText: "Proceed?",
+      optionsJson: null,
+      allowFreeform: false,
+      deadlineAt: Math.floor(Date.now() / 1000) + 600
+    });
+    await setHitlSlackMessageTs("req-stop", "1700.5");
+    await suspendForInput("t7");
+    const row = await getAgentTaskByToken("t7");
+
+    await cancelTaskRow(row!, USER_ORIGIN);
+
+    expect((await getHitlRequest("req-stop"))?.status).toBe("canceled");
+    expect(slackUpdates).toHaveLength(1);
+    expect(slackUpdates[0].get("ts")).toBe("1700.5");
+    expect(slackUpdates[0].get("text")).toBe("🛑 Canceled.");
   });
 
   it("records intent (no cancel call) when the taskId isn't known yet", async () => {

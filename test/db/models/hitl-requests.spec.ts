@@ -13,6 +13,7 @@ import {
   getHitlRequest,
   setHitlSlackMessageTs,
   claimHitlAnswer,
+  cancelHitlRequest,
   cancelHitlRequestsByToken,
   expireStaleHitlRequests,
   sweepStaleHitlRequests,
@@ -122,6 +123,24 @@ describe("hitl-requests model", () => {
       });
       expect(claimed?.answerText).toBe("something else");
       expect(claimed?.answeredOptionId).toBeNull();
+    });
+  });
+
+  describe("cancelHitlRequest", () => {
+    it("cancels one awaiting request, once, and leaves its siblings open", async () => {
+      await createHitlRequest(input("req-one", { token: "tok-z" }));
+      await createHitlRequest(input("req-two", { token: "tok-z" }));
+      expect(await cancelHitlRequest("req-one")).toBe(true);
+      expect(await cancelHitlRequest("req-one")).toBe(false);
+      expect((await getHitlRequest("req-one"))?.status).toBe("canceled");
+      expect((await getHitlRequest("req-two"))?.status).toBe("awaiting");
+    });
+
+    it("does not reopen or overwrite an answered request", async () => {
+      await createHitlRequest(input("req-done"));
+      await claimHitlAnswer("req-done", { answeredBy: "U1", optionId: "a" });
+      expect(await cancelHitlRequest("req-done")).toBe(false);
+      expect((await getHitlRequest("req-done"))?.status).toBe("answered");
     });
   });
 
