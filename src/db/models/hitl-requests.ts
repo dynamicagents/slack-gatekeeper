@@ -121,9 +121,10 @@ export async function claimHitlAnswer(
 }
 
 /**
- * Cancel every still-open prompt for a task's correlation token (a 🛑 landed
- * while the task was parked on input). Returns the canceled rows so the caller
- * can update each Slack prompt to a canceled state.
+ * Cancel every still-open prompt for a task's correlation token, because the task
+ * is over: a 🛑 landed while it was parked on input, or the agent reached a final
+ * status without the answer. Returns the canceled rows so the caller can update
+ * each Slack prompt to a closed state.
  */
 export async function cancelHitlRequestsByToken(
   token: string

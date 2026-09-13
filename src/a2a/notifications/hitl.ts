@@ -1,8 +1,14 @@
 import { inputRequestToSlackBlocks } from "@chat-adapter/slack/blocks";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
-import { suspendForInput, type AgentTaskRow } from "@/db/models/agent-tasks";
 import {
+  getAgentTaskByToken,
+  isTerminalTaskStatus,
+  suspendForInput,
+  type AgentTaskRow
+} from "@/db/models/agent-tasks";
+import {
+  cancelHitlRequestsByToken,
   createHitlRequest,
   getHitlRequest,
   setHitlSlackMessageTs,
@@ -92,7 +98,18 @@ export async function deliverHitlRequest(
   // crash-recovery path, whose task was already parked, so a false park there is
   // expected — let it re-post.)
   const parked = await suspendForInput(token);
-  if (created && !parked) return;
+  if (created && !parked) {
+    // Not posting still leaves the row just created `awaiting`, and a week from
+    // now the expiry sweep would send a timeout onto a finished task and warn the
+    // thread when the agent refuses it. Close it with the task. Only if the task
+    // really is over, though: a park also fails on a task already parked on an
+    // earlier prompt, and that prompt still stands.
+    const task = await getAgentTaskByToken(token);
+    if (task && isTerminalTaskStatus(task.status)) {
+      await closeOpenHitlPrompts(token, TASK_ENDED_NOTE);
+    }
+    return;
+  }
 
   const { displayName, iconUrl } = await agentRenderIdentity(
     agent,
@@ -140,6 +157,34 @@ export async function markHitlPromptResolved(
       requestId: row.requestId,
       err: err instanceof Error ? err.message : String(err)
     });
+  }
+}
+
+/** The note on a prompt closed because its task ended on the agent's own terms. */
+export const TASK_ENDED_NOTE =
+  "⏹️ Closed — the task ended before anyone answered.";
+
+/**
+ * Close every prompt a task still has open, because the task is over and an answer
+ * could no longer resume it. Whoever ended it — a 🛑, or the agent reaching a final
+ * status of its own — is the caller's concern; `note` is what the prompt says why.
+ *
+ * A prompt left `awaiting` on a finished task is not merely stale. Its buttons stay
+ * live, and a click claims the answer and sends it to an agent that must refuse a
+ * continuation on a terminal task. So does the expiry sweep, a week later. Both
+ * then warn the thread that the task couldn't be continued, pinning it on an agent
+ * that did nothing wrong.
+ *
+ * Idempotent: only rows still `awaiting` are closed and only those get their Slack
+ * message updated, so a retry of the caller repeats nothing a person would see.
+ */
+export async function closeOpenHitlPrompts(
+  token: string,
+  note: string
+): Promise<void> {
+  const closed = await cancelHitlRequestsByToken(token);
+  for (const prompt of closed) {
+    await markHitlPromptResolved(prompt, note);
   }
 }
 

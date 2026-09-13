@@ -258,7 +258,8 @@ export const agentTasks = sqliteTable(
  * same `token` (so continued callbacks land on the paired `agent_tasks` row).
  *
  * Keyed by the agent-chosen `requestId`. Lifecycle: `awaiting` → `answered`
- * (a human decided) | `expired` (TTL swept) | `canceled` (🛑 while parked).
+ * (a human decided) | `expired` (TTL swept) | `canceled` (the task ended first —
+ * a 🛑 while parked, or the agent's own final status).
  */
 export const hitlRequests = sqliteTable(
   "hitl_requests",
