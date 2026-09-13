@@ -1,13 +1,9 @@
 import { inputRequestToSlackBlocks } from "@chat-adapter/slack/blocks";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
+import { suspendForInput, type AgentTaskRow } from "@/db/models/agent-tasks";
 import {
-  getAgentTaskByToken,
-  isTerminalTaskStatus,
-  suspendForInput,
-  type AgentTaskRow
-} from "@/db/models/agent-tasks";
-import {
+  cancelHitlRequest,
   cancelHitlRequestsByToken,
   createHitlRequest,
   getHitlRequest,
@@ -100,14 +96,12 @@ export async function deliverHitlRequest(
   const parked = await suspendForInput(token);
   if (created && !parked) {
     // Not posting still leaves the row just created `awaiting`, and a week from
-    // now the expiry sweep would send a timeout onto a finished task and warn the
-    // thread when the agent refuses it. Close it with the task. Only if the task
-    // really is over, though: a park also fails on a task already parked on an
-    // earlier prompt, and that prompt still stands.
-    const task = await getAgentTaskByToken(token);
-    if (task && isTerminalTaskStatus(task.status)) {
-      await closeOpenHitlPrompts(token, TASK_ENDED_NOTE);
-    }
+    // now the expiry sweep would send a timeout for a question nobody was shown —
+    // onto a finished task, or onto one that has since moved on. Close this row
+    // alone: a park also fails on a task already parked on an earlier prompt, and
+    // that prompt still stands. (A finished task's other prompts were closed by
+    // the delivery that finished it.)
+    await cancelHitlRequest(req.requestId);
     return;
   }
 

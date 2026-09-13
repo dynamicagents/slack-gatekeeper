@@ -186,7 +186,7 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect((await getHitlRequest("req-race"))?.status).toBe("canceled");
   });
 
-  it("leaves an earlier prompt open when a second one fails to park", async () => {
+  it("closes a second prompt that fails to park, and only that one", async () => {
     const posts: SlackPost[] = [];
     stubFetch(posts);
     await deliver(hitlTask("req-first"));
@@ -196,7 +196,10 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     await deliver(hitlTask("req-second"));
 
     expect((await getHitlRequest("req-first"))?.status).toBe("awaiting");
+    // Never shown, so never left for the sweep to time out.
+    expect((await getHitlRequest("req-second"))?.status).toBe("canceled");
     expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
+    expect(posts.filter((p) => p.blocks)).toHaveLength(1);
   });
 
   it("falls back to a plain reply for input-required without a HITL DataPart", async () => {
