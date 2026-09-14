@@ -286,6 +286,35 @@ describe("sendA2ARemote — A2A protocol refusals", () => {
   });
 });
 
+describe("sendA2ARemote — accept timeout", () => {
+  it("aborts an accept that outlives the target's acceptTimeoutMs", async () => {
+    // An agent that never answers: the request settles only when it is aborted.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("accept aborted"))
+            );
+          })
+      )
+    );
+    await expect(
+      sendA2ARemote(
+        {
+          endpoint: ENDPOINT,
+          authToken: "t",
+          tenant: TENANT,
+          acceptTimeoutMs: 10
+        },
+        userMessage("hi"),
+        PUSH
+      )
+    ).rejects.toThrow(/accept aborted/);
+  });
+});
+
 describe("cancelA2ARemote — A2A tasks/cancel", () => {
   it("returns canceled with the updated task on success", async () => {
     const canceled = makeTask({

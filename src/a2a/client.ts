@@ -47,6 +47,13 @@ export interface A2ARemoteTarget {
    * names none, since one endpoint may serve several and none is the default.
    */
   tenant: string;
+  /**
+   * How long to wait for the accept before aborting it. Defaults to
+   * {@link ACCEPT_TIMEOUT_MS}; a caller running on a shorter clock than a
+   * Workflow step — a HITL answer, inside the request's `waitUntil` — passes its
+   * own so a hung agent cannot outlive the time it has left.
+   */
+  acceptTimeoutMs?: number;
 }
 
 /**
@@ -65,12 +72,15 @@ const MAX_REPLY_CHARS = 16_000;
  * token on every request and enforces the short accept timeout. Reuses the same
  * `fetchImpl` override seam the local (DO stub) path uses.
  */
-function remoteFetchImpl(authToken?: string): typeof fetch {
+function remoteFetchImpl(
+  authToken?: string,
+  timeoutMs = ACCEPT_TIMEOUT_MS
+): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
     if (authToken) headers.set("authorization", `Bearer ${authToken}`);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ACCEPT_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(input as RequestInfo, {
         ...init,
@@ -138,7 +148,7 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
     {
       transports: [
         new JsonRpcTransportFactory({
-          fetchImpl: remoteFetchImpl(target.authToken)
+          fetchImpl: remoteFetchImpl(target.authToken, target.acceptTimeoutMs)
         })
       ]
     }

@@ -565,7 +565,13 @@ async function markResumed(token: string): Promise<void> {
 
 async function sendTaskContinuation(
   row: HitlRequestRow,
-  input: { parts: Message["parts"]; messageId: string; caller: UserAuthContext }
+  input: {
+    parts: Message["parts"];
+    messageId: string;
+    caller: UserAuthContext;
+    /** A remote agent's accept timeout; see `A2ARemoteTarget.acceptTimeoutMs`. */
+    acceptTimeoutMs?: number;
+  }
 ): Promise<ContinuationOutcome> {
   const agent = await getAgent(row.agentName);
   if (!agent) {
@@ -632,7 +638,8 @@ async function sendTaskContinuation(
       {
         endpoint: agent.a2aEndpoint,
         authToken: gatekeeperToken,
-        tenant: agent.tenantId
+        tenant: agent.tenantId,
+        acceptTimeoutMs: input.acceptTimeoutMs
       },
       message,
       remotePushNotificationConfig(issuer, row.token)
@@ -712,27 +719,83 @@ async function sendTaskContinuation(
 }
 
 /**
+ * The pauses before the second and third attempt to hand an answer back.
+ *
+ * The whole ladder runs inside the Slack interaction's `ctx.waitUntil`, which the
+ * runtime cancels 30 seconds after the ack — and whatever runs after the last
+ * attempt (re-opening the prompt) has to fit in that too, or the answer is lost
+ * exactly as it was before there were retries. With
+ * {@link RESUME_ACCEPT_TIMEOUT_MS} per attempt the worst case is 5 + 2 + 5 + 5 + 5
+ * = 22 seconds.
+ */
+const RESUME_RETRY_DELAYS_MS = [2_000, 5_000] as const;
+
+/**
+ * A remote agent's accept timeout on an answer. Accepting one is recording it and
+ * waking the parked run, not generating, so this can be a sixth of a dispatch's —
+ * and has to be, for three attempts to fit {@link RESUME_RETRY_DELAYS_MS}' budget.
+ */
+const RESUME_ACCEPT_TIMEOUT_MS = 5_000;
+
+/**
+ * How handing a human's answer back to its task ended.
+ *
+ * - `resumed` — the agent accepted it.
+ * - `refused` — the agent gave a verdict retrying cannot change (or there is no
+ *   agent or task to send it to). The thread has been told; the answer stands.
+ * - `undelivered` — every attempt failed without a verdict (network, timeout,
+ *   5xx, `INTERNAL_ERROR`). Nothing has been told; the caller decides whether
+ *   the question can be asked again.
+ */
+export type ResumeOutcome = "resumed" | "refused" | "undelivered";
+
+/**
  * Resume a parked task with a human's answer. The answerer becomes the caller
  * (anyone in the thread may answer), so a resumed local turn authorizes as them.
- * The answer is already recorded and its Slack prompt already shows the answered
- * state; if the handoff fails the answer still stands, so we only post a thread
- * notice that the agent couldn't be reached — the user knows to go fix it.
+ *
+ * A failure that could be transient is retried after each of
+ * {@link RESUME_RETRY_DELAYS_MS}. That is safe because the `messageId` is the same
+ * on every attempt and the agent takes the first answer to a question, so a
+ * retry after an accept whose response was lost gets the task back and changes
+ * nothing. A refusal is not retried: the same request earns the same verdict.
  */
 export async function resumeAgentTask(
   row: HitlRequestRow,
   answer: HitlAnswer
-): Promise<void> {
-  const caller = await buildUserAuthContext(answer.answeredBy);
-  const outcome = await sendTaskContinuation(row, {
-    // Spread, not a field-by-field rebuild: listing `optionId` and `text`
-    // separately widens both back to `string | undefined` and loses the
-    // guarantee that one of them is present.
-    parts: buildHitlResponseParts({ ...answer, requestId: row.requestId }),
-    messageId: `${row.token}:r:${row.requestId}`,
-    caller
-  });
-  if (outcome.kind === "failed") {
+): Promise<ResumeOutcome> {
+  // Spread, not a field-by-field rebuild: listing `optionId` and `text`
+  // separately widens both back to `string | undefined` and loses the
+  // guarantee that one of them is present.
+  const parts = buildHitlResponseParts({ ...answer, requestId: row.requestId });
+  const messageId = `${row.token}:r:${row.requestId}`;
+  let caller: UserAuthContext | undefined;
+
+  for (let attempt = 1; ; attempt++) {
+    let outcome: ContinuationOutcome;
+    try {
+      caller ??= await buildUserAuthContext(answer.answeredBy);
+      outcome = await sendTaskContinuation(row, {
+        parts,
+        messageId,
+        caller,
+        acceptTimeoutMs: RESUME_ACCEPT_TIMEOUT_MS
+      });
+    } catch (err) {
+      const delay: number | undefined = RESUME_RETRY_DELAYS_MS[attempt - 1];
+      console.error("[hitl] continuation attempt failed", {
+        requestId: row.requestId,
+        attempt,
+        lastAttempt: delay === undefined,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      if (delay === undefined) return "undelivered";
+      await scheduler.wait(delay);
+      continue;
+    }
+
+    if (outcome.kind === "resumed") return "resumed";
     await notifyHitlContinuationFailed(row, outcome.detail);
+    return "refused";
   }
 }
 

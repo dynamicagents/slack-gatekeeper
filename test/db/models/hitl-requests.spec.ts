@@ -13,6 +13,7 @@ import {
   getHitlRequest,
   setHitlSlackMessageTs,
   claimHitlAnswer,
+  reopenHitlRequest,
   cancelHitlRequest,
   cancelHitlRequestsByToken,
   expireStaleHitlRequests,
@@ -123,6 +124,72 @@ describe("hitl-requests model", () => {
       });
       expect(claimed?.answerText).toBe("something else");
       expect(claimed?.answeredOptionId).toBeNull();
+    });
+  });
+
+  describe("reopenHitlRequest", () => {
+    /** A task parked on its prompt, as `deliverHitlRequest` leaves it. */
+    async function parkedTask(token: string) {
+      await createAgentTask({
+        token,
+        taskId: "task-1",
+        agentName: "remoteagent",
+        channelId: "C1",
+        messageTs: "1700.1",
+        replyThreadTs: "1700.1",
+        eventId: `Ev-${token}`
+      });
+      await suspendForInput(token);
+    }
+
+    it("reopens an answered request while its task is parked, clearing the answer", async () => {
+      await parkedTask("tok-open");
+      await createHitlRequest(input("req-open", { token: "tok-open" }));
+      await claimHitlAnswer("req-open", { answeredBy: "U1", text: "typed" });
+
+      expect(await reopenHitlRequest("req-open")).toBe(true);
+      const row = await getHitlRequest("req-open");
+      expect(row?.status).toBe("awaiting");
+      expect(row?.answeredBy).toBeNull();
+      expect(row?.answeredOptionId).toBeNull();
+      expect(row?.answerText).toBeNull();
+      expect(row?.answeredAt).toBeNull();
+
+      // Open again means claimable again.
+      expect(
+        await claimHitlAnswer("req-open", { answeredBy: "U2", optionId: "b" })
+      ).not.toBeNull();
+    });
+
+    it("leaves the answer when the task is no longer parked", async () => {
+      await parkedTask("tok-done");
+      await createHitlRequest(input("req-over", { token: "tok-done" }));
+      await claimHitlAnswer("req-over", { answeredBy: "U1", optionId: "a" });
+      // The task finished while the answer was on its way.
+      await completeAgentTask("tok-done");
+
+      expect(await reopenHitlRequest("req-over")).toBe(false);
+      expect((await getHitlRequest("req-over"))?.status).toBe("answered");
+    });
+
+    it("does not touch a request that was never answered", async () => {
+      await parkedTask("tok-idle");
+      await createHitlRequest(input("req-idle", { token: "tok-idle" }));
+      await createHitlRequest(input("req-shut", { token: "tok-idle" }));
+      await cancelHitlRequest("req-shut");
+
+      expect(await reopenHitlRequest("req-idle")).toBe(false);
+      expect(await reopenHitlRequest("req-shut")).toBe(false);
+      expect(await reopenHitlRequest("req-nope")).toBe(false);
+      expect((await getHitlRequest("req-shut"))?.status).toBe("canceled");
+    });
+
+    it("does not reopen on the strength of another task being parked", async () => {
+      await parkedTask("tok-other");
+      await createHitlRequest(input("req-orphan", { token: "tok-gone" }));
+      await claimHitlAnswer("req-orphan", { answeredBy: "U1", optionId: "a" });
+
+      expect(await reopenHitlRequest("req-orphan")).toBe(false);
     });
   });
 

@@ -1,4 +1,4 @@
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import type { HitlRequestKind } from "@dynamicagents/g2a-protocol";
 import { getDb } from "../client";
 import * as schema from "../schema";
@@ -118,6 +118,42 @@ export async function claimHitlAnswer(
     )
     .returning();
   return rows[0] ?? null;
+}
+
+/**
+ * Undo a claim whose answer never reached the agent, so the question can be
+ * answered again. Returns whether the prompt is open again.
+ *
+ * Only while the task is still parked on it. A 🛑 or a final status that lands
+ * while the answer is being sent closes the task's prompts, but only the
+ * `awaiting` ones — this row was `answered` then, so it was skipped. Re-opening
+ * it afterwards would bring back a live prompt on a task that is over, which is
+ * exactly what closing prompts on a final status exists to prevent.
+ */
+export async function reopenHitlRequest(requestId: string): Promise<boolean> {
+  const db = getDb();
+  const parked = db
+    .select({ token: schema.agentTasks.token })
+    .from(schema.agentTasks)
+    .where(eq(schema.agentTasks.status, "awaiting-input"));
+  const rows = await db
+    .update(schema.hitlRequests)
+    .set({
+      status: "awaiting",
+      answeredBy: null,
+      answeredOptionId: null,
+      answerText: null,
+      answeredAt: null
+    })
+    .where(
+      and(
+        eq(schema.hitlRequests.requestId, requestId),
+        eq(schema.hitlRequests.status, "answered"),
+        inArray(schema.hitlRequests.token, parked)
+      )
+    )
+    .returning({ requestId: schema.hitlRequests.requestId });
+  return rows.length > 0;
 }
 
 /**
