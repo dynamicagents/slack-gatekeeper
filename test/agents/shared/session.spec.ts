@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import {
   archivingCompaction,
   compactionSummarizer

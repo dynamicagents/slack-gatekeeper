@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
-import { AdminAgentExecutor, type SessionHost } from "@/agents/admin/executor";
+import { AdminAgentExecutor } from "@/agents/admin/executor";
 import type { UserAuthContext } from "@/auth";
 import { Role, type Message } from "@a2a-js/sdk";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
@@ -15,7 +15,9 @@ import { getAgent, registerAgent } from "@/db/models/agents";
 import {
   FakeSession,
   MemoryOpenCalls,
+  fakeAgentSession,
   fakeRecallEnv,
+  fakeSessionHost,
   finalReplyResult,
   okResult,
   toolCallResult,
@@ -24,7 +26,7 @@ import {
 } from "../../helpers/agents";
 import { freshWsId } from "../../helpers/workspace";
 
-const sqlHost: SessionHost = { sql: () => [] };
+const sqlHost = fakeSessionHost();
 
 const caller: UserAuthContext = {
   slackUserId: "U1",
@@ -56,7 +58,7 @@ describe("AdminAgentExecutor", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     const t = adminRequest();
@@ -82,7 +84,7 @@ describe("AdminAgentExecutor", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => new ThrowingSession()
+      createSession: () => fakeAgentSession(new ThrowingSession())
     });
 
     const t = adminRequest();
@@ -104,7 +106,7 @@ describe("AdminAgentExecutor", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     const t = adminRequest();
@@ -128,7 +130,7 @@ describe("AdminAgentExecutor", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     const t = adminRequest();
@@ -256,7 +258,7 @@ describe("AdminAgentExecutor — approval resume", () => {
       openCalls,
       exec: new AdminAgentExecutor(sqlHost, {
         model,
-        createSession: () => session,
+        createSession: () => fakeAgentSession(session),
         openCalls
       })
     };
@@ -350,7 +352,7 @@ describe("AdminAgentExecutor — approval resume", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => session,
+      createSession: () => fakeAgentSession(session),
       openCalls
     });
 
@@ -387,7 +389,7 @@ describe("AdminAgentExecutor — approval resume", () => {
     });
     const exec = new AdminAgentExecutor(sqlHost, {
       model,
-      createSession: () => session,
+      createSession: () => fakeAgentSession(session),
       openCalls: new MemoryOpenCalls()
     });
 

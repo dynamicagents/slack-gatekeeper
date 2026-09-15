@@ -7,8 +7,8 @@ import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
-  type SessionHost,
-  type SessionLike
+  type AgentSession,
+  type SessionHost
 } from "@/agents/shared/session";
 import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
 import { isCancelRequested } from "@/db/models/agent-tasks";
@@ -20,7 +20,7 @@ import { buildOnboardingTools } from "./tools";
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface OnboardingExecutorOptions extends ModelOverrides {
-  createSession?: () => SessionLike;
+  createSession?: () => AgentSession;
 }
 
 /**
@@ -32,16 +32,16 @@ export interface OnboardingExecutorOptions extends ModelOverrides {
  * `directory_read` tool, and the caller context.
  */
 export class OnboardingAgentExecutor implements AgentExecutor {
-  private session?: SessionLike;
+  private built?: AgentSession;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly options: OnboardingExecutorOptions = {}
   ) {}
 
-  /** Lazily build the one Session for this DO (one per user). */
-  private getSession(namespace: string): SessionLike {
-    if (!this.session) {
+  /** Lazily build the one session for this DO (one per user). */
+  private getSession(namespace: string): AgentSession {
+    if (!this.built) {
       // Labelled so a compaction summary is distinguishable from a turn in the
       // AI Gateway log. No workspace: this agent runs per user, not per
       // workspace, which is the whole reason its namespace is the user id.
@@ -49,7 +49,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
         { call: "summarize", tenant: "onboarding" },
         this.options
       );
-      this.session = this.options.createSession
+      this.built = this.options.createSession
         ? this.options.createSession()
         : buildAgentSession(this.agent, summarizer, {
             soul: onboardingSoul,
@@ -61,7 +61,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
             onArchive: (msgs) => archiveMessages(namespace, msgs)
           });
     }
-    return this.session;
+    return this.built;
   }
 
   execute = async (
@@ -95,10 +95,11 @@ export class OnboardingAgentExecutor implements AgentExecutor {
         const ctx = metadata.user;
         // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
         const namespace = `onboarding:${ctx.slackUserId}`;
-        const session = this.getSession(namespace);
+        const { session, context } = this.getSession(namespace);
         const hasArchive = (await session.getCompactions()).length > 0;
         return {
           session,
+          context,
           systemSuffix: callerContext(ctx),
           tools: {
             ...buildOnboardingTools({ ctx }),

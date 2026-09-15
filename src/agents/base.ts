@@ -1,4 +1,5 @@
-import { Agent } from "agents";
+import { Agent, type AgentContext } from "agents";
+import { Sessions } from "agents/sessions";
 import type { AgentCard } from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
@@ -23,10 +24,11 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
  *
  * Subclasses supply a `card()` and an `executor()`. Phase 3 executors just echo;
  * Phase 4 swaps in the AI-SDK loop. We extend the Agents SDK `Agent` (itself a
- * Durable Object) so executors can use `this.sql` for the Sessions API
- * (per-agent conversation history + writable memory). The A2A bridge is kept by
- * overriding `fetch` — these DOs are reached directly via `stub.fetch`, not
- * `routeAgentRequest`, so bypassing the SDK's default router is intentional.
+ * Durable Object) so executors get per-agent conversation history from
+ * {@link A2AAgent.sessions} and a writable memory block from `this.sql`. The A2A
+ * bridge is kept by overriding `fetch` — these DOs are reached directly via
+ * `stub.fetch`, not `routeAgentRequest`, so bypassing the SDK's default router
+ * is intentional.
  *
  * Task state is durable for the same reason the Session is: a turn parked on a
  * human-in-the-loop prompt has to survive eviction, since the human may answer
@@ -35,18 +37,39 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * it rebuilds itself on the first call after a restart.
  */
 export abstract class A2AAgent extends Agent<Env> {
+  /**
+   * Durable conversation history for this DO, as the SDK's lifecycle capability.
+   * Installed from the constructor because `use()` only accepts a capability
+   * before the lifecycle starts, and read back through `SessionHost` by the
+   * executor that builds the agent's session — see
+   * {@link file://./shared/session.ts session.ts}.
+   */
+  readonly sessions = new Sessions();
   private handler?: DefaultRequestHandler;
   private sender?: LocalPushNotificationSender;
-  private tasks?: DurableTaskStore;
+  /**
+   * The A2A protocol's task store. Named `a2aTasks`, not `tasks`, because the
+   * SDK `Agent` owns a `tasks` capability of its own (durable replayable
+   * execution) — declaring a field by that name here would not just clash in
+   * the types, it would overwrite the base class's with `undefined`. The two
+   * are unrelated: this one is A2A task state, and we install no `Tasks`
+   * definitions.
+   */
+  private a2aTasks?: DurableTaskStore;
   /** Whether this isolate has already considered sweeping — see `sweepStaleTasks`. */
   private sweepChecked = false;
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.sessions);
+  }
 
   protected abstract card(): AgentCard;
   protected abstract executor(): AgentExecutor;
   protected abstract builtinTenant(): BuiltinTenant;
 
   private taskStore(): DurableTaskStore {
-    return (this.tasks ??= new DurableTaskStore(this.ctx.storage));
+    return (this.a2aTasks ??= new DurableTaskStore(this.ctx.storage));
   }
 
   private getHandler(): DefaultRequestHandler {

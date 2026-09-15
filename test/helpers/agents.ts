@@ -1,20 +1,29 @@
 import { vi } from "vitest";
 import { env } from "cloudflare:workers";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage, Sessions } from "agents/sessions";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import type { TaskState } from "@a2a-js/sdk";
 import { partsText } from "@/a2a/parts";
 import { EMBED_MODEL_ID } from "@/config";
-import type { SessionLike } from "@/agents/shared/session";
+import type {
+  AgentSession,
+  ContextLike,
+  SessionHost,
+  SessionLike
+} from "@/agents/shared/session";
 import type { OpenCall, OpenCallStore } from "@/agents/shared/open-call";
 import { userMessage } from "./a2a";
 
 /**
- * In-memory `SessionLike` for driving agent executors without a Durable Object.
+ * In-memory stand-in for the `{ session, context }` pair an agent DO owns, for
+ * driving executors and turns without a Durable Object. One object plays both
+ * halves — a fake has no reason to keep history and the prompt blocks apart —
+ * and {@link fakeAgentSession} splits it back into the pair the seams take.
+ *
  * `appendSpy` lets tests assert on persisted messages; `compactions` seeds
  * `getCompactions` (non-empty ⇒ the executor treats an episodic archive as present).
  */
-export class FakeSession implements SessionLike {
+export class FakeSession implements SessionLike, ContextLike {
   messages: SessionMessage[] = [];
   appendSpy = vi.fn(async (m: SessionMessage) => {
     this.messages.push(m);
@@ -35,6 +44,27 @@ export class FakeSession implements SessionLike {
   async getCompactions() {
     return this.compactions;
   }
+}
+
+/** A {@link FakeSession} as the `{ session, context }` pair the seams expect. */
+export function fakeAgentSession(fake: FakeSession): AgentSession {
+  return { session: fake, context: fake };
+}
+
+/**
+ * The `SessionHost` an executor is constructed with, for specs that drive one
+ * without a Durable Object. Every such spec also supplies `createSession`, so
+ * neither half of the host is ever read — `sessions` throws rather than
+ * returning an empty stub, so a spec that stops passing that seam fails loudly
+ * instead of silently building a session on nothing.
+ */
+export function fakeSessionHost(): SessionHost {
+  return {
+    sql: () => [],
+    get sessions(): Sessions {
+      throw new Error("fakeSessionHost: `sessions` should not be reached");
+    }
+  };
 }
 
 /**
