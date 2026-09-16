@@ -25,7 +25,7 @@ import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
 import { startTurnLog, type ModelCallLike } from "./turn-log";
-import type { SessionLike } from "./session";
+import type { ContextLike, SessionLike } from "./session";
 import {
   assistantSessionMessage,
   replayToolCallMessage,
@@ -221,11 +221,13 @@ export function turnGatewayMetadata(
 
 /** What an agent assembles for a single turn (inside the protected body). */
 export interface PreparedTurn {
-  /** The Durable Object's one Session (history + soul + memory). */
+  /** The Durable Object's one session (durable history). */
   session: SessionLike;
+  /** That DO's context blocks (soul + memory): the system prompt and its tool. */
+  context: ContextLike;
   /** Per-request system-prompt suffix (caller context). Advisory. */
   systemSuffix: string;
-  /** Agent-specific tools merged over the session's own `set_context` tool. */
+  /** Agent-specific tools merged over the context's own `set_context` tool. */
   tools: ToolSet;
   /**
    * Which calls need a human's Approve before they run, as a per-tool policy the
@@ -447,6 +449,7 @@ export async function executeAgentTurn(
   try {
     const {
       session,
+      context,
       systemSuffix,
       tools: extraTools,
       toolApproval
@@ -504,8 +507,8 @@ export async function executeAgentTurn(
       await session.appendMessage(userSessionMessage(text));
     }
     const history = await session.getHistory();
-    const soul = (await session.refreshSystemPrompt()) + systemSuffix;
-    const workTools = { ...(await session.tools()), ...extraTools };
+    const soul = (await context.refreshSystemPrompt()) + systemSuffix;
+    const workTools = { ...(await context.tools()), ...extraTools };
     const required = cfg.requireFinalReply === true;
 
     // Whether the approved call is still waiting to run. Only an approval that was

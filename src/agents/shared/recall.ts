@@ -1,4 +1,4 @@
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import { embedMany } from "ai";
 import { env } from "cloudflare:workers";
 import { EMBED_INPUT_MAX_BYTES } from "@/config";

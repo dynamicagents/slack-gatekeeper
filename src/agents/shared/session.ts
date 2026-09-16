@@ -1,33 +1,58 @@
 import type { LanguageModel, ToolSet } from "ai";
 import { generateText } from "ai";
-import { Session } from "agents/experimental/memory/session";
-import type { SessionMessage } from "agents/experimental/memory/session";
-import { createCompactFunction } from "agents/experimental/memory/utils";
+import type {
+  AppendOptions,
+  CompactionFunction,
+  SessionMessage,
+  Sessions
+} from "agents/sessions";
+import { createCompactFunction } from "agents/sessions";
+import type { SqlProvider } from "agents/context";
+import { AgentContextProvider, ContextBlocks } from "agents/context";
 import { CHAT_CALL_OPTIONS } from "@/agents/model";
 
 /**
- * The SQLite-backed host the Sessions API needs — satisfied by the Agents SDK
- * `Agent` (`this.sql`). `env` is passed to executors separately because it's
+ * The Durable Object an agent session is built on: the `Sessions` capability its
+ * lifecycle installs (durable history) plus the SQLite handle the writable
+ * context blocks store themselves in. Both are satisfied by the Agents SDK
+ * `Agent` — see {@link file://../base.ts `A2AAgent`}, which installs the
+ * capability in its constructor because a capability has to be registered before
+ * the lifecycle starts. `env` is passed to executors separately because it's
  * `protected` on `Agent` (only the agent subclass itself can read it).
  */
-export interface SessionHost {
-  sql<T = Record<string, string | number | boolean | null>>(
-    strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
-  ): T[];
+export interface SessionHost extends SqlProvider {
+  readonly sessions: Sessions;
 }
 
 /** The subset of `Session` the agent loop drives — lets tests inject a fake. */
 export interface SessionLike {
   appendMessage(
     message: SessionMessage,
-    parentId?: string | null
+    options?: AppendOptions
   ): Promise<unknown> | unknown;
   getHistory(): Promise<SessionMessage[]>;
-  refreshSystemPrompt(): Promise<string>;
-  tools(): Promise<ToolSet>;
   /** Compaction overlays so far — non-empty ⇒ an episodic archive exists. */
   getCompactions(): Promise<unknown[]>;
+}
+
+/**
+ * The subset of `ContextBlocks` the agent loop drives. The system prompt and the
+ * `set_context` tool live here rather than on the session: history and the blocks
+ * rendered above it are two stores, and only the second one the model can edit.
+ */
+export interface ContextLike {
+  refreshSystemPrompt(): Promise<string>;
+  tools(): Promise<ToolSet>;
+}
+
+/**
+ * What one agent Durable Object owns: its durable history and the context blocks
+ * its system prompt is rendered from. Built together by
+ * {@link buildAgentSession} and handed to the turn as a pair.
+ */
+export interface AgentSession {
+  session: SessionLike;
+  context: ContextLike;
 }
 
 export interface AgentSessionOptions {
@@ -52,8 +77,6 @@ export interface AgentSessionOptions {
   onArchive?: (messages: SessionMessage[]) => Promise<void>;
 }
 
-type CompactFn = ReturnType<typeof createCompactFunction>;
-
 /**
  * Wrap a compaction function so the raw messages it folds into a summary are
  * also handed to `onArchive` (which embeds them for later recall). The displaced
@@ -62,12 +85,12 @@ type CompactFn = ReturnType<typeof createCompactFunction>;
  * shorten history even if the recall store is briefly unavailable.
  */
 export function archivingCompaction(
-  base: CompactFn,
+  base: CompactionFunction,
   onArchive?: (messages: SessionMessage[]) => Promise<void>
-): CompactFn {
+): CompactionFunction {
   if (!onArchive) return base;
-  return async (history, options) => {
-    const result = await base(history, options);
+  return async (history) => {
+    const result = await base(history);
     if (result) {
       const from = history.findIndex((m) => m.id === result.fromMessageId);
       const to = history.findIndex((m) => m.id === result.toMessageId);
@@ -99,29 +122,48 @@ export function compactionSummarizer(
 }
 
 /**
- * Build the one `Session` an agent Durable Object owns: a read-only `"soul"`
- * identity block + a writable `"memory"` scratchpad, with history compaction
- * summarized by the same model. Shared by the admin and onboarding agents — only
- * the soul/memory text differ.
+ * Build the one session an agent Durable Object owns: the history handle its
+ * `Sessions` capability hands out, plus a read-only `"soul"` identity block and a
+ * writable `"memory"` scratchpad, with history compaction summarized by the same
+ * model. Shared by the admin and onboarding agents — only the soul/memory text
+ * differ.
+ *
+ * The default (empty) session id is the only one used: one Durable Object is one
+ * conversation here, so the DO instance key *is* the session boundary.
+ *
+ * The `"memory"` block is declared without a provider and picks up the default —
+ * SQLite in this DO, under the block's own label. `"soul"` supplies its own
+ * read-only provider, so it is rendered but never writable by the model.
  */
 export function buildAgentSession(
   agent: SessionHost,
   model: LanguageModel,
   opts: AgentSessionOptions
-): Session {
+): AgentSession {
   const compact = archivingCompaction(
     createCompactFunction({
       summarize: compactionSummarizer(model),
-      tailTokenBudget: opts.compactTailTokens
+      keepRecentTokens: opts.compactTailTokens
     }),
     opts.onArchive
   );
-  return Session.create(agent)
-    .withContext("soul", { provider: { get: async () => opts.soul() } })
-    .withContext("memory", {
-      description: opts.memoryDescription,
-      maxTokens: opts.memoryMaxTokens
-    })
+  const session = agent.sessions
+    .session()
     .onCompaction(compact)
     .compactAfter(opts.compactAfterTokens);
+  const context = new ContextBlocks(
+    [
+      { label: "soul", provider: { get: async () => opts.soul() } },
+      {
+        label: "memory",
+        description: opts.memoryDescription,
+        maxTokens: opts.memoryMaxTokens
+      }
+    ],
+    // No prompt store: the turn calls `refreshSystemPrompt()` every time, so a
+    // frozen snapshot would only ever be read back stale.
+    undefined,
+    (label) => new AgentContextProvider(agent, label)
+  );
+  return { session, context };
 }

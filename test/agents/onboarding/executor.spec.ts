@@ -1,13 +1,14 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { OnboardingAgentExecutor } from "@/agents/onboarding/executor";
-import type { SessionHost } from "@/agents/shared/session";
 import type { UserAuthContext } from "@/auth";
 import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
 import { TaskState } from "@a2a-js/sdk";
 import {
   FakeSession,
+  fakeAgentSession,
   fakeRecallEnv,
+  fakeSessionHost,
   okResult,
   toolCallResult,
   makeRequest,
@@ -16,7 +17,7 @@ import {
 } from "../../helpers/agents";
 import { userMessage } from "../../helpers/a2a";
 
-const sqlHost: SessionHost = { sql: () => [] };
+const sqlHost = fakeSessionHost();
 
 const caller: UserAuthContext = {
   slackUserId: "U_onb",
@@ -44,7 +45,7 @@ describe("OnboardingAgentExecutor", () => {
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     const t = onboardingRequest();
@@ -70,7 +71,7 @@ describe("OnboardingAgentExecutor", () => {
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
-      createSession: () => new ThrowingSession()
+      createSession: () => fakeAgentSession(new ThrowingSession())
     });
 
     const t = onboardingRequest();
@@ -96,7 +97,7 @@ describe("OnboardingAgentExecutor", () => {
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     const t = onboardingRequest();
@@ -121,7 +122,7 @@ describe("OnboardingAgentExecutor", () => {
     });
     const exec = new OnboardingAgentExecutor(sqlHost, {
       model,
-      createSession: () => session
+      createSession: () => fakeAgentSession(session)
     });
 
     // Request without a user — the Slack user is now a required precondition

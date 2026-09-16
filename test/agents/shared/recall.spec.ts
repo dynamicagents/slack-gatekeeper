@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import { EMBED_INPUT_MAX_BYTES } from "@/config";
 import { archiveMessages, recall } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";

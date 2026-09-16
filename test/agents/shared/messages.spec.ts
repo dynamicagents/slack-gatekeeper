@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import {
   userSessionMessage,
   assistantSessionMessage,

@@ -17,7 +17,6 @@ import {
   HITL_REJECT_OPTION_ID,
   HITL_REQUEST_TYPE
 } from "@/a2a/hitl";
-import type { SessionLike } from "@/agents/shared/session";
 import {
   isTransientAiError,
   executeAgentTurn,
@@ -33,6 +32,7 @@ import {
 import {
   FakeSession,
   MemoryOpenCalls,
+  fakeAgentSession,
   finalReplyResult,
   okResult,
   lengthResult,
@@ -120,13 +120,17 @@ function expectTerminalReply(
 }
 
 function makeCfg(
-  session: SessionLike,
+  session: FakeSession,
   model: LanguageModel,
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
   return {
     model,
-    prepare: async () => ({ session, systemSuffix: "", tools: {} }),
+    prepare: async () => ({
+      ...fakeAgentSession(session),
+      systemSuffix: "",
+      tools: {}
+    }),
     unexpectedReply: "Something went wrong. Please try again.",
     ...overrides
   };
@@ -401,7 +405,7 @@ describe("executeAgentTurn", () => {
       bus.eventBus,
       makeCfg(session, model, {
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: {
             lookup: tool({
@@ -468,7 +472,7 @@ describe("executeAgentTurn", () => {
       bus.eventBus,
       makeCfg(session, model, {
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: {
             lookup: tool({
@@ -530,7 +534,7 @@ describe("executeAgentTurn — cancellation", () => {
   }
 
   function runTurn(
-    session: SessionLike,
+    session: FakeSession,
     model: LanguageModel,
     isCanceled?: AgentTurnConfig["isCanceled"]
   ) {
@@ -541,7 +545,7 @@ describe("executeAgentTurn — cancellation", () => {
       makeCfg(session, model, {
         isCanceled,
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: {
             work: tool({
@@ -730,7 +734,7 @@ const workTool = tool({
 });
 
 function forcedCfg(
-  session: SessionLike,
+  session: FakeSession,
   model: LanguageModel,
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
@@ -738,7 +742,7 @@ function forcedCfg(
     requireFinalReply: true,
     recordToolCalls: true,
     prepare: async () => ({
-      session,
+      ...fakeAgentSession(session),
       systemSuffix: "",
       tools: { work: workTool }
     }),
@@ -1099,13 +1103,13 @@ describe("executeAgentTurn — ask_user", () => {
   };
 
   function askingCfg(
-    session: SessionLike,
+    session: FakeSession,
     model: LanguageModel,
     overrides: Partial<AgentTurnConfig> = {}
   ): AgentTurnConfig {
     return forcedCfg(session, model, {
       prepare: async () => ({
-        session,
+        ...fakeAgentSession(session),
         systemSuffix: "",
         tools: { work: workTool, ask_user: askUserTool }
       }),
@@ -1622,7 +1626,7 @@ describe("executeAgentTurn — approvals", () => {
   };
 
   function gatedCfg(
-    session: SessionLike,
+    session: FakeSession,
     model: LanguageModel,
     gate: ReturnType<typeof gatedTool>,
     toolApproval: unknown,
@@ -1630,7 +1634,7 @@ describe("executeAgentTurn — approvals", () => {
   ): AgentTurnConfig {
     return forcedCfg(session, model, {
       prepare: async () => ({
-        session,
+        ...fakeAgentSession(session),
         systemSuffix: "",
         tools: { work: workTool, ask_user: askUserTool, danger: gate.danger },
         toolApproval: toolApproval as never
@@ -2299,7 +2303,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
       bus.eventBus,
       forcedCfg(session, model, {
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: {
             // The annotation matters: an `execute` that only ever throws infers
@@ -2366,7 +2370,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
       bus.eventBus,
       makeCfg(session, model, {
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: { work: workTool }
         })
@@ -2462,7 +2466,7 @@ describe("executeAgentTurn — the turn log", () => {
       forcedCfg(session, model, {
         openCalls: new MemoryOpenCalls(),
         prepare: async () => ({
-          session,
+          ...fakeAgentSession(session),
           systemSuffix: "",
           tools: { ask_user: askUserTool }
         })

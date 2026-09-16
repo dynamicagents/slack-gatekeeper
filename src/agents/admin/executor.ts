@@ -7,8 +7,8 @@ import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
   buildAgentSession,
-  type SessionHost,
-  type SessionLike
+  type AgentSession,
+  type SessionHost
 } from "@/agents/shared/session";
 import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
 import type { OpenCallStore } from "@/agents/shared/open-call";
@@ -31,11 +31,16 @@ import {
 import { generateAvatar, type GeneratedImage } from "./avatar";
 
 // Re-exported so existing test imports (`@/agents/admin/executor`) keep working.
-export type { SessionHost, SessionLike } from "@/agents/shared/session";
+export type {
+  AgentSession,
+  ContextLike,
+  SessionHost,
+  SessionLike
+} from "@/agents/shared/session";
 
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface AdminExecutorOptions extends ModelOverrides {
-  createSession?: (wsId: number) => SessionLike;
+  createSession?: (wsId: number) => AgentSession;
   /**
    * Persist a generated avatar in the agent's DO storage, returning its key.
    * `name` is `"admin"` (the admin's own avatar) or a custom agent's name, so each
@@ -65,16 +70,16 @@ export interface AdminExecutorOptions extends ModelOverrides {
  * and the caller context.
  */
 export class AdminAgentExecutor implements AgentExecutor {
-  private session?: SessionLike;
+  private built?: AgentSession;
 
   constructor(
     private readonly agent: SessionHost,
     private readonly options: AdminExecutorOptions = {}
   ) {}
 
-  /** Lazily build the one Session for this DO; `wsId` is fixed per instance. */
-  private getSession(wsId: number): SessionLike {
-    if (!this.session) {
+  /** Lazily build the one session for this DO; `wsId` is fixed per instance. */
+  private getSession(wsId: number): AgentSession {
+    if (!this.built) {
       // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
       const namespace = `admin:${wsId}`;
       // The summarizer's own gateway identity. It is a real cost against the same
@@ -86,7 +91,7 @@ export class AdminAgentExecutor implements AgentExecutor {
         { call: "summarize", tenant: "admin", workspaceId: wsId },
         this.options
       );
-      this.session = this.options.createSession
+      this.built = this.options.createSession
         ? this.options.createSession(wsId)
         : buildAgentSession(this.agent, summarizer, {
             soul: () => adminSoul(wsId),
@@ -98,7 +103,7 @@ export class AdminAgentExecutor implements AgentExecutor {
             onArchive: (msgs) => archiveMessages(namespace, msgs)
           });
     }
-    return this.session;
+    return this.built;
   }
 
   execute = async (
@@ -139,7 +144,7 @@ export class AdminAgentExecutor implements AgentExecutor {
         }
         const wsId = metadata.adminWorkspaceId;
         const ctx = metadata.user;
-        const session = this.getSession(wsId);
+        const { session, context } = this.getSession(wsId);
         const namespace = `admin:${wsId}`;
         const hasArchive = (await session.getCompactions()).length > 0;
         // One `deps` for both the tools and the policy that gates them. On a turn
@@ -155,6 +160,7 @@ export class AdminAgentExecutor implements AgentExecutor {
         };
         return {
           session,
+          context,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
           toolApproval: adminToolApproval(deps),
           tools: {

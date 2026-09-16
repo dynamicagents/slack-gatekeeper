@@ -1,9 +1,6 @@
 import type { AssistantModelMessage, ModelMessage, UIMessage } from "ai";
 import { convertToModelMessages } from "ai";
-import type {
-  SessionMessage,
-  SessionMessagePart
-} from "agents/experimental/memory/session";
+import type { SessionMessage, SessionMessagePart } from "agents/sessions";
 import { isRecord, jsonOf } from "@/util/json";
 
 /**
