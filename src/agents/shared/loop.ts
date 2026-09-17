@@ -20,7 +20,11 @@ import {
   RetryError,
   ToolChoiceViolationError
 } from "ai";
-import { CHAT_CALL_OPTIONS, type GatewayCallMetadata } from "@/agents/model";
+import {
+  CHAT_CALL_OPTIONS,
+  type GatewayAgent,
+  type GatewayCall
+} from "@/agents/model";
 import { buildMessage, textOf, textPart } from "@/a2a/parts";
 import { buildHitlRequestParts, type HitlRequest } from "@/a2a/hitl";
 import type { AgentTurnMetadata } from "@/agents/dispatch";
@@ -198,24 +202,44 @@ function workspaceIdOf(
 }
 
 /**
- * What an executor labels a turn's model calls with, for the AI Gateway log.
+ * A turn's rounds of asking, as the AI Gateway log numbers them.
+ *
+ * Two, at most: the loop itself, and — only when that came back with no answer —
+ * the one salvage below. They are separate charges for the same turn, and the
+ * number is the only thing in the gateway log that tells them apart.
+ */
+const MAIN_ROUND = 1;
+const SALVAGE_ROUND = 2;
+
+/**
+ * What an executor labels one round of a turn with, for the AI Gateway log.
  *
  * Here rather than in each executor because it reads the same wire metadata this
  * module already reads, off the same request — and because an executor has to
  * build its model *before* `executeAgentTurn` runs, which is before its own
- * `prepare` has narrowed anything.
+ * `prepare` has narrowed anything. `agent` is the executor's own, passed as a
+ * literal: the wire `tenant` is an open string on the remote arm of the union, and
+ * a gateway dimension should be a closed set the compiler knows.
+ *
+ * Every field is picked out by hand and handed to
+ * {@link file://../model.ts `gatewayLogFields`} as a declared input — the request
+ * context itself never reaches it. `metadata.user.slackUserId` is right here, one
+ * property away, and a spread is all it would take.
  */
-export function turnGatewayMetadata(
-  requestContext: RequestContext
-): GatewayCallMetadata {
+export function turnGatewayCall(
+  agent: GatewayAgent,
+  requestContext: RequestContext,
+  round: number
+): GatewayCall {
   const metadata = (requestContext.userMessage.metadata ??
     {}) as Partial<AgentTurnMetadata>;
   return {
-    call: "turn",
-    tenant: metadata.tenant,
+    agent,
+    phase: "round",
+    round,
+    channel: requestContext.contextId,
     workspaceId: workspaceIdOf(metadata),
-    contextId: requestContext.contextId,
-    user: metadata.user?.slackUserId
+    eventId: `${requestContext.taskId}:r${round}`
   };
 }
 
@@ -241,11 +265,19 @@ export interface PreparedTurn {
 
 export interface AgentTurnConfig {
   /**
-   * The one model a turn runs on. It carries its own fallback — see
+   * The one model a turn runs on, built per round of asking.
+   *
+   * A function rather than a model because a model freezes its gateway metadata at
+   * construction, and `round` — with the `eventId` derived from it — is the one
+   * entry that differs between the loop's own round and the salvage after it. The
+   * cost is a second object allocation on the turns that salvage; the alternative
+   * is two charges that look identical in the gateway log.
+   *
+   * It carries its own fallback — see
    * {@link file://../model-fallback-middleware.ts model-fallback-middleware.ts} —
    * so a second model is not this layer's concern.
    */
-  model: LanguageModel;
+  model: (round: number) => LanguageModel;
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
@@ -397,7 +429,10 @@ export async function executeAgentTurn(
   const userMessage = requestContext.userMessage;
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
-  const modelId = modelIdOf(cfg.model);
+  // Built here, once, so the turn log can name the model before anything can fail.
+  // The salvage builds its own below, and only if it runs.
+  const roundModel = cfg.model(MAIN_ROUND);
+  const modelId = modelIdOf(roundModel);
   // Opened before anything can fail, and flushed in the `finally`, so a turn that
   // throws on its first await still reports what it was and how long it took.
   const turnLog = startTurnLog({
@@ -736,7 +771,7 @@ export async function executeAgentTurn(
 
     const runTurn = () =>
       generateText({
-        model: cfg.model,
+        model: roundModel,
         instructions,
         messages,
         tools: turnTools,
@@ -779,7 +814,10 @@ export async function executeAgentTurn(
      */
     const salvageEnding = (seed: ModelMessage[]) =>
       generateText({
-        model: cfg.model,
+        // Its own model, so its own `round` — a salvage is a second charge against
+        // the gateway, and the turn log's `salvaged` flag is on the other side of
+        // the join from the row that paid for it.
+        model: cfg.model(SALVAGE_ROUND),
         instructions: instructions + FINAL_ROUND_CONTRACT,
         messages: seed,
         tools: { [FINAL_REPLY_TOOL_NAME]: finalReplyTool },

@@ -21,6 +21,7 @@ import type { SessionLike } from "@/agents/shared/session";
 import {
   isTransientAiError,
   executeAgentTurn,
+  turnGatewayCall,
   type AgentTurnConfig
 } from "@/agents/shared/loop";
 import { askUserTool } from "@/agents/shared/ask-user";
@@ -125,7 +126,9 @@ function makeCfg(
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
   return {
-    model,
+    // One model whatever the round: these tests are about the loop, not about what
+    // the gateway log says. `executeAgentTurn` calls this once per round of asking.
+    model: () => model,
     prepare: async () => ({ session, systemSuffix: "", tools: {} }),
     unexpectedReply: "Something went wrong. Please try again.",
     ...overrides
@@ -189,10 +192,146 @@ describe("isTransientAiError", () => {
 });
 
 // ---------------------------------------------------------------------------
+// turnGatewayCall
+// ---------------------------------------------------------------------------
+
+describe("turnGatewayCall", () => {
+  /** The wire metadata a real admin turn arrives with, user and all. */
+  const adminMetadata = {
+    agentKind: "local",
+    tenant: "admin",
+    adminWorkspaceId: 7,
+    user: { slackUserId: "U123", slackUserName: "grace" }
+  };
+
+  it("labels a round with the agent, the thread and the workspace", () => {
+    const call = turnGatewayCall(
+      "admin",
+      fakeRequestContext("hi", {
+        contextId: "C123:1700000000.0001",
+        metadata: adminMetadata
+      }),
+      1
+    );
+
+    expect(call).toEqual({
+      agent: "admin",
+      phase: "round",
+      round: 1,
+      channel: "C123:1700000000.0001",
+      workspaceId: 7,
+      eventId: "task-1:r1"
+    });
+  });
+
+  it("names the task and the round in the event id, and only there", () => {
+    // `${taskId}:r${round}` rides on `GatewayOptions.eventId`, which is its own
+    // field on the request — so the join from a gateway row back to the task that
+    // paid for it spends none of the five, and `taskId` stays off this side.
+    const round = (n: number) =>
+      turnGatewayCall(
+        "admin",
+        fakeRequestContext("hi", { metadata: adminMetadata }),
+        n
+      );
+
+    expect(round(1).eventId).toBe("task-1:r1");
+    // The salvage is a second charge for the same turn. Same task, different round:
+    // the two are only distinguishable because the number is in both.
+    expect(round(2).eventId).toBe("task-1:r2");
+    expect(round(2).round).toBe(2);
+    expect(round(1)).not.toHaveProperty("taskId");
+  });
+
+  it("takes the agent from the executor, not from the wire", () => {
+    // The wire `tenant` is an open string on the remote arm of the union, so it
+    // cannot be a closed gateway dimension. The executor passing its own literal is
+    // also what stops a forged `tenant` from relabelling someone else's spend.
+    const call = turnGatewayCall(
+      "onboarding",
+      fakeRequestContext("hi", {
+        metadata: { agentKind: "local", tenant: "anything-at-all" }
+      }),
+      1
+    );
+
+    expect(call.agent).toBe("onboarding");
+    expect(call.workspaceId).toBeUndefined();
+  });
+
+  it("leaves the Slack user behind, though it reads the message that carries one", () => {
+    // The privacy regression, at the one call site that has a person to hand: the
+    // wire metadata it reads holds `user.slackUserId`, one property away, and the
+    // gateway log is retained account-wide. Fields are picked out by name for
+    // exactly this reason — see `gatewayLogFields` in model.spec.ts.
+    const call = turnGatewayCall(
+      "admin",
+      fakeRequestContext("hi", { metadata: adminMetadata }),
+      1
+    );
+
+    expect(JSON.stringify(call)).not.toContain("U123");
+    expect(JSON.stringify(call)).not.toContain("grace");
+    expect(call).not.toHaveProperty("user");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // executeAgentTurn
 // ---------------------------------------------------------------------------
 
 describe("executeAgentTurn", () => {
+  it("asks for a model per round, numbering the salvage apart from the round", async () => {
+    // The turn and the salvage are two charges against the gateway, and a model
+    // freezes its metadata at construction — so one model for both would put them in
+    // the log as the same call made twice.
+    const session = new FakeSession();
+    let n = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () =>
+        (n++ === 0
+          ? okResult("Done! ✅")
+          : finalReplyResult("Here is what happened.")) as never
+    });
+    const rounds: number[] = [];
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("update the endpoint"),
+      bus.eventBus,
+      forcedCfg(session, model, {
+        model: (round) => {
+          rounds.push(round);
+          return model;
+        }
+      })
+    );
+
+    expect(rounds).toEqual([1, 2]);
+  });
+
+  it("builds only the round's model when no salvage is needed", async () => {
+    const session = new FakeSession();
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => okResult("Hello!") as never
+    });
+    const rounds: number[] = [];
+    const bus = fakeEventBus();
+
+    await executeAgentTurn(
+      fakeRequestContext("hi"),
+      bus.eventBus,
+      makeCfg(session, model, {
+        model: (round) => {
+          rounds.push(round);
+          return model;
+        }
+      })
+    );
+
+    expect(rounds).toEqual([1]);
+  });
+
   it("happy path: appends user + assistant messages and completes a task", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV4({
@@ -249,7 +388,7 @@ describe("executeAgentTurn", () => {
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      model,
+      model: () => model,
       prepare: async () => {
         throw bindingError(429);
       },
@@ -272,7 +411,7 @@ describe("executeAgentTurn", () => {
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      model,
+      model: () => model,
       prepare: async () => {
         throw new Error("some unexpected failure");
       },
@@ -337,7 +476,7 @@ describe("executeAgentTurn", () => {
     const bus = fakeEventBus();
 
     await executeAgentTurn(fakeRequestContext(), bus.eventBus, {
-      model,
+      model: () => model,
       prepare: async () => {
         throw new Error("missing metadata");
       },
