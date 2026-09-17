@@ -34,7 +34,7 @@ redacts it from all output.
 | `npm run cf -- wf`                                        | List Workflow definitions                        |
 | `npm run cf -- wf message-workflow [instanceId]`          | Workflow instances / one instance's steps        |
 | `npm run cf -- ai [logId]`                                | AI Gateway call digest / one call's prompt+reply |
-| `npm run cf -- ai --meta call=turn`                       | Filter that digest by one custom-metadata entry  |
+| `npm run cf -- ai --meta phase=round`                     | Filter that digest by one custom-metadata entry  |
 | `npm run cf -- [METHOD] <path> [-q k=v] [-d @file]`       | Raw passthrough (account-relative unless `/…`)   |
 
 Run `npm run cf -- help` for the full flag list.

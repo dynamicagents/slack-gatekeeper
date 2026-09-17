@@ -16,10 +16,14 @@ import { servedByFallback } from "@/agents/model-fallback-middleware";
  * sums; the individual steps are on the gateway side if anyone needs them.
  *
  * The counterpart is the gateway metadata in {@link file://../model.ts model.ts}:
- * the same `contextId` is attached to every model call this turn makes, so a row
- * in `npm run cf -- ai` and a line in `npm run cf -- logs` can be put side by
- * side. `taskId` is here and not there because the gateway caps custom metadata
- * at five entries and this side has no cap at all.
+ * the same context id is attached to every model call this turn makes — as
+ * `channel` there — so a row in `npm run cf -- ai` and a line in
+ * `npm run cf -- logs` can be put side by side. `taskId` is here and not among the
+ * gateway's five because it caps custom metadata at five entries and this side has
+ * no cap at all; it reaches a gateway row through `eventId`, which costs none.
+ *
+ * `user` is here and *only* here, for the same reason: this line is ours and the
+ * gateway log is retained account-wide. See `GatewayCallFields`.
  */
 
 /**

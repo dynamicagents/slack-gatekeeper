@@ -62,7 +62,7 @@ const USAGE = `cf.mjs — Cloudflare API proxy (credentials from ${ENV_FILE})
   wf <name>                              list recent instances of a workflow
   wf <name> <instanceId> [--json]        one instance, per-step pass/fail
   ai [--since 2h] [--model <m>]          AI Gateway calls, as a digest
-     [--meta call=turn]                  filter by one custom-metadata entry
+     [--meta phase=round]                filter by one custom-metadata entry
      [--limit 20] [--json|--raw]
   ai <logId> [--full] [--max N]          one call: prompt + reply (bodies)
   fields [--worker <name>]               list available log fields
@@ -436,7 +436,7 @@ async function cmdAi(args) {
   if (flags.model) query.push(["model", String(flags.model)]);
   // Custom metadata is filterable, but only through the two generic keys the API
   // exposes — `metadata.key` and `metadata.value`, never `metadata.<name>`. So
-  // `--meta call=turn` is two filters ANDed, and `--meta call` on its own asks
+  // `--meta phase=round` is two filters ANDed, and `--meta phase` on its own asks
   // only "was this key set at all", which is the useful question while a
   // deploy is still rolling out.
   if (flags.meta) {

@@ -10,7 +10,7 @@ import {
   type AgentSession,
   type SessionHost
 } from "@/agents/shared/session";
-import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
+import { executeAgentTurn, turnGatewayCall } from "@/agents/shared/loop";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { callerContext } from "@/agents/shared/prompt";
 import { archiveMessages } from "@/agents/shared/recall";
@@ -42,11 +42,12 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   /** Lazily build the one session for this DO (one per user). */
   private getSession(namespace: string): AgentSession {
     if (!this.built) {
-      // Labelled so a compaction summary is distinguishable from a turn in the
+      // Labelled so a compaction summary is distinguishable from a round in the
       // AI Gateway log. No workspace: this agent runs per user, not per
-      // workspace, which is the whole reason its namespace is the user id.
+      // workspace, which is the whole reason its namespace is the user id — and
+      // the user id itself stays out, here as everywhere on this side.
       const summarizer = chatModel(
-        { call: "summarize", tenant: "onboarding" },
+        { agent: "onboarding", phase: "compaction" },
         this.options
       );
       this.built = this.options.createSession
@@ -69,9 +70,13 @@ export class OnboardingAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      // Per turn, not per instance: the model carries this turn's identity into
+      // Per round, not per instance: the model carries this round's identity into
       // the AI Gateway log, and that is the only channel the gateway has for it.
-      model: chatModel(turnGatewayMetadata(requestContext), this.options),
+      model: (round) =>
+        chatModel(
+          turnGatewayCall("onboarding", requestContext, round),
+          this.options
+        ),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
