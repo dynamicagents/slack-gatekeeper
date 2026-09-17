@@ -256,10 +256,12 @@ describe("JWKS cache", () => {
     ).rejects.toThrow(InvalidEndpointError);
   });
 
-  it("evicts the least recently fetched entry rather than growing forever", async () => {
+  it("evicts the least recently used entry rather than growing forever", async () => {
     // An approved provider chooses the `jku` *path*, so the key space is not
-    // bounded by the number of registered agents. Past the bound the oldest
-    // fetch is dropped, which costs a re-fetch and nothing else.
+    // bounded by the number of registered agents. Past the bound the
+    // least-recently-used entry is dropped, which costs a re-fetch and nothing
+    // else. Nothing is re-used here, so use-order is fetch-order and the first
+    // URL is the one that goes.
     clockAt(T0);
     const key = await makeKey("k1");
     const calls = new Map<string, number>();
@@ -284,6 +286,51 @@ describe("JWKS cache", () => {
     // The survivors are still hits — eviction is bounded, not a flush.
     await resolveSigningKey(at(64), "k1", DOMAINS);
     expect(calls.get(at(64))).toBe(1);
+  });
+
+  it("keeps a repeatedly used entry and evicts an idle one instead", async () => {
+    // The distinction the bound exists to draw: a `jku` every callback hits is
+    // the *last* thing worth dropping, and it is exactly what a cache ordered by
+    // when-it-was-fetched drops first. A hit has to re-seat the entry, or the
+    // busiest remote in the isolate is evicted on the schedule of the one time
+    // it was fetched — and pays for a round-trip it had already paid for.
+    clockAt(T0);
+    const key = await makeKey("k1");
+    const calls = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.set(url, (calls.get(url) ?? 0) + 1);
+        return Response.json({ keys: [key.publicJwk] });
+      })
+    );
+
+    const at = (n: number) => `https://agent.example.com/jwks/${n}.json`;
+    // Exactly the bound: 0 is the oldest fetch, and nothing has been evicted.
+    for (let n = 0; n < 64; n += 1) {
+      await resolveSigningKey(at(n), "k1", DOMAINS);
+    }
+    expect(calls.get(at(0))).toBe(1);
+
+    // Hit the oldest entry inside its fresh window, the way a task's callbacks
+    // do. The clock never moves, so these are hits and not refreshes — `calls`
+    // proves it.
+    for (let i = 0; i < 3; i += 1) {
+      await resolveSigningKey(at(0), "k1", DOMAINS);
+    }
+    expect(calls.get(at(0))).toBe(1);
+
+    // Two arrivals, two evictions — which must be the two idlest entries, 1
+    // and 2, rather than 0 and 1.
+    await resolveSigningKey(at(64), "k1", DOMAINS);
+    await resolveSigningKey(at(65), "k1", DOMAINS);
+
+    await resolveSigningKey(at(0), "k1", DOMAINS);
+    expect(calls.get(at(0))).toBe(1); // survived: still one fetch, ever
+
+    await resolveSigningKey(at(1), "k1", DOMAINS);
+    expect(calls.get(at(1))).toBe(2); // evicted in its place
   });
 });
 

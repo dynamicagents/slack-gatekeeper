@@ -1,3 +1,4 @@
+import { waitUntil } from "cloudflare:workers";
 import { A2A_JWS_ALG } from "@dynamicagents/g2a-protocol";
 import {
   AGENT_CARD_PATH,
@@ -239,7 +240,7 @@ const JWKS_MAX_STALE_MS = 60 * 60_000;
 
 /**
  * How many remotes' key sets the cache holds before it starts dropping the
- * least recently fetched.
+ * least recently used.
  *
  * The `jku` is always on a domain the org approved, but its *path* is not: it
  * arrives in a card's protected header, so an approved-but-hostile provider
@@ -295,17 +296,25 @@ export function clearJwksCache(): void {
 }
 
 /**
- * Store one fetched key set, evicting the least recently fetched once the cache
- * is at {@link JWKS_CACHE_MAX_ENTRIES}.
+ * Move an entry to the tail of {@link jwksCache}, so the head stays the least
+ * recently used one.
  *
- * The delete before the set is what makes "least recently fetched" mean
- * anything: a `Map` iterates in insertion order and overwriting a key in place
- * keeps its *original* position, so a URL fetched every minute for a day would
- * still be evicted as if it had not been touched since the first time.
+ * The delete before the set is the whole mechanism: a `Map` iterates in
+ * insertion order and overwriting a key in place keeps its *original* position,
+ * so a URL used every minute for a day would still be evicted as if it had not
+ * been touched since the first time.
+ */
+function touchJwks(jku: string, entry: CachedJwks): void {
+  jwksCache.delete(jku);
+  jwksCache.set(jku, entry);
+}
+
+/**
+ * Store one fetched key set, evicting the least recently used once the cache is
+ * at {@link JWKS_CACHE_MAX_ENTRIES}.
  */
 function storeJwks(jku: string, keys: JWK[]): void {
-  jwksCache.delete(jku);
-  jwksCache.set(jku, { keys, fetchedAt: Date.now() });
+  touchJwks(jku, { keys, fetchedAt: Date.now() });
   while (jwksCache.size > JWKS_CACHE_MAX_ENTRIES) {
     const oldest = jwksCache.keys().next();
     if (oldest.done) break;
@@ -349,12 +358,25 @@ async function jwksKeys(
   const entry = opts.refresh ? undefined : jwksCache.get(jku);
   if (entry) {
     const age = Date.now() - entry.fetchedAt;
-    if (age < JWKS_FRESH_MS) return { keys: entry.keys, cached: true };
+    if (age < JWKS_FRESH_MS) {
+      // A hit is a *use*, and eviction is by use — so re-seat the entry at the
+      // tail before answering from it, or the busiest `jku` in the isolate is
+      // dropped on the schedule of the one time it was fetched. The entry
+      // object is re-set unchanged: rewriting `fetchedAt` here would re-arm the
+      // TTL on every read and make a hot entry immortal, which is the one thing
+      // a key cache must never be.
+      touchJwks(jku, entry);
+      return { keys: entry.keys, cached: true };
+    }
     if (age < JWKS_MAX_STALE_MS) {
       // Stale-while-revalidate: answer now from what we have and replace it
-      // behind the response. The refresh is deliberately not awaited, and a
-      // failure only means the stale entry stands until it ages out.
-      void loadJwks(jku).catch(() => {});
+      // behind the response. Registered with `waitUntil` rather than left
+      // detached — the runtime may cancel unregistered work once the response
+      // is sent, which would leave a busy entry stale until the hour is up and
+      // then block a callback on a fetch it had every chance to have made
+      // already. Still not awaited, and a failure only means the stale entry
+      // stands until it ages out.
+      waitUntil(loadJwks(jku).catch(() => {}));
       return { keys: entry.keys, cached: true };
     }
   }
