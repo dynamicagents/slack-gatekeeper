@@ -1,3 +1,4 @@
+import { waitUntil } from "cloudflare:workers";
 import { A2A_JWS_ALG } from "@dynamicagents/g2a-protocol";
 import {
   AGENT_CARD_PATH,
@@ -214,18 +215,208 @@ export async function fetchAgentCard(
 }
 
 /**
+ * How long a fetched JWKS is reused, and how much longer than that it may still
+ * be answered from while a replacement is fetched behind it.
+ *
+ * A remote agent's JWKS is close to static — a signing key rotates on a human
+ * timescale — but the busiest thing the gatekeeper does with it is the opposite:
+ * every push-notification callback on a task verifies against it, and a task
+ * reports non-terminal status many times before it finishes. Uncached, that is a
+ * full HTTPS round-trip to the remote's JWKS per POST, in front of work that has
+ * not started yet.
+ *
+ * Five minutes is short enough that a revocation propagates while the admin who
+ * performed it is still watching, and long enough that a burst of callbacks on
+ * one task costs one fetch. The stale window is the availability half: a remote
+ * whose JWKS endpoint is briefly down should not take its callbacks down with
+ * it, and a key that verified a minute ago is not less valid because its server
+ * stopped answering. Past an hour we stop guessing and let the fetch fail.
+ *
+ * Neither window can outlive a rotation, because a `kid` we have never seen
+ * forces a refresh before it is allowed to fail — see {@link resolveSigningKey}.
+ */
+const JWKS_FRESH_MS = 5 * 60_000;
+const JWKS_MAX_STALE_MS = 60 * 60_000;
+
+/**
+ * How many remotes' key sets the cache holds before it starts dropping the
+ * least recently used.
+ *
+ * The `jku` is always on a domain the org approved, but its *path* is not: it
+ * arrives in a card's protected header, so an approved-but-hostile provider
+ * chooses it, and the number of distinct URLs is therefore not bounded by the
+ * number of registered agents. Unbounded, each of those could hold up to
+ * {@link MAX_CARD_LENGTH} of the isolate's memory for an hour. A bound turns
+ * that back into what it was without a cache — a fetch — since evicting an
+ * entry costs only the round-trip it saved.
+ */
+const JWKS_CACHE_MAX_ENTRIES = 64;
+
+/** One remote's JWKS, with the moment it was fetched. */
+interface CachedJwks {
+  keys: JWK[];
+  fetchedAt: number;
+}
+
+/**
+ * Cached JWKS bodies, keyed by the `jku` they were fetched from.
+ *
+ * Module state, so its lifetime is the isolate's: nothing here survives a cold
+ * start, and Cloudflare may run any number of isolates per colo. That is the
+ * right shape for this — the cache is an optimization whose worst case is the
+ * behaviour we had before it, never a source of truth. It is keyed by URL alone
+ * and therefore shared across orgs, which is only safe because
+ * {@link resolveSigningKey} re-runs the caller's own allowlist check before it
+ * ever looks in here: one org's approved domain never becomes another's.
+ */
+const jwksCache = new Map<string, CachedJwks>();
+
+/**
+ * Fetches currently in progress, keyed the same way. A hundred callbacks
+ * arriving together on a cold isolate is one fetch, not a hundred — the rest
+ * await this promise. Without it the cache would still remove the steady-state
+ * fetches while leaving the stampede that follows every cold start intact.
+ */
+const jwksInFlight = new Map<string, Promise<JWK[]>>();
+
+/**
+ * Bumped by {@link clearJwksCache} so a fetch that was already in flight cannot
+ * write its result into a cache that was deliberately emptied after it started.
+ */
+let jwksEpoch = 0;
+
+/**
+ * Empty the JWKS cache. Exported for tests, which need each case to start from
+ * a cold isolate; nothing in the Worker calls it.
+ */
+export function clearJwksCache(): void {
+  jwksEpoch += 1;
+  jwksCache.clear();
+  jwksInFlight.clear();
+}
+
+/**
+ * Move an entry to the tail of {@link jwksCache}, so the head stays the least
+ * recently used one.
+ *
+ * The delete before the set is the whole mechanism: a `Map` iterates in
+ * insertion order and overwriting a key in place keeps its *original* position,
+ * so a URL used every minute for a day would still be evicted as if it had not
+ * been touched since the first time.
+ */
+function touchJwks(jku: string, entry: CachedJwks): void {
+  jwksCache.delete(jku);
+  jwksCache.set(jku, entry);
+}
+
+/**
+ * Store one fetched key set, evicting the least recently used once the cache is
+ * at {@link JWKS_CACHE_MAX_ENTRIES}.
+ */
+function storeJwks(jku: string, keys: JWK[]): void {
+  touchJwks(jku, { keys, fetchedAt: Date.now() });
+  while (jwksCache.size > JWKS_CACHE_MAX_ENTRIES) {
+    const oldest = jwksCache.keys().next();
+    if (oldest.done) break;
+    jwksCache.delete(oldest.value);
+  }
+}
+
+/** Fetch a JWKS, coalescing concurrent callers onto one request. */
+function loadJwks(jku: string): Promise<JWK[]> {
+  const existing = jwksInFlight.get(jku);
+  if (existing) return existing;
+
+  const epoch = jwksEpoch;
+  const request = (async () => {
+    const body = (await fetchJsonCapped(jku)) as { keys?: JWK[] } | null;
+    const keys = Array.isArray(body?.keys) ? body.keys : [];
+    if (epoch === jwksEpoch) storeJwks(jku, keys);
+    return keys;
+  })();
+
+  jwksInFlight.set(jku, request);
+  // A failed fetch is not cached, so the next caller retries; either way the
+  // slot is freed. Attached with both handlers so the rejection is observed
+  // here too — the caller awaiting `request` still sees it.
+  const release = () => {
+    if (jwksInFlight.get(jku) === request) jwksInFlight.delete(jku);
+  };
+  request.then(release, release);
+  return request;
+}
+
+/**
+ * The keys for a `jku`, and whether they came from the cache rather than from a
+ * fetch this call waited on — which is what tells {@link resolveSigningKey}
+ * whether a missing `kid` is worth re-checking at the source.
+ */
+async function jwksKeys(
+  jku: string,
+  opts: { refresh?: boolean } = {}
+): Promise<{ keys: JWK[]; cached: boolean }> {
+  const entry = opts.refresh ? undefined : jwksCache.get(jku);
+  if (entry) {
+    const age = Date.now() - entry.fetchedAt;
+    if (age < JWKS_FRESH_MS) {
+      // A hit is a *use*, and eviction is by use — so re-seat the entry at the
+      // tail before answering from it, or the busiest `jku` in the isolate is
+      // dropped on the schedule of the one time it was fetched. The entry
+      // object is re-set unchanged: rewriting `fetchedAt` here would re-arm the
+      // TTL on every read and make a hot entry immortal, which is the one thing
+      // a key cache must never be.
+      touchJwks(jku, entry);
+      return { keys: entry.keys, cached: true };
+    }
+    if (age < JWKS_MAX_STALE_MS) {
+      // Stale-while-revalidate: answer now from what we have and replace it
+      // behind the response. Registered with `waitUntil` rather than left
+      // detached — the runtime may cancel unregistered work once the response
+      // is sent, which would leave a busy entry stale until the hour is up and
+      // then block a callback on a fetch it had every chance to have made
+      // already. Still not awaited, and a failure only means the stale entry
+      // stands until it ages out.
+      waitUntil(loadJwks(jku).catch(() => {}));
+      return { keys: entry.keys, cached: true };
+    }
+  }
+  return { keys: await loadJwks(jku), cached: false };
+}
+
+/**
  * Resolve the public key referenced by a JWS `jku` + `kid`. Exported so the
  * push-notification callback verifier can reuse the same SSRF-guarded fetch +
  * Ed25519 shape check against a remote's pinned JWKS.
+ *
+ * Served from {@link jwksCache} when it can be, but never at the cost of the
+ * checks around it: the allowlist runs first on every call, and a `kid` the
+ * cached set does not contain is re-checked at the source before it is refused.
  */
 export async function resolveSigningKey(
   jku: string,
   kid: string,
   allowedDomains: string[]
 ): Promise<JWK> {
+  // First, on every call, cache hit or not. The allowlist is what decides
+  // whether this org may talk to this host at all, and a cached answer that
+  // skipped it would be a way to read a JWKS from a domain the org never
+  // approved — the cache is shared by URL, and approval is not.
   validateRemoteEndpoint(jku, allowedDomains);
-  const jwks = (await fetchJsonCapped(jku)) as { keys?: JWK[] };
-  const key = jwks.keys?.find((k) => k.kid === kid);
+
+  const first = await jwksKeys(jku);
+  let key = first.keys.find((k) => k.kid === kid);
+
+  // Key rotation is the one case where a cached answer is worse than none: the
+  // remote signed with a key it published after we last looked, and waiting out
+  // a TTL would reject every callback until then. An unknown `kid` is cheap and
+  // self-limiting to re-check — it only happens when the set really changed, or
+  // when a caller is asking for a key that was never there, which costs the one
+  // fetch it would have cost with no cache at all.
+  if (!key && first.cached) {
+    const refreshed = await jwksKeys(jku, { refresh: true });
+    key = refreshed.keys.find((k) => k.kid === kid);
+  }
+
   if (!key) {
     throw new AgentCardVerificationError(
       `signing key '${kid}' not found in JWKS at ${jku}`
