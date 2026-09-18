@@ -43,17 +43,21 @@ export type GatewayAgent = "admin" | "onboarding";
 /** What a model call is for, as the AI Gateway log will record it. */
 export type GatewayPhase = "round" | "compaction" | "embed";
 
-/** How many custom metadata entries AI Gateway accepts on one call. */
+/** How many custom metadata entries AI Gateway saves on one call. */
 export const GATEWAY_METADATA_MAX = 5;
 
 /**
  * The five keys one model call may spend, in the order they are spent.
  *
- * **Five entries, and that is a hard cap** — AI Gateway rejects a sixth, and
- * values may only be scalars. This interface *is* the cap: it declares exactly
- * five fields, so a sixth dimension someone wants to slice by has to displace one
- * of these in a diff a reviewer can see, rather than break every model call in
- * production the first time it runs. In priority order:
+ * **Five entries, and that is a hard cap** — AI Gateway saves the first five a
+ * request carries and silently ignores the rest, and values may only be scalars.
+ * Nothing fails when a sixth is sent: the call succeeds and the row is written,
+ * one dimension short, with no error anywhere to say which. This interface *is*
+ * the cap: it declares exactly five fields, so a sixth dimension someone wants to
+ * slice by has to displace one of these in a diff a reviewer can see, rather than
+ * go missing from every model call in production with nothing to notice it by.
+ * Because the gateway keeps the *first* five, the order below is also the order
+ * they would be given up in. In priority order:
  *
  * - `agent` and `workspaceId` are the two dimensions worth slicing spend by.
  * - `phase` is what no filter can derive. A round, a compaction summary and a
