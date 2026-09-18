@@ -109,9 +109,10 @@ describe("the chat model list", () => {
 
 describe("gatewayLogFields", () => {
   it("spends the five in priority order and stops there", () => {
-    // The cap is the gateway's, not ours, and it rejects a sixth rather than
-    // truncating it — so the order these are spent in is the order they would be
-    // given up in, and `workspaceId` is the one with nothing behind it.
+    // The cap is the gateway's, not ours, and it enforces it by silent
+    // truncation: the first five entries are saved and the rest ignored, with no
+    // error to debug from. So the order these are spent in is the order they would
+    // be given up in, and `workspaceId` is the one with nothing behind it.
     const metadata = gatewayLogFields({
       agent: "admin",
       phase: "round",
