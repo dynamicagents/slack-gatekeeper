@@ -4,8 +4,11 @@ import { embedMany, generateText } from "ai";
 import {
   chatModel,
   embeddingModel,
+  gatewayLogFields,
   CHAT_CALL_OPTIONS,
-  type GatewayCallMetadata
+  GATEWAY_METADATA_MAX,
+  type GatewayCall,
+  type GatewayCallFields
 } from "@/agents/model";
 import {
   AI_GATEWAY_ID,
@@ -49,13 +52,27 @@ function gatewayOf(
   return (run.mock.calls[n]?.[2] as RunOptions | undefined)?.gateway;
 }
 
-const fullTurn: GatewayCallMetadata = {
-  call: "turn",
-  tenant: "admin",
+/** A round with every one of the five answered, plus its correlation id. */
+const fullRound: GatewayCall = {
+  agent: "admin",
+  phase: "round",
+  round: 1,
+  channel: "C123:1700000000.0001",
   workspaceId: 7,
-  contextId: "C123:1700000000.0001",
-  user: "U123"
+  eventId: "task-1:r1"
 };
+
+/** The five, as the gateway will store them — `eventId` is not among them. */
+const fullRoundMetadata = {
+  agent: "admin",
+  phase: "round",
+  round: 1,
+  channel: "C123:1700000000.0001",
+  workspaceId: 7
+};
+
+/** The five keys, in the order {@link gatewayLogFields} spends them. */
+const PRIORITY = ["agent", "phase", "round", "channel", "workspaceId"];
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -90,12 +107,104 @@ describe("the chat model list", () => {
   });
 });
 
+describe("gatewayLogFields", () => {
+  it("spends the five in priority order and stops there", () => {
+    // The cap is the gateway's, not ours, and it enforces it by silent
+    // truncation: the first five entries are saved and the rest ignored, with no
+    // error to debug from. So the order these are spent in is the order they would
+    // be given up in, and `workspaceId` is the one with nothing behind it.
+    const metadata = gatewayLogFields({
+      agent: "admin",
+      phase: "round",
+      round: 2,
+      channel: "C123:1700000000.0001",
+      workspaceId: 7
+    });
+
+    expect(Object.keys(metadata)).toEqual(PRIORITY);
+    expect(Object.keys(metadata)).toHaveLength(GATEWAY_METADATA_MAX);
+  });
+
+  it("will not take a sixth dimension at the type level", () => {
+    gatewayLogFields({
+      agent: "admin",
+      phase: "round",
+      // @ts-expect-error — the five are a hard cap, so a sixth has to displace one
+      // of them in a diff someone reviews, not arrive beside them. Deleting this
+      // directive is what fails the build when the type stops saying so.
+      taskId: "task-1"
+    });
+  });
+
+  it("ignores a sixth that arrives past the type", () => {
+    // A cast, or plain JavaScript calling in. The type is the first line of the
+    // cap and this is the second: the builder reads its own five and nothing else,
+    // so an extra key is not spent, not truncated — never a candidate at all.
+    const smuggled = {
+      agent: "admin",
+      phase: "round",
+      round: 1,
+      channel: "C123:1700000000.0001",
+      workspaceId: 7,
+      taskId: "task-1"
+    } as GatewayCallFields;
+
+    const metadata = gatewayLogFields(smuggled);
+
+    expect(Object.keys(metadata)).toEqual(PRIORITY);
+    expect(metadata).not.toHaveProperty("taskId");
+  });
+
+  it("cannot be handed a person, however the caller spells one", () => {
+    // The privacy regression. Every field below is one property away from a real
+    // call site: `turnGatewayCall` reads the same parsed wire metadata that holds
+    // `user.slackUserId`, and one convenient spread is all it would ever take. The
+    // gateway log is retained and readable by anyone who can read the account, so a
+    // Slack user id in a row is a record of who said what, kept where nobody would
+    // think to look. The builder reading only its own declared keys is the only
+    // thing in the way, which is why it must never grow an `Object.entries`.
+    const leaky = {
+      agent: "onboarding",
+      phase: "round",
+      round: 1,
+      channel: "C123:1700000000.0001",
+      userId: "U123",
+      slackUserId: "U123",
+      user: { slackUserId: "U123", email: "grace@example.com" }
+    } as GatewayCallFields;
+
+    const metadata = gatewayLogFields(leaky);
+
+    expect(Object.keys(metadata)).toEqual([
+      "agent",
+      "phase",
+      "round",
+      "channel"
+    ]);
+    const serialized = JSON.stringify(metadata);
+    expect(serialized).not.toContain("U123");
+    expect(serialized).not.toContain("grace@example.com");
+    expect(serialized).not.toContain("user");
+  });
+
+  it("omits what a call has no answer for rather than sending it empty", () => {
+    // The onboarding concierge runs per user, so it has no workspace — and a
+    // `workspaceId: undefined` entry would spend one of five saying nothing.
+    expect(
+      gatewayLogFields({ agent: "onboarding", phase: "compaction" })
+    ).toEqual({ agent: "onboarding", phase: "compaction" });
+    expect(
+      gatewayLogFields({ agent: "admin", phase: "round", channel: "" })
+    ).toEqual({ agent: "admin", phase: "round" });
+  });
+});
+
 describe("the gateway identity a model call carries", () => {
-  it("labels a turn with the thread, the tenant and the workspace", async () => {
+  it("labels a round with the agent, the thread and the workspace", async () => {
     const run = stubRun();
 
     await generateText({
-      model: chatModel(fullTurn),
+      model: chatModel(fullRound),
       prompt: "hi",
       ...CHAT_CALL_OPTIONS
     });
@@ -103,43 +212,49 @@ describe("the gateway identity a model call carries", () => {
     expect(run.mock.calls[0]?.[0]).toBe(CHAT_PRIMARY.id);
     expect(gatewayOf(run)).toEqual({
       id: AI_GATEWAY_ID,
-      metadata: fullTurn
+      metadata: fullRoundMetadata,
+      eventId: "task-1:r1"
     });
   });
 
-  it("spends no more than the five entries AI Gateway accepts", async () => {
-    // The cap is the gateway's, not ours, and it rejects rather than truncates.
-    // A sixth field added to `GatewayCallMetadata` types fine and compiles fine
-    // and breaks every model call in production; this is the only thing in the
-    // way of that.
+  it("carries the task correlation beside the five rather than inside them", async () => {
+    // `GatewayOptions.eventId` is its own field on the request, so the join from a
+    // gateway row back to the task that paid for it costs none of the five. Spent
+    // as metadata it would displace `workspaceId`, which is the whole reason
+    // `taskId` was left off this side in the first place.
     const run = stubRun();
 
     await generateText({
-      model: chatModel(fullTurn),
+      model: chatModel(fullRound),
       prompt: "hi",
       ...CHAT_CALL_OPTIONS
     });
 
-    expect(
-      Object.keys(gatewayOf(run)?.metadata ?? {}).length
-    ).toBeLessThanOrEqual(5);
+    const gateway = gatewayOf(run);
+    expect(gateway?.eventId).toBe("task-1:r1");
+    expect(Object.keys(gateway?.metadata ?? {})).toEqual(PRIORITY);
+    expect(gateway?.metadata).not.toHaveProperty("eventId");
   });
 
-  it("omits what a call has no answer for rather than sending it empty", async () => {
-    // The onboarding concierge runs per user, so it has no workspace — and a
-    // `workspaceId: undefined` entry would spend one of five saying nothing.
+  it("gives a compaction no event id, because no one task paid for it", async () => {
+    // A compaction runs inside the one `Session` every task on that Durable Object
+    // shares. An event id there would name whichever task happened to tip the token
+    // budget over, and filtering by it would return a summary of other tasks'
+    // history — worse than nothing, because it looks like an answer.
     const run = stubRun();
 
     await generateText({
-      model: chatModel({ call: "summarize", tenant: "onboarding" }),
+      model: chatModel({ agent: "admin", phase: "compaction", workspaceId: 7 }),
       prompt: "summarize this",
       ...CHAT_CALL_OPTIONS
     });
 
     expect(gatewayOf(run)?.metadata).toEqual({
-      call: "summarize",
-      tenant: "onboarding"
+      agent: "admin",
+      phase: "compaction",
+      workspaceId: 7
     });
+    expect(gatewayOf(run)?.eventId).toBeUndefined();
   });
 
   it("carries the same identity when the fallback model serves the call", async () => {
@@ -153,7 +268,7 @@ describe("the gateway identity a model call carries", () => {
     });
 
     await generateText({
-      model: chatModel(fullTurn),
+      model: chatModel(fullRound),
       prompt: "hi",
       ...CHAT_CALL_OPTIONS,
       maxRetries: 0
@@ -162,7 +277,8 @@ describe("the gateway identity a model call carries", () => {
     expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
     expect(gatewayOf(run, 1)).toEqual({
       id: AI_GATEWAY_ID,
-      metadata: fullTurn
+      metadata: fullRoundMetadata,
+      eventId: "task-1:r1"
     });
   });
 
@@ -180,9 +296,12 @@ describe("the gateway identity a model call carries", () => {
     });
 
     expect(run.mock.calls[0]?.[0]).toBe(EMBED_MODEL_ID);
+    // No `agent`: one memoised model serves both agents' recall, so either name on
+    // it would be wrong half the time. No `eventId` either — an embedding belongs
+    // to a compaction's archive, not to the task that triggered it.
     expect(gatewayOf(run)).toEqual({
       id: AI_GATEWAY_ID,
-      metadata: { call: "embed" }
+      metadata: { phase: "embed" }
     });
   });
 
@@ -203,7 +322,7 @@ describe("the gateway identity a model call carries", () => {
     });
 
     await generateText({
-      model: chatModel(fullTurn),
+      model: chatModel(fullRound),
       prompt: "hi",
       ...CHAT_CALL_OPTIONS,
       maxRetries: 0
@@ -223,7 +342,7 @@ describe("the gateway identity a model call carries", () => {
   it("lets a test seam replace the model without reaching the binding at all", async () => {
     const run = stubRun();
 
-    const model = chatModel(fullTurn, { model: "some-other-model" });
+    const model = chatModel(fullRound, { model: "some-other-model" });
 
     expect(model).toBe("some-other-model");
     expect(run).not.toHaveBeenCalled();

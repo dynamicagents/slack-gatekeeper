@@ -10,7 +10,7 @@ import {
   type AgentSession,
   type SessionHost
 } from "@/agents/shared/session";
-import { executeAgentTurn, turnGatewayMetadata } from "@/agents/shared/loop";
+import { executeAgentTurn, turnGatewayCall } from "@/agents/shared/loop";
 import type { OpenCallStore } from "@/agents/shared/open-call";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { archiveMessages } from "@/agents/shared/recall";
@@ -84,11 +84,12 @@ export class AdminAgentExecutor implements AgentExecutor {
       const namespace = `admin:${wsId}`;
       // The summarizer's own gateway identity. It is a real cost against the same
       // gateway as the turn, and one that no Slack thread asked for — so it is
-      // labelled `summarize` rather than left indistinguishable from a turn. Its
+      // labelled `compaction` rather than left indistinguishable from a round. Its
       // metadata is fixed per instance, which is why it can be built with the
-      // session and the turn's cannot.
+      // session and a round's cannot. No `channel` and no `eventId`: this Session is
+      // shared by every task on this DO, so neither would name the work it summarized.
       const summarizer = chatModel(
-        { call: "summarize", tenant: "admin", workspaceId: wsId },
+        { agent: "admin", phase: "compaction", workspaceId: wsId },
         this.options
       );
       this.built = this.options.createSession
@@ -111,9 +112,13 @@ export class AdminAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      // Per turn, not per instance: the model carries this turn's identity into
+      // Per round, not per instance: the model carries this round's identity into
       // the AI Gateway log, and that is the only channel the gateway has for it.
-      model: chatModel(turnGatewayMetadata(requestContext), this.options),
+      model: (round) =>
+        chatModel(
+          turnGatewayCall("admin", requestContext, round),
+          this.options
+        ),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,

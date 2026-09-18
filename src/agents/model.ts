@@ -37,49 +37,121 @@ export const CHAT_CALL_OPTIONS = {
   telemetry: { isEnabled: false }
 } as const;
 
+/** Which agent a model call was made on behalf of. */
+export type GatewayAgent = "admin" | "onboarding";
+
 /** What a model call is for, as the AI Gateway log will record it. */
-export type GatewayCall = "turn" | "summarize" | "embed";
+export type GatewayPhase = "round" | "compaction" | "embed";
+
+/** How many custom metadata entries AI Gateway saves on one call. */
+export const GATEWAY_METADATA_MAX = 5;
 
 /**
- * The identity attached to one model call's AI Gateway log row.
+ * The five keys one model call may spend, in the order they are spent.
  *
- * **Five entries, and that is a hard cap** — AI Gateway rejects a sixth, and
- * values may only be scalars. So each field here is spent deliberately:
+ * **Five entries, and that is a hard cap** — AI Gateway saves the first five a
+ * request carries and silently ignores the rest, and values may only be scalars.
+ * Nothing fails when a sixth is sent: the call succeeds and the row is written,
+ * one dimension short, with no error anywhere to say which. This interface *is*
+ * the cap: it declares exactly five fields, so a sixth dimension someone wants to
+ * slice by has to displace one of these in a diff a reviewer can see, rather than
+ * go missing from every model call in production with nothing to notice it by.
+ * Because the gateway keeps the *first* five, the order below is also the order
+ * they would be given up in. In priority order:
  *
- * - `call` is what no filter can derive. A turn, a compaction summary and a recall
- *   embedding are three different costs against the same gateway, and without this
- *   a row is just a prompt with no idea which of them it was.
- * - `tenant` and `workspaceId` are the two dimensions worth slicing spend by.
- * - `contextId` is `${channelId}:${threadTs}` — the join back to the `[agent-turn]`
- *   line in Workers Logs, and to the Slack thread a human can actually read.
- * - `user` is the Slack user; AI Gateway's user insights read an identifier out of
- *   custom metadata, and without one all usage groups under a single anonymous id.
+ * - `agent` and `workspaceId` are the two dimensions worth slicing spend by.
+ * - `phase` is what no filter can derive. A round, a compaction summary and a
+ *   recall embedding are three different costs against the same gateway, and
+ *   without this a row is just a prompt with no idea which of them it was.
+ * - `round` separates the loop's own asking from the salvage that may follow it —
+ *   two calls a turn is charged for that otherwise look identical.
+ * - `channel` is the A2A context id, `${channelId}:${threadTs}` for a local turn —
+ *   the join back to the `[agent-turn]` line in Workers Logs, and to the Slack
+ *   thread a human can actually read.
  *
  * `taskId` is deliberately **not** here. It lives on the `[agent-turn]` line, where
- * there is no cap, and `contextId` is enough to get from one to the other.
+ * there is no cap, and inside {@link GatewayCall.eventId}, which costs no entry.
+ *
+ * **No person goes in any of these.** The gateway log is retained and queryable by
+ * anyone who can read the account, and a Slack user id in a row is a record of who
+ * said what, kept somewhere nobody would think to look for it. The only thing
+ * keeping one out is that there is nowhere here to put it — so do not add one, and
+ * see {@link gatewayLogFields} for why nothing can arrive by accident either.
  */
-export interface GatewayCallMetadata {
-  call: GatewayCall;
-  tenant?: string;
+export interface GatewayCallFields {
+  /**
+   * Absent on an embedding: {@link embeddingModel} is memoised once per isolate and
+   * serves both agents' recall, so either name on it would be wrong half the time.
+   */
+  agent?: GatewayAgent;
+  phase: GatewayPhase;
+  round?: number;
+  channel?: string;
   workspaceId?: number;
-  contextId?: string;
-  user?: string;
+}
+
+/** The metadata record one call carries, once the absent entries are dropped. */
+export type GatewayCallMetadata = NonNullable<GatewayOptions["metadata"]>;
+
+/**
+ * The five, spent in priority order, with what a call has no answer for dropped.
+ *
+ * The one place a metadata object is built, and it reads **only the five fields it
+ * declares** — never `Object.entries(fields)`, never a spread of whatever the
+ * caller had to hand. That is the difference between a cap this enforces and a cap
+ * it merely documents: a turn's parsed wire metadata carries `user.slackUserId`,
+ * and a builder that copied its input would put it in a retained log the moment
+ * some call site found it convenient to pass the whole object.
+ *
+ * `undefined` and `""` are dropped rather than passed through:
+ * `GatewayOptions["metadata"]` admits `null` but not `undefined`, and an absent
+ * workspace should not spend one of five saying so.
+ */
+export function gatewayLogFields(
+  fields: GatewayCallFields
+): GatewayCallMetadata {
+  const candidates: [string, string | number | undefined][] = [
+    ["agent", fields.agent],
+    ["phase", fields.phase],
+    ["round", fields.round],
+    ["channel", fields.channel],
+    ["workspaceId", fields.workspaceId]
+  ];
+  const present = candidates.filter(
+    (entry): entry is [string, string | number] =>
+      entry[1] !== undefined && entry[1] !== ""
+  );
+  // Belt and braces: the type already stops a sixth key, and this stops one that
+  // arrived past the type — a cast, or JavaScript from a test. Priority order is
+  // what decides, so `workspaceId` is the first to go.
+  return Object.fromEntries(present.slice(0, GATEWAY_METADATA_MAX));
 }
 
 /**
- * The gateway options one call runs under.
- *
- * `undefined` is dropped rather than passed through: `GatewayOptions["metadata"]`
- * admits `null` but not `undefined`, and an absent workspace should not spend one
- * of the five entries saying so.
+ * One chat call's gateway identity: the five that get logged, plus the correlation
+ * id that rides *beside* them rather than inside them.
  */
-function gatewayFor(metadata: GatewayCallMetadata): GatewayOptions {
-  const present = Object.entries(metadata).filter(
-    ([, value]) => value !== undefined
-  );
+export interface GatewayCall extends GatewayCallFields {
+  /**
+   * `${taskId}:r${round}`, on a round and nowhere else.
+   *
+   * `GatewayOptions.eventId` is its own field on the gateway request, so the join
+   * from a gateway row back to the task that paid for it costs none of the five.
+   * A compaction has no honest value for it: it runs inside the one `Session` every
+   * task on that Durable Object shares, so a task id there would name whichever
+   * task happened to tip the token budget over — filtering by it would find a
+   * summary of other tasks' history. Better absent than misleading.
+   */
+  eventId?: string;
+}
+
+/** The gateway options one call runs under. */
+function gatewayFor(call: GatewayCall): GatewayOptions {
   return {
     id: AI_GATEWAY_ID,
-    metadata: Object.fromEntries(present) as GatewayOptions["metadata"]
+    metadata: gatewayLogFields(call),
+    // Omitted rather than sent empty, for the same reason the five are.
+    ...(call.eventId ? { eventId: call.eventId } : {})
   };
 }
 
@@ -124,12 +196,12 @@ function agentProvider() {
  * against a gateway log that can finally say which thread it belonged to.
  */
 export function chatModel(
-  metadata: GatewayCallMetadata,
+  call: GatewayCall,
   overrides: ModelOverrides = {}
 ): LanguageModel {
   if (overrides.model) return overrides.model;
   const workersai = agentProvider();
-  const gateway = gatewayFor(metadata);
+  const gateway = gatewayFor(call);
   return wrapLanguageModel({
     model: workersai(CHAT_PRIMARY.id, {
       gateway,
@@ -156,7 +228,8 @@ let embedding: EmbeddingModel | undefined;
  * The model episodic recall embeds with.
  *
  * Still memoised: an embedding call carries no turn, so its metadata is the same
- * every time. `supportsParallelCalls: false` is what keeps `embedMany`
+ * every time — and one model serves both agents' recall, which is why it names a
+ * `phase` and no `agent`. `supportsParallelCalls: false` is what keeps `embedMany`
  * sequential — it overrides the caller's `maxParallelCalls` outright, so one
  * archive cannot fan out across concurrent binding calls.
  */
@@ -164,6 +237,6 @@ export function embeddingModel(): EmbeddingModel {
   return (embedding ??= agentProvider().textEmbeddingModel(EMBED_MODEL_ID, {
     maxEmbeddingsPerCall: EMBED_MAX_PER_CALL,
     supportsParallelCalls: false,
-    gateway: gatewayFor({ call: "embed" })
+    gateway: gatewayFor({ phase: "embed" })
   }));
 }
