@@ -21,6 +21,9 @@ import {
   type PostCall,
   type ReactionCall
 } from "../helpers/slack-events";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 // Tests covering the shared helpers in message-helpers.ts:
 //   replyThreadTs   — direct unit tests (pure fn)

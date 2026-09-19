@@ -5,6 +5,9 @@ import {
   waitOnExecutionContext
 } from "cloudflare:test";
 import worker from "../src/server";
+import { useStorageReset } from "./helpers/storage";
+
+useStorageReset();
 
 describe("Worker routing", () => {
   it("returns 404 for GET /", async () => {

@@ -16,6 +16,9 @@ import {
 } from "@/db/models/workspaces";
 import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
 import { createHitlRequest, getHitlRequest } from "@/db/models/hitl-requests";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 describe("workspaces — createWorkspace", () => {
   it("allocates an id above the org sentinel and persists the row", async () => {

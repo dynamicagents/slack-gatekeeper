@@ -17,6 +17,9 @@ import {
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 // agent_tasks.agent_name is an FK; seed a real agent so inserts satisfy it.
 beforeEach(async () => {

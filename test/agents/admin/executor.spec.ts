@@ -25,6 +25,9 @@ import {
   terminalTaskText
 } from "../../helpers/agents";
 import { freshWsId } from "../../helpers/workspace";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 const sqlHost = fakeSessionHost();
 

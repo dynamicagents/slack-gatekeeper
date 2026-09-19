@@ -169,9 +169,9 @@ function deniedReason(result: {
  * that signal, so unwrap before classifying.
  *
  * One known gap: Workers AI code 3046 is missing from the provider's code→status
- * table, so it reaches us with no status at all and reads as permanent. That used to
- * be caught by matching the message text — which also matched any error that merely
- * mentioned the number. Fixing it belongs upstream, in the table, not here.
+ * table, so it reaches us with no status at all and reads as permanent. Do not
+ * catch it by matching the message text — that also matches any error merely
+ * mentioning the number. Fixing it belongs upstream, in the table, not here.
  */
 export function isTransientAiError(err: unknown): boolean {
   if (RetryError.isInstance(err)) return isTransientAiError(err.lastError);
@@ -417,11 +417,12 @@ function publishInputRequired(
  * + publish the final reply, and always `finished()`. Agent-specific behavior
  * (which session, which tools, which caller context) is supplied by `cfg.prepare`.
  *
- * One call, because the SDK's loop already owns everything this used to re-implement
- * around it: a rejected ending comes back to the model as a failed tool result on the
- * next step, the forced final round is that loop's last step, and an unreachable
- * model is answered a layer down by the model's own fallback. The single exception is
- * `salvageEnding` below, for a turn the loop leaves with no answer at all.
+ * One call, because the SDK's loop already owns everything a wrapper around it
+ * would re-implement: a rejected ending comes back to the model as a failed tool
+ * result on the next step, the forced final round is that loop's last step, and
+ * an unreachable model is answered a layer down by the model's own fallback. The
+ * single exception is `salvageEnding` below, for a turn the loop leaves with no
+ * answer at all.
  */
 export async function executeAgentTurn(
   requestContext: RequestContext,

@@ -20,6 +20,9 @@ import {
   sweepStaleHitlRequests,
   type CreateHitlRequestInput
 } from "@/db/models/hitl-requests";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 beforeEach(async () => {
   await registerAgent({

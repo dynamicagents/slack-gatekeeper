@@ -38,6 +38,9 @@ import {
   statusEnvelope,
   taskEnvelope
 } from "../helpers/a2a";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 /**
  * The call context a v1.0 push-notification store/sender is threaded. The

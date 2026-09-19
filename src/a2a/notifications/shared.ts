@@ -28,8 +28,8 @@ export class TaskDeliveryValidationError extends Error {}
  * A2A v1.0 has no structured task-level error — `TaskStatus` is only
  * `{state, message, timestamp}` — so a failing agent's sole way to explain itself
  * is prose in `status.message`, which is byte-identical in shape to a successful
- * reply. Without this marker a failure reads as a normal answer, which is exactly
- * how a well-behaved agent's `failed` task used to render.
+ * reply. Without this marker a failure reads as a normal answer — which is how even
+ * a well-behaved agent's `failed` task would render.
  */
 function terminalFailureText(
   agentName: string,

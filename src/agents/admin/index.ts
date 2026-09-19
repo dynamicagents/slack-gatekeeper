@@ -26,9 +26,8 @@ function iconIndexKey(name: string): string {
   return `icon:${name}:index`;
 }
 /**
- * Where destructive actions used to wait for their approval, before the SDK's own
- * approvals replaced them. Nothing writes here any more — see
- * {@link AdminAgent.clearRetiredApprovals}.
+ * The retired approval store — nothing writes here; the SDK's own approvals
+ * replaced it. Swept by {@link AdminAgent.clearRetiredApprovals}.
  */
 const PENDING_ACTION_PREFIX = "hitl:pending:";
 
@@ -76,11 +75,9 @@ export class AdminAgent extends A2AAgent {
   /**
    * Drop the retired `hitl:pending:*` store.
    *
-   * Destructive actions used to be re-described and persisted here while their
-   * approval waited, then carried out from the stored copy. The SDK's own approvals
-   * replay the model's actual call instead, so nothing writes these any more — but a
-   * prompt raised just before the deploy leaves one behind, and nothing else would
-   * ever collect it.
+   * The SDK's own approvals replay the model's actual call, so nothing writes
+   * these — but a prompt raised just before that deploy leaves one behind, and
+   * nothing else would ever collect it.
    *
    * **Remove this after one HITL TTL (7 days) past the deploy**, by which point no
    * pre-deploy prompt can still be outstanding. Guarded per isolate like

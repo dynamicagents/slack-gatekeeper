@@ -24,6 +24,9 @@ import {
   type PostCall,
   type ReactionCall
 } from "../helpers/slack-events";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 // The single MessageWorkflow handles every woken agent for an event, dispatching
 // each by `agent.kind`. These suites exercise its two dispatch paths — local

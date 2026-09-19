@@ -16,7 +16,8 @@ process.env.GATEKEEPER_JWT_PRIVATE_KEY ??= JSON.stringify({
 });
 
 // Read the drizzle-generated migrations on the Node side and hand them to the
-// pool as a binding; test/apply-migrations.ts applies them to the test D1.
+// pool as a binding; test/helpers/storage.ts applies them to the test D1, in the
+// specs that declare `useStorageReset()`.
 const migrations = await readD1Migrations("./migrations");
 
 export default defineConfig({
@@ -26,7 +27,7 @@ export default defineConfig({
     }
   },
   test: {
-    setupFiles: ["./test/apply-migrations.ts"]
+    setupFiles: ["./test/setup.ts"]
   },
   plugins: [
     cloudflareTest({

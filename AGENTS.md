@@ -11,12 +11,12 @@ For all limits and quotas, retrieve from the product's `/platform/limits/` page.
 
 ## Commands
 
-| Command               | Purpose                                   |
-| --------------------- | ----------------------------------------- |
-| `npx wrangler dev`    | Local development                         |
-| `npx wrangler deploy` | Deploy to Cloudflare                      |
-| `npm run types`       | Generate TypeScript types (runtime + Env) |
-| `npm run check`       | Format, lint, typecheck + verify types    |
+| Command               | Purpose                                                           |
+| --------------------- | ----------------------------------------------------------------- |
+| `npx wrangler dev`    | Local development                                                 |
+| `npx wrangler deploy` | Deploy to Cloudflare                                              |
+| `npm run types`       | Generate TypeScript types (runtime + Env)                         |
+| `npm run check`       | Format, lint, typecheck, verify types + audit test storage resets |
 
 ## Debugging production (`npm run cf`)
 
@@ -69,6 +69,22 @@ Retrieve API references and limits from:
 Order exported functions in CRUD sequence: **Create → Read → Update → Delete**.
 Upserts count as Create. Helpers that delegate to a core CRUD function follow their
 own thematic grouping but the core operations must appear in CRUD order first.
+
+### `test/` — a spec declares its own storage reset
+
+`test/setup.ts` runs for every spec and does one thing: clear the JWKS cache, which
+is cheap and whose absence surfaces as another file's failure.
+
+Resetting D1 and Durable Object storage is **per file**. A spec that reads or writes
+storage calls `useStorageReset()` (`test/helpers/storage.ts`) once, directly under
+its imports and above every other hook — hooks run in registration order, so a
+`beforeEach` registered later seeds onto the clean slate rather than being wiped by
+it. A spec that touches no storage does not call it and does not pay the migration
+replay, which is most of the suite's runtime.
+
+When unsure, call it: an unnecessary reset is slow, a missing one is flaky.
+`scripts/check-storage-reset.mjs` (part of `npm run check`) fails the build on a spec
+that can reach storage — directly or through a `test/` helper — without the call.
 
 ## Best Practices (conditional)
 

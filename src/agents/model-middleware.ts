@@ -22,7 +22,7 @@ import { isRecord, jsonOf } from "@/util/json";
  * fix live in Sessions and replay on every later turn. Nothing but time removes
  * them, so this is the only place that can.
  *
- * The SDK's own replay is no longer a second cause. A tool call it could not parse
+ * The SDK's own replay is not a second cause. A tool call it could not parse
  * is handed back as the raw arguments string, but it substitutes `{}` before
  * building the message that replays it (`to-response-messages.ts`), so the
  * malformed `final_reply` that the loop now repairs in place never reaches the wire

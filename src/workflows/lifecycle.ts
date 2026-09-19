@@ -33,7 +33,7 @@ export async function handleMemberJoined(
   if (!params.channelId || !params.userId) return;
   if (botUserId && params.userId === botUserId) return; // bot's own join
   const ws = await getWorkspaceByAdminChannel(params.channelId);
-  if (!ws) return; // not an admin channel — no-op (allowlist is Phase 4)
+  if (!ws) return; // not an admin channel — no-op
   await addWorkspaceAdmin(ws.id, params.userId, "membership");
 }
 
@@ -92,8 +92,7 @@ export class LifecycleWorkflow extends WorkflowEntrypoint<
           return;
 
         default:
-          // message_changed / message_deleted edits — no registry impact yet.
-          // TODO(phase-6): feed the channel-history raw buffer + Vectorize index.
+          // message_changed / message_deleted edits — no registry impact.
           await step.do("noop-message-edit", async () => {
             console.log("LifecycleWorkflow: no-op lifecycle event", {
               instanceId: event.instanceId,

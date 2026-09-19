@@ -7,6 +7,9 @@ import {
 import { MockLanguageModelV4 } from "ai/test";
 import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 import { okResult } from "../helpers/agents";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 /**
  * The middleware only ever rewrites `params`, so the tests drive `transformParams`

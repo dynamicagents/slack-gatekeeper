@@ -9,6 +9,9 @@ import {
   setAdminIconUrl,
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 const names = (ts: Awaited<ReturnType<typeof resolveTargets>>) =>
   ts.map((t) => t.agent.name).sort();

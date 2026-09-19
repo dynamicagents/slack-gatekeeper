@@ -4,6 +4,9 @@ import { runInDurableObject } from "cloudflare:test";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import type { OpenCall } from "@/agents/shared/open-call";
 import { DurableOpenCalls } from "@/agents/shared/open-call-store";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 /**
  * Run against a real Durable Object's storage, one fresh instance per case so

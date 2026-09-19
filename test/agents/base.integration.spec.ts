@@ -7,6 +7,9 @@ import type { AdminAgent } from "@/server";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { buildAgentSession } from "@/agents/shared/session";
 import { adminSoul } from "@/agents/admin/prompt";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 /**
  * The production session path, on a real agent Durable Object.

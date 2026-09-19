@@ -6,6 +6,9 @@ import { DurableTaskStore } from "@/a2a/task-store";
 import { HITL_REQUEST_TTL_SECONDS, TASK_RETENTION_SECONDS } from "@/config";
 import { dataPart, textPart } from "@/a2a/parts";
 import { makeTask } from "../helpers/a2a";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 /**
  * Run against a real Durable Object's storage, one fresh instance per case so

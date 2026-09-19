@@ -40,6 +40,9 @@ import {
   toolCallResult
 } from "../../helpers/agents";
 import { userMessage } from "../../helpers/a2a";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 // ---------------------------------------------------------------------------
 // Helpers
