@@ -22,13 +22,12 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * reaches it via `stub.fetch`, and `fetch` here answers the A2A protocol
  * (card discovery + JSON-RPC) through the SDK's `DefaultRequestHandler`.
  *
- * Subclasses supply a `card()` and an `executor()`. Phase 3 executors just echo;
- * Phase 4 swaps in the AI-SDK loop. We extend the Agents SDK `Agent` (itself a
- * Durable Object) so executors get per-agent conversation history from
- * {@link A2AAgent.sessions} and a writable memory block from `this.sql`. The A2A
- * bridge is kept by overriding `fetch` — these DOs are reached directly via
- * `stub.fetch`, not `routeAgentRequest`, so bypassing the SDK's default router
- * is intentional.
+ * Subclasses supply a `card()` and an `executor()`. We extend the Agents SDK
+ * `Agent` (itself a Durable Object) so executors get per-agent conversation
+ * history from {@link A2AAgent.sessions} and a writable memory block from
+ * `this.sql`. The A2A bridge is kept by overriding `fetch` — these DOs are
+ * reached directly via `stub.fetch`, not `routeAgentRequest`, so bypassing the
+ * SDK's default router is intentional.
  *
  * Task state is durable for the same reason the Session is: a turn parked on a
  * human-in-the-loop prompt has to survive eviction, since the human may answer

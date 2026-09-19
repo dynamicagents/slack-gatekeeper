@@ -71,11 +71,9 @@ export class DurableTaskStore implements TaskStore {
    * the same reasoning by which `serveA2A` rejects streaming outright.
    *
    * Deliberately a plain `Error` and not the SDK's `UnsupportedOperationError`:
-   * `@a2a-js/sdk/errors` and `@a2a-js/sdk/server` are separately bundled entry
-   * points that each carry their own `A2AError`, and the server's error mapper
-   * tests `instanceof` against *its* copy — so the semantic class imported here
-   * would be flattened to a generic internal error anyway, while reading as
-   * though it produced `UNSUPPORTED_OPERATION`. Same hazard as `errors.ts`.
+   * the semantic class would be flattened to a generic internal error anyway,
+   * while reading as though it produced `UNSUPPORTED_OPERATION`. See the
+   * cross-bundle `instanceof` hazard in `a2a/errors.ts`.
    */
   async list(): Promise<ListTasksResponse> {
     throw new Error("tasks/list is not supported by local agents");

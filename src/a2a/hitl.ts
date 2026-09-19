@@ -24,16 +24,10 @@ import { dataOf, dataPart, textPart } from "@/a2a/parts";
  * through this gatekeeper, and how the answer gets back.
  *
  * A2A carries the exchange but standardizes nothing inside it — a part's `data`
- * is arbitrary JSON — so the two sides have to agree on what a `data` part holds
- * and what its `type` is called. **That agreement is not ours to make alone**, so
- * the names live in `@dynamicagents/g2a-protocol` and are re-exported here
- * unchanged. `@dynamicagents/core` reads the same constants from the same
- * package; a gatekeeper cannot import the agent runtime, and the contract
- * package is the only thing both sides can hold.
- *
- * They are URIs on a host Dynamic Agents owns rather than bare words, because a
- * `data.type` shares one flat namespace with every other party's. Until v0.4.0
- * they were `io.da.*` — reverse-DNS for `da.io`, a domain that is not ours.
+ * is arbitrary JSON — so the two sides must agree on what a `data` part holds and
+ * what its `type` is called. That agreement is not ours to make alone: the names
+ * live in `@dynamicagents/g2a-protocol` and are re-exported here unchanged, which
+ * is the only thing a gatekeeper and the agent runtime can both hold.
  *
  * What stays here is everything either side *enforces*. The protocol declares
  * the shapes as types only; this module validates them with the schema library

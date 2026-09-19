@@ -23,25 +23,10 @@ import {
  */
 
 /**
- * The claim names and the algorithm come from `@dynamicagents/g2a-protocol`.
- *
- * They used to be declared here and again in `@dynamicagents/core`, each with a
- * comment saying it must match the other, because the gatekeeper deliberately does
- * **not** import core — core is the agent runtime, and a gatekeeper is not an
- * agent. Two copies kept in step by a comment is fragile: nothing but review
- * stops them drifting, and a drifted claim key fails as an empty claim at the
- * remote rather than as a build error.
- *
- * The protocol package is the shared artifact that rule permits, created to
- * remove that duplication — zero dependencies, no crypto, no agent runtime, so
- * depending on it commits this gatekeeper to nothing. Owning the claim names in
- * one place is also what let the namespace move from `looping.ai` to
- * `dynamicagents.dev`, as part of the rename from Looping to Dynamic Agents, be
- * a single deliberate edit. The rule itself is unchanged and still absolute:
- * **the gatekeeper must never import `@dynamicagents/core`.**
- *
- * Re-exported so this module stays the place the rest of the gatekeeper imports
- * them from.
+ * The claim names and the algorithm, re-exported from the protocol package — the
+ * one artifact both sides can share, because **the gatekeeper must never import
+ * `@dynamicagents/core`**. Owning them in one place is also what makes a namespace
+ * move a single deliberate edit rather than two copies kept in step by a comment.
  */
 export { IDENTITY_CLAIM, TENANT_CLAIM } from "@dynamicagents/g2a-protocol";
 
@@ -53,12 +38,9 @@ const TOKEN_TTL_SECONDS = 120;
  * Derived from the registered agent row, not from the endpoint URL, so two
  * distinct agents can safely share one remote service.
  *
- * From the protocol package, where it is the **minted** half of the pair: every
- * field required, because an issuer knows all of them. The remote parses the
- * same claim into a `GatekeeperIdentity` with every field optional, since a
- * signature proves a payload was not altered and never that it was well-formed.
- * That asymmetry is asserted at the type level over there, so this staying
- * assignable to what the remote accepts is checked rather than assumed.
+ * The **minted** half of the protocol package's pair — every field required,
+ * because an issuer knows all of them, while the remote parses the same claim
+ * with every field optional. That asymmetry is asserted at the type level there.
  */
 export type { RemoteIdentity };
 

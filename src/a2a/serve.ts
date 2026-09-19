@@ -124,11 +124,10 @@ function extensionHeaders(context: ServerCallContext): HeadersInit {
  * are transported at HTTP 200 per JSON-RPC 2.0, matching what the SDK handler
  * returns for the failures it maps itself.
  *
- * The mapper is the transport handler's own static rather than the equivalent
- * `toJsonRpcError` from `@a2a-js/sdk/errors`: those are separately bundled
- * entry points that each carry their own copy of the error classes, so only
- * the server bundle's mapper recognizes an error the server bundle threw —
- * the other one would flatten every semantic error to a generic internal error.
+ * The mapper is the transport handler's own static rather than `toJsonRpcError`
+ * from `@a2a-js/sdk/errors`, because only the server bundle's mapper recognizes
+ * an error the server bundle threw. See the cross-bundle `instanceof` hazard in
+ * `a2a/errors.ts`.
  */
 function jsonRpcErrorResponse(body: unknown, err: unknown): Response {
   const id = (body as { id?: string | number | null } | null)?.id ?? null;

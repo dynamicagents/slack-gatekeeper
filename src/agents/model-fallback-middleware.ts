@@ -4,11 +4,11 @@ import type { LanguageModelMiddleware } from "ai";
  * Fall back to a second model **within the failing call**, rather than by running
  * the turn again.
  *
- * The turn used to own this: `runRounds` looped over a primary and a fallback slot
- * and re-entered `generateText` from the original history, so every tool the primary
- * had already run ran a second time. A middleware sits one layer down, where the
- * unit of failure is a single model call — the steps already taken keep their
- * results, and only the call that failed is retried elsewhere.
+ * A middleware sits one layer below the turn, where the unit of failure is a single
+ * model call: the steps already taken keep their results, and only the call that
+ * failed is retried elsewhere. Retrying at the turn level instead would re-enter
+ * `generateText` from the original history and run every tool the primary had
+ * already run a second time.
  *
  * Two failures reach here, and they arrive differently:
  *
@@ -181,18 +181,6 @@ function violatesToolChoice(
 }
 
 /**
- * Try `fallback` when the wrapped model throws, or narrates under an enforced tool
- * choice.
- *
- * The fallback's own result is returned as it comes, even if it narrates too: one
- * fallback per call, no second guess. `generateText` then raises the violation
- * itself, and the turn classifies that as an ending it has no reply for — which is
- * what the forced final round exists to rescue.
- *
- * Only `wrapGenerate` is implemented. Nothing here streams; a future `streamText`
- * would get no fallback until `wrapStream` is written to match.
- */
-/**
  * The same params, with the fallback model's own reasoning budget on them.
  *
  * The two models do not share a `reasoning_effort` enum, so switching model has
@@ -219,6 +207,18 @@ function withFallbackEffort(
   };
 }
 
+/**
+ * Try `fallback` when the wrapped model throws, or narrates under an enforced tool
+ * choice.
+ *
+ * The fallback's own result is returned as it comes, even if it narrates too: one
+ * fallback per call, no second guess. `generateText` then raises the violation
+ * itself, and the turn classifies that as an ending it has no reply for — which is
+ * what the forced final round exists to rescue.
+ *
+ * Only `wrapGenerate` is implemented. Nothing here streams; a future `streamText`
+ * would get no fallback until `wrapStream` is written to match.
+ */
 export function fallbackMiddleware(
   fallback: Model,
   /** The fallback's reasoning budget. Omitted, it keeps whatever the call had. */

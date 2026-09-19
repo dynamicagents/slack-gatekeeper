@@ -1,7 +1,7 @@
 import { tool, type ToolApprovalConfiguration, type ToolSet } from "ai";
 import { z } from "zod";
 import { authorize, type UserAuthContext } from "@/auth";
-import type { CardSigningPin, VerifiedAgentCard } from "@/a2a/card-verify";
+import type { VerifiedAgentCard } from "@/a2a/card-verify";
 import { askUserTool } from "@/agents/shared/ask-user";
 import {
   type AgentRow,
@@ -49,7 +49,7 @@ import {
  * admin's own avatar + display name). No discriminated `operation` — each tool
  * takes a flat schema the model can emit reliably.
  *
- * Two gating layers (see PLAN Phase 4):
+ * Two gating layers:
  *  1. Instance-scoped availability — `buildAdminTools` only constructs the
  *     org-only tools (`workspace_create`, `workspace_set_admin_channel`,
  *     `agents_domains_*`) on the org instance (`wsId === ORG_WORKSPACE_ID`); a
@@ -92,9 +92,6 @@ export type EndpointVerifier = (
   endpoint: string,
   tenantId: string
 ) => Promise<VerifiedAgentCard>;
-
-// CardSigningPin is re-exported so existing imports from this module keep working.
-export type { CardSigningPin };
 
 /** A reserved/built-in agent name that registry CRUD must never touch. */
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);

@@ -539,6 +539,18 @@ function continuationFailureDetail(
 }
 
 /**
+ * Un-park the task row and wake the ReactionWorkflow, because this is the start
+ * of a fresh processing leg and the workflow measures legs with its own timer
+ * rather than a stored timestamp — parking only ever *extends* its wait, so this
+ * is the one transition it has to be told about. Without the nudge it would sit
+ * on the parked wait (the full HITL TTL) instead of the agent's hour.
+ */
+async function markResumed(token: string): Promise<void> {
+  const eventId = await resumeFromInput(token);
+  if (eventId) await signalReactionSync(eventId);
+}
+
+/**
  * Continue a task parked on a human-in-the-loop prompt. Mirrors
  * {@link dispatchToAgent}'s two branches but *continues* an existing task rather
  * than starting one: the message carries the paused `taskId` + `contextId` +
@@ -551,18 +563,6 @@ function continuationFailureDetail(
  * path ({@link timeoutAgentTask}); the `messageId` is deterministic so a retried
  * continuation dedupes at the agent.
  */
-/**
- * Un-park the task row and wake the ReactionWorkflow, because this is the start
- * of a fresh processing leg and the workflow measures legs with its own timer
- * rather than a stored timestamp — parking only ever *extends* its wait, so this
- * is the one transition it has to be told about. Without the nudge it would sit
- * on the parked wait (the full HITL TTL) instead of the agent's hour.
- */
-async function markResumed(token: string): Promise<void> {
-  const eventId = await resumeFromInput(token);
-  if (eventId) await signalReactionSync(eventId);
-}
-
 async function sendTaskContinuation(
   row: HitlRequestRow,
   input: {

@@ -188,12 +188,12 @@ function agentProvider() {
  * The model used by the agent tool loop and the Sessions compaction summarizer.
  *
  * Built per call rather than memoised, because the gateway metadata is per call
- * and the provider freezes it at model construction. This is the trade that
- * replaced the `customProvider` registry that used to live here: a registry maps
- * a *name* to one model instance, which is exactly what per-turn metadata cannot
- * be. The cost is two object allocations per turn — `wrapLanguageModel` and the
- * two `WorkersAIChatLanguageModel`s are plain objects that open no connection —
- * against a gateway log that can finally say which thread it belonged to.
+ * and the provider freezes it at model construction. A `customProvider` registry
+ * cannot serve this: it maps a *name* to one model instance, which is exactly
+ * what per-turn metadata cannot be. The cost is two object allocations per turn —
+ * `wrapLanguageModel` and the two `WorkersAIChatLanguageModel`s are plain objects
+ * that open no connection — against a gateway log that can say which thread it
+ * belonged to.
  */
 export function chatModel(
   call: GatewayCall,

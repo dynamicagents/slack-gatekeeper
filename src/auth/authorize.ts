@@ -1,7 +1,7 @@
 /**
  * A user's resolved permissions, built purely from the D1 registry
- * (slack_users flags + workspace_admins membership). Passed to agents over A2A
- * in Phase 3; `authorize()` checks requirements against it.
+ * (slack_users flags + workspace_admins membership). Passed to agents over A2A;
+ * `authorize()` checks requirements against it.
  */
 export interface UserAuthContext {
   slackUserId: string;
