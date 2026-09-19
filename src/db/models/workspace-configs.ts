@@ -2,7 +2,7 @@ import { eq, sql, and } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
 import { ORG_WORKSPACE_ID } from "./workspaces";
-import { sanitizeDisplayName } from "@/util/display-name";
+import { sanitizeDisplayName } from "@/util/slack-text";
 
 // ---------------------------------------------------------------------------
 // Key namespaces
@@ -13,7 +13,7 @@ import { sanitizeDisplayName } from "@/util/display-name";
  * Unlike {@link SystemConfigKeys}, these are exposed through admin tools and
  * intentionally mutable by the org admin.
  */
-export const OperatorConfigKeys = {
+const OperatorConfigKeys = {
   /**
    * JSON array of approved domain patterns for remote (custom) A2A agents.
    * Each entry covers that domain and all its subdomains. Stored on workspace 0

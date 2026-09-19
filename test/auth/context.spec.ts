@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildUserAuthContext } from "@/auth/build";
+import { buildUserAuthContext } from "@/auth/authorize";
 import { authorize } from "@/auth/authorize";
 import { upsertSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";

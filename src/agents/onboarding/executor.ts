@@ -1,8 +1,10 @@
+import type { AgentCard } from "@a2a-js/sdk";
 import type {
   AgentExecutor,
   ExecutionEventBus,
   RequestContext
 } from "@a2a-js/sdk/server";
+import { buildAgentCard } from "@/a2a/card";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { chatModel, type ModelOverrides } from "@/agents/model";
 import {
@@ -15,6 +17,7 @@ import { isCancelRequested } from "@/db/models/agent-tasks";
 import { callerContext } from "@/agents/shared/prompt";
 import { archiveMessages } from "@/agents/shared/recall";
 import { recallTools } from "@/agents/shared/recall-tool";
+import { A2AAgent } from "../base";
 import { onboardingSoul } from "./prompt";
 import { buildOnboardingTools } from "./tools";
 
@@ -117,4 +120,30 @@ export class OnboardingAgentExecutor implements AgentExecutor {
 
   // A2A cancellation isn't supported for this single-shot loop.
   cancelTask = async (): Promise<void> => {};
+}
+
+/**
+ * Onboarding (DM) concierge. One Durable Object instance per user
+ * (`onboarding:{slackUserId}`), each with isolated Sessions + memory. Runs a
+ * read-only Workers-AI tool loop that explains how Dynamic Agents works, routes users to
+ * the right channel/agent name, and surfaces registry health — all over direct
+ * message.
+ */
+export class OnboardingAgent extends A2AAgent {
+  protected card(): AgentCard {
+    return buildAgentCard({
+      name: "Onboarding Agent",
+      description:
+        "Dynamic Agents onboarding concierge — explains the system, routes users, and surfaces health.",
+      pushNotifications: true
+    });
+  }
+
+  protected builtinTenant(): "onboarding" {
+    return "onboarding";
+  }
+
+  protected executor(): AgentExecutor {
+    return new OnboardingAgentExecutor(this);
+  }
 }

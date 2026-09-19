@@ -14,7 +14,7 @@ export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
  * it, and the notification boundaries drop any callback that arrives against it.
  * Adding a terminal state means adding it here and nowhere else.
  */
-export const TERMINAL_TASK_STATUSES: AgentTaskRow["status"][] = [
+const TERMINAL_TASK_STATUSES: AgentTaskRow["status"][] = [
   "completed",
   "canceled"
 ];

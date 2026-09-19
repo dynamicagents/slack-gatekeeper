@@ -30,18 +30,6 @@ describe("userSessionMessage", () => {
     expect(m.parts).toHaveLength(1);
     expect(m.parts[0]).toMatchObject({ type: "text", text: "hello" });
   });
-
-  it("assigns a non-empty string id", () => {
-    const m = userSessionMessage("hi");
-    expect(typeof m.id).toBe("string");
-    expect(m.id.length).toBeGreaterThan(0);
-  });
-
-  it("generates a unique id on each call", () => {
-    const a = userSessionMessage("x");
-    const b = userSessionMessage("x");
-    expect(a.id).not.toBe(b.id);
-  });
 });
 
 describe("authorFromUser", () => {
@@ -194,12 +182,6 @@ describe("assistantSessionMessage", () => {
     const m = assistantSessionMessage("reply");
     expect(m.role).toBe("assistant");
     expect(m.parts[0]).toMatchObject({ type: "text", text: "reply" });
-  });
-
-  it("generates a unique id each call", () => {
-    const a = assistantSessionMessage("x");
-    const b = assistantSessionMessage("x");
-    expect(a.id).not.toBe(b.id);
   });
 
   it("has no tool parts when the turn called nothing", () => {

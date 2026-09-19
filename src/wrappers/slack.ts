@@ -7,7 +7,7 @@ import {
 } from "@chat-adapter/slack/api";
 import type { SlackApiResponse } from "@chat-adapter/slack/api";
 import { env } from "cloudflare:workers";
-import { pickDisplayName } from "@/util/display-name";
+import { pickDisplayName } from "@/util/slack-text";
 import { slackifyMarkdown } from "slackify-markdown";
 
 // Thin, cursor-paginated wrappers over the Slack reads the chat SDK doesn't

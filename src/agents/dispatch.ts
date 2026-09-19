@@ -120,7 +120,7 @@ async function resolveIssuer(): Promise<string | null> {
 }
 
 /** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
-export const buildContextId = (channelId: string, threadTs: string): string =>
+const buildContextId = (channelId: string, threadTs: string): string =>
   `${channelId}:${threadTs}`;
 
 /** Encode bytes as a fixed-length lowercase-alphanumeric (base36) id. */
@@ -167,7 +167,7 @@ export function buildAgentInstanceKey(
 }
 
 /** Canonical signed identity of the gatekeeper-agent instance calling remotely. */
-export function buildRemoteIdentity(
+function buildRemoteIdentity(
   agent: Pick<DispatchAgentRef, "kind" | "workspaceId" | "name">
 ): RemoteIdentity {
   return {
@@ -182,7 +182,7 @@ export function buildRemoteIdentity(
  * Remote context id namespaces channel/thread history by the calling agent
  * instance so sibling agents sharing one endpoint never collide.
  */
-export function buildRemoteContextId(
+function buildRemoteContextId(
   identity: Pick<RemoteIdentity, "key">,
   channelId: string,
   threadTs: string

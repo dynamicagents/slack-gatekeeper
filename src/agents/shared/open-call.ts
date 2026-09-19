@@ -110,7 +110,7 @@ interface ApprovalLike {
 }
 
 /** A call that was not raised, recorded as such. */
-export function notAsked(call: CallLike): ToolRecord {
+function notAsked(call: CallLike): ToolRecord {
   return {
     toolCallId: call.toolCallId,
     toolName: call.toolName,

@@ -36,7 +36,7 @@ function unreachableErrorText(error: string): string {
     : `${normalized.slice(0, MAX_UNREACHABLE_ERROR_TEXT_LENGTH - 3)}...`;
 }
 
-export function agentUnreachableText(agentName: string, error: string): string {
+function agentUnreachableText(agentName: string, error: string): string {
   const base = agentName
     ? `${AGENT_UNREACHABLE_BASE_TEXT} (Agent: *${agentName}*.)`
     : AGENT_UNREACHABLE_BASE_TEXT;

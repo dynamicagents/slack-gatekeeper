@@ -33,8 +33,7 @@ import {
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
-import { hasSlackBroadcast } from "@/util/slack-text";
-import { sanitizeDisplayName } from "@/util/display-name";
+import { hasSlackBroadcast, sanitizeDisplayName } from "@/util/slack-text";
 import {
   buildAvatarPrompt,
   buildAgentAvatarPrompt,
@@ -740,7 +739,7 @@ export async function workspaceCreate(
 
 export type WorkspaceSetAdminChannelArgs = { id: number; channelId: string };
 
-export async function workspaceSetAdminChannel(
+async function workspaceSetAdminChannel(
   deps: AdminToolDeps,
   args: WorkspaceSetAdminChannelArgs
 ): Promise<ToolResult> {

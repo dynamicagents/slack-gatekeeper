@@ -3,7 +3,7 @@ import { getDb } from "../client";
 import * as schema from "../schema";
 import { getWorkspaceByAdminChannel } from "./workspaces";
 import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
-import { sanitizeDisplayName } from "@/util/display-name";
+import { sanitizeDisplayName } from "@/util/slack-text";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 /** Where an agent runs: `local` in-process, `remote` over HTTP. */

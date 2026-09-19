@@ -20,7 +20,7 @@ export { MaintenanceWorkflow } from "./workflows/maintenance";
 // in-process via their DO `stub.fetch` (see src/agents/dispatch.ts), so they need
 // no public HTTP route.
 export { AdminAgent } from "./agents/admin";
-export { OnboardingAgent } from "./agents/onboarding";
+export { OnboardingAgent } from "./agents/onboarding/executor";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {

@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { hasSlackBroadcast, sanitizeSlackText } from "@/util/slack-text";
-import { sanitizeDisplayName } from "@/util/display-name";
+import {
+  hasSlackBroadcast,
+  sanitizeDisplayName,
+  sanitizeSlackText
+} from "@/util/slack-text";
 import { normalizeWhitespace, renderEditDiff } from "@/util/text-diff";
 
 // The pure text helpers. Neither touches storage, so this file never calls

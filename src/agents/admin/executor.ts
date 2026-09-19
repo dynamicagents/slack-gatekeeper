@@ -66,7 +66,7 @@ export class AdminAgentExecutor implements AgentExecutor {
 
   constructor(
     private readonly agent: SessionHost,
-    private readonly options: AdminExecutorOptions = {}
+    private readonly options: AdminExecutorOptions
   ) {}
 
   /** Lazily build the one session for this DO; `wsId` is fixed per instance. */
