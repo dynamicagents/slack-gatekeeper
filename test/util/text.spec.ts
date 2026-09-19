@@ -3,8 +3,9 @@ import { hasSlackBroadcast, sanitizeSlackText } from "@/util/slack-text";
 import { sanitizeDisplayName } from "@/util/display-name";
 import { normalizeWhitespace, renderEditDiff } from "@/util/text-diff";
 
-// The pure text helpers. Neither touches storage, so neither pays the D1 reset —
-// see test/apply-migrations.ts.
+// The pure text helpers. Neither touches storage, so this file never calls
+// `useStorageReset()` and never pays the migration replay — see
+// test/helpers/storage.ts.
 
 describe("sanitizeSlackText", () => {
   it("neutralizes command-sequence broadcasts", () => {

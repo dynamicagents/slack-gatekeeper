@@ -4,6 +4,9 @@ import {
   callerContext
 } from "@/agents/shared/prompt";
 import { makeAuthCtx } from "../../helpers/workspace";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 const baseCtx = makeAuthCtx({ slackUserId: "U123", displayName: "Alice" });
 

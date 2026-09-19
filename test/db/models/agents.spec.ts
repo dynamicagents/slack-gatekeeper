@@ -15,6 +15,9 @@ import {
   setAdminDisplayName,
   setAdminIconUrl
 } from "@/db/models/workspace-configs";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 describe("agents", () => {
   it("migration seed: admin and onboarding agents exist", async () => {

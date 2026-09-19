@@ -32,6 +32,9 @@ import {
   getAdminDisplayName
 } from "@/db/models/workspace-configs";
 import { makeAuthCtx, freshWsId } from "../../helpers/workspace";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 const ctx = makeAuthCtx;
 

@@ -5,6 +5,9 @@ import { upsertSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { addWorkspaceAdmin } from "@/db/models/workspace-admins";
 import { makeAuthCtx } from "../helpers/workspace";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 // Building a caller's permissions from D1, and checking a requirement against
 // them — the two halves of one decision, so they share a file.

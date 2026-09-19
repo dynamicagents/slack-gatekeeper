@@ -8,6 +8,9 @@ import { getSlackUser } from "@/db/models/users";
 import { upsertWorkspace } from "@/db/models/workspaces";
 import { listWorkspaceAdminIds } from "@/db/models/workspace-admins";
 import type { LifecycleWorkflowParams } from "@/slack/types";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 const BOT = "UBOT";
 

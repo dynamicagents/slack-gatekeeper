@@ -12,6 +12,9 @@ import { createWorkspace } from "@/db/models/workspaces";
 import { registerAgent, updateAgent } from "@/db/models/agents";
 import { upsertSlackUser } from "@/db/models/users";
 import { makeAuthCtx, freshWsId } from "../../helpers/workspace";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 afterEach(() => vi.restoreAllMocks());
 

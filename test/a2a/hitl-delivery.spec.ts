@@ -14,6 +14,9 @@ import { HITL_REQUEST_TYPE } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
 import { makeSnapshot } from "../helpers/a2a";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 interface SlackPost {
   method: string;

@@ -22,6 +22,9 @@ import {
 import { buildAgentCard } from "@/a2a/card";
 import { makeTask } from "../helpers/a2a";
 import { stubSlack } from "../wrappers/slack-stub";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 const ENDPOINT = "https://agent.example.com/a2a";
 

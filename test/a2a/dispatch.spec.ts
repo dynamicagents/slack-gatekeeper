@@ -41,6 +41,9 @@ import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
 } from "@/db/models/workspace-configs";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 const user = (slackUserId: string): UserAuthContext => ({
   slackUserId,

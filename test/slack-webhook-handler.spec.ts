@@ -15,6 +15,9 @@ import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import { STOP_REACTION } from "@/workflows/reaction";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
+import { useStorageReset } from "./helpers/storage";
+
+useStorageReset();
 
 // The handler adds the 🛑 reaction inline via a real Slack API call, so every
 // test needs global fetch stubbed. Tests that assert on the reaction re-stub
@@ -928,7 +931,7 @@ describe("error handling", () => {
 
 describe("team guard", () => {
   afterEach(() => {
-    // D1 is reset before each test (apply-migrations.ts); only the
+    // D1 is reset before each test (`useStorageReset()` above); only the
     // isolate-level memo needs manual clearing.
     _resetAnchorCacheForTest();
   });

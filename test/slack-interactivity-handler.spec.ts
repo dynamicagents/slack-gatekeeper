@@ -41,6 +41,9 @@ import { dataOf, partsText } from "@/a2a/parts";
 import { agentMessage, makeTask } from "./helpers/a2a";
 import { handleSlackInteractivity } from "@/slack-interactivity-handler";
 import { slackHeaders } from "./helpers/slack";
+import { useStorageReset } from "./helpers/storage";
+
+useStorageReset();
 
 const ENDPOINT = "https://remote.example.com/a2a";
 const ISSUER = "https://gw.example.com";

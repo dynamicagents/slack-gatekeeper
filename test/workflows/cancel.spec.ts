@@ -18,6 +18,9 @@ import {
 import { cancelTaskRow } from "@/workflows/message-helpers";
 import { buildAgentCard } from "@/a2a/card";
 import { makeTask } from "../helpers/a2a";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 const ENDPOINT = "https://agent.example.com/a2a";
 const ISSUER = "https://gw.example.com";

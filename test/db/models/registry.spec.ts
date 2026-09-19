@@ -31,6 +31,9 @@ import {
   setAdminDisplayName,
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
+import { useStorageReset } from "../../helpers/storage";
+
+useStorageReset();
 
 // The small per-table registry suites, in one file: each pays a full D1 reset and
 // migration replay per test, and a separate file for four assertions costs more in

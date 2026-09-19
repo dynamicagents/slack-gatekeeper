@@ -20,6 +20,9 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
+import { useStorageReset } from "../helpers/storage";
+
+useStorageReset();
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -29,7 +32,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("anchorTeamId", () => {
   beforeEach(() => {
-    // D1 is reset before each test (apply-migrations.ts); only the
+    // D1 is reset before each test (`useStorageReset()` above); only the
     // isolate-level bot-info cache needs manual clearing.
     _resetBotInfoCacheForTest();
   });
