@@ -18,14 +18,7 @@ import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /**
  * Header carrying the per-task validation token set in pushNotificationConfig.
- *
- * From `@dynamicagents/g2a-protocol`, which the remote agent also reads it from —
- * it used to be declared here and again in `@dynamicagents/core`, each pointing a
- * comment at the other. Slightly different from the claim names: the value is
- * `@a2a-js/sdk`'s own default for `tokenHeaderName`, but the SDK never exports
- * it, so neither side could import it and both wrote it down.
- *
- * Re-exported so the rest of the gatekeeper keeps importing it from here.
+ * Re-exported from the protocol package, which the remote agent reads it from too.
  */
 export { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 

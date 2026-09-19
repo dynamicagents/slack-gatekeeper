@@ -4,8 +4,8 @@ import { DYNAMIC_AGENTS_CONSTITUTION } from "@/agents/shared/prompt";
  * The onboarding concierge's "soul" — a single identity shared by every per-user
  * instance (`onboarding:{slackUserId}`). Unlike the admin soul it takes no
  * workspace: a DM concierge is workspace-agnostic. It is strictly read-only and
- * routes users with words rather than acting for them (PLAN's Slack re-entry
- * model), so the text never promises to change anything.
+ * routes users with words rather than acting for them, so the text never
+ * promises to change anything.
  */
 export function onboardingSoul(): string {
   return [

@@ -230,6 +230,21 @@ function cap(value: unknown): unknown {
 }
 
 /**
+ * A call's input as an object, with nothing truncated.
+ *
+ * {@link capInput}'s ceiling is right for a record being *stored* — history is
+ * replayed every turn and one broad call must not crowd out the conversation. It is
+ * wrong for an approved call being replayed for the SDK to execute: the premise of
+ * an approval is that what runs is what the human approved, and a schema that still
+ * accepts a truncated value would run a different call than the one on screen.
+ */
+function objectInput(value: unknown): Record<string, unknown> {
+  return isRecord(value)
+    ? value
+    : { _raw: typeof value === "string" ? value : jsonOf(value) };
+}
+
+/**
  * Cap a recorded call's **input**, which — unlike its output — must survive as an
  * *object*.
  *
@@ -252,21 +267,6 @@ function cap(value: unknown): unknown {
  * (`invalid: true`). That still has to be replayed as an object, so it is wrapped
  * rather than dropped: the malformed text stays visible to the next turn.
  */
-/**
- * A call's input as an object, with nothing truncated.
- *
- * {@link capInput}'s ceiling is right for a record being *stored* — history is
- * replayed every turn and one broad call must not crowd out the conversation. It is
- * wrong for an approved call being replayed for the SDK to execute: the premise of
- * an approval is that what runs is what the human approved, and a schema that still
- * accepts a truncated value would run a different call than the one on screen.
- */
-function objectInput(value: unknown): Record<string, unknown> {
-  return isRecord(value)
-    ? value
-    : { _raw: typeof value === "string" ? value : jsonOf(value) };
-}
-
 function capInput(value: unknown): Record<string, unknown> {
   if (isRecord(value)) {
     return Object.fromEntries(

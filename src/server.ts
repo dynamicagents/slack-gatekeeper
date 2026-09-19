@@ -17,8 +17,8 @@ export { CancelWorkflow } from "./workflows/cancel";
 export { MaintenanceWorkflow } from "./workflows/maintenance";
 
 // In-repo agents — each is its own A2A server. The Message Workflow reaches them
-// in-process via their DO `stub.fetch` (see src/agents/dispatch.ts); they need no
-// public HTTP route in Phase 3. Phase 3 echoes; Phase 4/5 add the AI loop + tools.
+// in-process via their DO `stub.fetch` (see src/agents/dispatch.ts), so they need
+// no public HTTP route.
 export { AdminAgent } from "./agents/admin";
 export { OnboardingAgent } from "./agents/onboarding";
 

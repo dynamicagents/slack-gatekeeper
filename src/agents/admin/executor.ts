@@ -30,14 +30,6 @@ import {
 } from "./tools";
 import { generateAvatar, type GeneratedImage } from "./avatar";
 
-// Re-exported so existing test imports (`@/agents/admin/executor`) keep working.
-export type {
-  AgentSession,
-  ContextLike,
-  SessionHost,
-  SessionLike
-} from "@/agents/shared/session";
-
 /** Test seams — production uses the defaults (real model + Sessions store). */
 export interface AdminExecutorOptions extends ModelOverrides {
   createSession?: (wsId: number) => AgentSession;

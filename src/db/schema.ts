@@ -96,7 +96,7 @@ export const workspaceAdmins = sqliteTable(
 
 /**
  * Agent registry. Built-in `admin`/`onboarding` rows are seeded by
- * migrations/0001_seed_builtins.sql at deploy time. CRUD is Phase 4.
+ * migrations/0001_seed_builtins.sql at deploy time.
  */
 export const agents = sqliteTable(
   "agents",

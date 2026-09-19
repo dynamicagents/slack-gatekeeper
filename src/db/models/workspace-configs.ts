@@ -9,11 +9,6 @@ import { sanitizeDisplayName } from "@/util/display-name";
 // ---------------------------------------------------------------------------
 
 /**
- * Keys written only by internal system code (reconcile, bootstrap).
- * External callers should use plain strings for custom/operator keys and
- * keep them out of this namespace to avoid collisions.
- */
-/**
  * Keys managed by the org admin agent at runtime (workspace 0).
  * Unlike {@link SystemConfigKeys}, these are exposed through admin tools and
  * intentionally mutable by the org admin.
@@ -43,6 +38,12 @@ export const OperatorConfigKeys = {
   ADMIN_DISPLAY_NAME: "admin_display_name"
 } as const;
 
+/**
+ * Keys written only by internal system code (reconcile, first-request discovery).
+ * Not exposed through admin tools: writing one through {@link setConfig} is an
+ * intentional operator override, not routine configuration. Keep custom keys out
+ * of this namespace to avoid colliding with them.
+ */
 export const SystemConfigKeys = {
   /**
    * The Slack `team_id` this worker is anchored to. Written once by the first
