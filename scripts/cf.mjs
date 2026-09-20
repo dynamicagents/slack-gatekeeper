@@ -16,8 +16,11 @@
 //   --worker <name>       filter by service/script name (server-side)
 //   --level <error|warn|info|debug>   filter by level (server-side)
 //   --grep <text>         keep events whose message contains <text>, case-
-//                         insensitively (server-side, so it searches the whole
-//                         window rather than the first page)
+//                         insensitively (server-side, so it is not limited to
+//                         the first page). NOT complete on a wide window: a
+//                         rare line can be returned at --since 2d and missing
+//                         at 3d+, so "no events" there means unknown, not
+//                         never. See the comment above the filter itself.
 //   --limit <N>           max matching events (default 100, max 2000)
 //   --json | --raw        full pretty JSON / verbatim body instead of the digest
 //
@@ -69,7 +72,11 @@ const USAGE = `cf.mjs — Cloudflare API proxy (credentials from ${ENV_FILE})
   containers [name] [--json|--raw]       container apps: which image is actually
                                          serving, and any rollout still moving
   [METHOD] <path> [-d <json|@file>]      raw passthrough (path is account-relative
-       [-q <k=v>]... [--raw]             unless it starts with "/")`;
+       [-q <k=v>]... [--raw]             unless it starts with "/")
+
+  --grep is incomplete over a wide window: a rare line can come back at
+  --since 2d and be reported as "no events" at 3d+. Treat that as unknown,
+  not as "it never happened" — re-ask narrower, and corroborate with ai.`;
 
 try {
   process.loadEnvFile(ENV_FILE);
@@ -236,8 +243,21 @@ async function cmdLogs(args) {
    *
    * `includes` is case-insensitive, matching what the client-side filter did,
    * and `$metadata.message` is byte-identical to the `source.message` that was
-   * being tested before (verified across 1105 events, zero differing). So this
-   * is the same question asked somewhere it can actually be answered.
+   * being tested before (verified across 1105 events, zero differing).
+   *
+   * **This moves the false negative, it does not end it.** The server-side
+   * filter is itself incomplete once the window grows. On 2026-09-20 a known
+   * `[agent-turn]` line (2026-09-19 15:08:28) came back for `--since` of 22h,
+   * 23h, 24h, 36h and 2d, and was reported as "no events" at 3d, 7d and 30d —
+   * a wider window returning strictly fewer matches. A common line is
+   * unaffected: `reply posted` (~310 hits in 22h) still matched at 30d. So what
+   * decays with the window is rarity, not the text, and rare is the only kind
+   * anybody greps for.
+   *
+   * Read "no events" over a wide window as **unknown**, never as "it never
+   * happened". Re-ask at `--since 2d` or narrower, and corroborate with a
+   * source that counts independently — `cf ai` for anything that made a model
+   * call, `wf` for anything that ran as a Workflow step.
    */
   if (flags.grep)
     filters.push({
