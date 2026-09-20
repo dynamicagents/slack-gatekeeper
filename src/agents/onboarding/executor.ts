@@ -144,6 +144,11 @@ export class OnboardingAgent extends A2AAgent {
   }
 
   protected executor(): AgentExecutor {
-    return new OnboardingAgentExecutor(this);
+    return new OnboardingAgentExecutor(this, {
+      // `onboarding:{slackUserId}` — dispatch addresses this instance by that
+      // name, so it is read back rather than respelled. One continuous history
+      // per instance is exactly the grain Workers AI's prefix cache wants pinned.
+      sessionAffinity: this.ctx.id.name
+    });
   }
 }

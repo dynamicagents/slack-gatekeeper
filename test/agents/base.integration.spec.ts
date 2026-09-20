@@ -212,4 +212,30 @@ describe("an agent Durable Object's session", () => {
       ]);
     });
   });
+
+  /**
+   * The `sessionAffinity` key both executors pass is `this.ctx.id.name`, and
+   * `DurableObjectId.name` is typed `string | undefined` — so every way of
+   * losing it typechecks clean, resolves `undefined`, and leaves `chatModel`
+   * quietly omitting `x-session-affinity` on every call. Unsteered is not an
+   * error: it is the feature silently not happening.
+   *
+   * `name` is genuinely absent for `newUniqueId()`, for `idFromString()`, for
+   * names over 1,024 bytes, and for an object woken by an alarm created before
+   * 2026-03-15. None of those reach an executor today — every stub is
+   * `ns.get(ns.idFromName(…))` (dispatch.ts, server.ts) over a short name, and
+   * `executor()` is built only from `fetch`. This pins that: address one of
+   * these DOs any other way and the lost steering becomes a red test instead of
+   * a quietly larger bill.
+   */
+  it("exposes the DO instance name for session affinity", async () => {
+    // `admin:{wsId}` — the name `instanceNameFor` (dispatch.ts) addresses this
+    // instance by, and therefore the key it must read back as.
+    const name = "admin:2026";
+    const stub = env.AdminAgent.get(env.AdminAgent.idFromName(name));
+    await runInDurableObject(stub, async (_agent: AdminAgent, state) => {
+      // `state` is the `DurableObjectState` the agent holds as `this.ctx`.
+      expect(state.id.name).toBe(name);
+    });
+  });
 });
