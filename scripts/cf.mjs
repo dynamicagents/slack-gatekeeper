@@ -236,8 +236,21 @@ async function cmdLogs(args) {
    *
    * `includes` is case-insensitive, matching what the client-side filter did,
    * and `$metadata.message` is byte-identical to the `source.message` that was
-   * being tested before (verified across 1105 events, zero differing). So this
-   * is the same question asked somewhere it can actually be answered.
+   * being tested before (verified across 1105 events, zero differing).
+   *
+   * **This moves the false negative, it does not end it.** The server-side
+   * filter is itself incomplete once the window grows. On 2026-09-20 a known
+   * `[agent-turn]` line (2026-09-19 15:08:28) came back for `--since` of 22h,
+   * 23h, 24h, 36h and 2d, and was reported as "no events" at 3d, 7d and 30d —
+   * a wider window returning strictly fewer matches. A common line is
+   * unaffected: `reply posted` (~310 hits in 22h) still matched at 30d. So what
+   * decays with the window is rarity, not the text, and rare is the only kind
+   * anybody greps for.
+   *
+   * Read "no events" over a wide window as **unknown**, never as "it never
+   * happened". Re-ask at `--since 2d` or narrower, and corroborate with a
+   * source that counts independently — `cf ai` for anything that made a model
+   * call, `wf` for anything that ran as a Workflow step.
    */
   if (flags.grep)
     filters.push({

@@ -39,6 +39,12 @@ redacts it from all output.
 
 Run `npm run cf -- help` for the full flag list.
 
+**`--grep` under-reports on a wide window.** A rare line can be returned at
+`--since 2d` and reported as "no events" at `3d` and beyond — verified 2026-09-20,
+and the reasoning is in the comment above the filter in `scripts/cf.mjs`. Never read
+"no events" over a wide window as "it never happened": narrow to `2d` or less and
+corroborate with something that counts independently, such as `cf ai`.
+
 ## TypeScript Types
 
 Follow Cloudflare's generated-types flow (https://developers.cloudflare.com/workers/languages/typescript/#generate-types):

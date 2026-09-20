@@ -10,27 +10,35 @@ import { isRecord, jsonOf } from "@/util/json";
  * string and the string is what the model receives — Workers AI rejects it outright
  * on `glm-5.2` ("Assistant tool call function.arguments must be a JSON object") and
  * crashes rendering it on `glm-4.7-flash` (`'str object' has no attribute 'items'`,
- * the chat template calling `.items()` on a `str`). Both were observed on models
- * this repo ran at the time; `glm-4.7-flash` is no longer one of them and
- * `glm-5.3-flash` has not been checked. That changes nothing here — this exists
- * for durable history written before `capInput`, which has to keep replaying
- * whatever model reads it.
+ * the chat template calling `.items()` on a `str`). `glm-4.7-flash` is no longer a
+ * model this repo runs; `glm-5.2` is — it is `CHAT_FALLBACK` — so the failure this
+ * prevents is still reachable by a configured model.
  *
- * What can put a non-object there is a **durable record capped past the size
- * ceiling** — fixed at the source in `capInput`
- * ({@link file://./shared/messages.ts messages.ts}), but records written before that
- * fix live in Sessions and replay on every later turn. Nothing but time removes
- * them, so this is the only place that can.
+ * **What this no longer does is repair known damage.** It was written for durable
+ * records written before `capInput`
+ * ({@link file://./shared/messages.ts messages.ts}) stopped capping a tool call's
+ * input as one value and leaving a string behind. Such a record would live in
+ * Sessions and replay on every later turn, with nothing but time to remove it — but
+ * none can exist here: `capInput` landed 2026-08-20 and the `slack-gatekeeper`
+ * Worker was created 2026-09-05 (`created_on` on the script, which its oldest
+ * surviving version and deployment agree with). Production never ran the code that
+ * wrote them. Checked against the live account 2026-09-20: the admin agent's history
+ * started 2026-09-05 and carried no `_raw` marker, and the onboarding agent had no
+ * Durable Object instance at all.
  *
- * The SDK's own replay is not a second cause. A tool call it could not parse
- * is handed back as the raw arguments string, but it substitutes `{}` before
- * building the message that replays it (`to-response-messages.ts`), so the
- * malformed `final_reply` that the loop now repairs in place never reaches the wire
- * as a string. Belt and braces: this still catches it if that ever changes.
+ * It is kept as a backstop for the two ways a string could still arrive:
  *
- * A middleware sits at the last boundary before serialization, which is what lets
- * it reach history the turn itself cannot. It warns rather than repairing silently:
- * a poisoned record should stay visible in the logs until it ages out.
+ * - `capInput` is the only thing keeping one out of a stored record, and nothing
+ *   forces a future writer through it. That regression is silent until a turn dies,
+ *   and then every later turn on that session dies with it.
+ * - The SDK substitutes `{}` for a tool call it cannot parse before building the
+ *   message that replays it (`to-response-messages.ts`), so its own replay is not a
+ *   second cause today. That is behaviour, not a contract.
+ *
+ * A middleware sits at the last boundary before serialization, which is what lets it
+ * reach history the turn itself cannot. It warns rather than repairing silently —
+ * and with the backlog gone, a warning now means a live bug, not an old record
+ * ageing out.
  */
 
 type TransformParams = NonNullable<LanguageModelMiddleware["transformParams"]>;
