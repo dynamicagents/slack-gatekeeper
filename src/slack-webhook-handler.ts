@@ -7,7 +7,7 @@ import type { SlackWebhookPayload } from "@chat-adapter/slack/webhook";
 import { env } from "cloudflare:workers";
 import { isRecord, str } from "@/util/json";
 import { normalizeWhitespace } from "@/util/text-diff";
-import { pickDisplayName } from "@/util/display-name";
+import { pickDisplayName } from "@/util/slack-text";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
 import { STOP_REACTION, reactionInstanceId } from "@/workflows/reaction";
 import { addReaction, getBotUserId } from "@/wrappers/slack";

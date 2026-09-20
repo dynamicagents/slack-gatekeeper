@@ -19,7 +19,7 @@ import { snapshotOf, type TaskSnapshot } from "@/a2a/snapshot";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /** Reserved internal-only target; it is never fetched over HTTP. */
-export const LOCAL_NOTIFICATION_URL = "https://local.a2a.invalid/notifications";
+const LOCAL_NOTIFICATION_URL = "https://local.a2a.invalid/notifications";
 
 /** Total delivery attempts (1 initial + retries) before giving up. */
 const DELIVERY_MAX_ATTEMPTS = 3;

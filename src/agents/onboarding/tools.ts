@@ -144,7 +144,7 @@ export type DirectoryReadArgs = {
   operation: "agents" | "workspaces" | "health";
 };
 
-export async function directoryRead(
+async function directoryRead(
   deps: OnboardingToolDeps,
   args: DirectoryReadArgs
 ): Promise<ToolResult> {
@@ -158,9 +158,7 @@ export async function directoryRead(
   }
 }
 
-export async function triggerReconcile(
-  deps: OnboardingToolDeps
-): Promise<ToolResult> {
+async function triggerReconcile(deps: OnboardingToolDeps): Promise<ToolResult> {
   const canTrigger =
     !!deps.ctx && (deps.ctx.isOrgAdmin || deps.ctx.isPrimaryOwner);
   if (!canTrigger) {

@@ -8,7 +8,7 @@ import { A2A_PROTOCOL_VERSION, type AgentCard } from "@a2a-js/sdk";
  * real card via discovery instead.
  */
 const PLACEHOLDER_BASE_URL = "https://agent.local";
-export const A2A_ENDPOINT_PATH = "/a2a";
+const A2A_ENDPOINT_PATH = "/a2a";
 
 export interface AgentCardInput {
   name: string;

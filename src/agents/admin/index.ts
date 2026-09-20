@@ -25,12 +25,6 @@ function iconKey(name: string, hash: string): string {
 function iconIndexKey(name: string): string {
   return `icon:${name}:index`;
 }
-/**
- * The retired approval store — nothing writes here; the SDK's own approvals
- * replaced it. Swept by {@link AdminAgent.clearRetiredApprovals}.
- */
-const PENDING_ACTION_PREFIX = "hitl:pending:";
-
 /** Avatars are immutable per content-hash key; cache for a year (new image = new URL). */
 const ICON_CACHE_CONTROL =
   "public, max-age=31536000, s-maxage=31536000, immutable";
@@ -49,9 +43,6 @@ const ICON_PATH = /^\/icons\/\d+\/([a-z0-9_-]+)\/([^/]+?)(?:\.\w+)?$/;
  * Slack (and any A2A consumer) can fetch the agent's `iconUrl` over HTTP.
  */
 export class AdminAgent extends A2AAgent {
-  /** Whether this isolate has already cleared the retired approval store. */
-  private pendingCleared = false;
-
   protected card(): AgentCard {
     return buildAgentCard({
       name: "Admin Agent",
@@ -70,40 +61,6 @@ export class AdminAgent extends A2AAgent {
       storeIcon: (img, name) => this.putIcon(img.data, img.contentType, name),
       openCalls: new DurableOpenCalls(this.ctx.storage)
     });
-  }
-
-  /**
-   * Drop the retired `hitl:pending:*` store.
-   *
-   * The SDK's own approvals replay the model's actual call, so nothing writes
-   * these — but a prompt raised just before that deploy leaves one behind, and
-   * nothing else would ever collect it.
-   *
-   * **Remove this after one HITL TTL (7 days) past the deploy**, by which point no
-   * pre-deploy prompt can still be outstanding. Guarded per isolate like
-   * `sweepChecked`, and run on `waitUntil`, so it costs a warm instance nothing.
-   */
-  private async clearRetiredApprovals(): Promise<void> {
-    try {
-      const keys = [
-        ...(
-          await this.ctx.storage.list({ prefix: PENDING_ACTION_PREFIX })
-        ).keys()
-      ];
-      if (keys.length === 0) return;
-      await this.ctx.storage.delete(keys);
-      console.info("[admin-agent] cleared retired approval entries", {
-        count: keys.length
-      });
-    } catch (err) {
-      // The guard exists to stop a warm isolate re-listing on every request, not
-      // to make one failure permanent — so let a later request try again. It also
-      // keeps this off `waitUntil` as an unhandled rejection.
-      this.pendingCleared = false;
-      console.error("[admin-agent] clearing retired approvals failed", {
-        error: err instanceof Error ? err.message : String(err)
-      });
-    }
   }
 
   /**
@@ -151,10 +108,6 @@ export class AdminAgent extends A2AAgent {
    * protocol (card discovery + JSON-RPC) handled by the base class.
    */
   async fetch(request: Request): Promise<Response> {
-    if (!this.pendingCleared) {
-      this.pendingCleared = true;
-      this.ctx.waitUntil(this.clearRetiredApprovals());
-    }
     const match = new URL(request.url).pathname.match(ICON_PATH);
     if (request.method === "GET" && match) {
       const icon = await this.getIcon(match[1], match[2]);
