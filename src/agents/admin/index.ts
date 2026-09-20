@@ -59,7 +59,11 @@ export class AdminAgent extends A2AAgent {
   protected executor(): AgentExecutor {
     return new AdminAgentExecutor(this, {
       storeIcon: (img, name) => this.putIcon(img.data, img.contentType, name),
-      openCalls: new DurableOpenCalls(this.ctx.storage)
+      openCalls: new DurableOpenCalls(this.ctx.storage),
+      // `admin:{wsId}` — dispatch addresses this instance by that name, so it is
+      // read back rather than respelled. One continuous history per instance is
+      // exactly the grain Workers AI's prefix cache wants pinned.
+      sessionAffinity: this.ctx.id.name
     });
   }
 

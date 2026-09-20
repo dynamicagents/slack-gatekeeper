@@ -155,9 +155,39 @@ function gatewayFor(call: GatewayCall): GatewayOptions {
   };
 }
 
-/** Test seam. The fallback is the model's own business now, not the caller's. */
+/**
+ * What a caller may set on the model itself: one test seam and one production
+ * setting. The fallback is not among them — it is the model's own business now,
+ * not the caller's.
+ */
 export interface ModelOverrides {
+  /** Test seam: a model to use instead of building one. */
   model?: LanguageModel;
+  /**
+   * The key that pins this call to the model instance already holding its prompt
+   * prefix — Workers AI's `x-session-affinity`.
+   *
+   * The prefix cache is per-instance and implicit: 64-token blocks, no
+   * breakpoints, no TTL, and no way to ask for a hit. Unsteered, roughly half the
+   * calls inside the eviction window land on an instance that has the prefix and
+   * none do past a five-minute gap, and a miss is billed as fresh input at five
+   * times the cached rate. Routing is the only lever, and this is it.
+   *
+   * **The grain is a continuous history**, which here is the Durable Object's own
+   * instance name — `admin:{wsId}` or `onboarding:{slackUserId}`, read off
+   * `ctx.id.name` rather than respelled. One `Session` serves every task that DO
+   * ever runs, so a new task opens on the previous one's history and wants the
+   * same instance. A per-task or per-round key would route each call *away* from
+   * the prefix it just built, which is worse than not steering at all.
+   *
+   * It leaves as the binding's `x-session-affinity` header, **not** as a
+   * {@link GatewayCall} field: it steers Workers AI's model-instance routing, and
+   * the gateway neither reads it nor logs it.
+   *
+   * Absent, the call is made unsteered — a missing key costs the prefix cache,
+   * never the call.
+   */
+  sessionAffinity?: string;
 }
 
 /**
@@ -202,10 +232,17 @@ export function chatModel(
   if (overrides.model) return overrides.model;
   const workersai = agentProvider();
   const gateway = gatewayFor(call);
+  // Both slots carry it, for the reason both carry the same gateway: a call that
+  // failed over is the same conversation, and the fallback has a prefix cache of
+  // its own to hit. Omitted rather than sent empty — the provider turns a key into
+  // an `x-session-affinity` header, and an empty one would pin every unkeyed call
+  // in the account to a single instance.
+  const affinity = overrides.sessionAffinity;
   return wrapLanguageModel({
     model: workersai(CHAT_PRIMARY.id, {
       gateway,
-      reasoning_effort: CHAT_PRIMARY.reasoningEffort
+      reasoning_effort: CHAT_PRIMARY.reasoningEffort,
+      ...(affinity ? { sessionAffinity: affinity } : {})
     }),
     // Order matters: the first entry is the outermost. History is repaired
     // before the fallback is handed the same params, so the fallback model
@@ -215,7 +252,10 @@ export function chatModel(
     middleware: [
       normalizeToolInputMiddleware,
       fallbackMiddleware(
-        workersai(CHAT_FALLBACK.id, { gateway }),
+        workersai(CHAT_FALLBACK.id, {
+          gateway,
+          ...(affinity ? { sessionAffinity: affinity } : {})
+        }),
         CHAT_FALLBACK.reasoningEffort
       )
     ]
@@ -229,9 +269,13 @@ let embedding: EmbeddingModel | undefined;
  *
  * Still memoised: an embedding call carries no turn, so its metadata is the same
  * every time — and one model serves both agents' recall, which is why it names a
- * `phase` and no `agent`. `supportsParallelCalls: false` is what keeps `embedMany`
- * sequential — it overrides the caller's `maxParallelCalls` outright, so one
- * archive cannot fan out across concurrent binding calls.
+ * `phase` and no `agent`. For the same reason it carries no
+ * {@link ModelOverrides.sessionAffinity}: one model memoised per isolate serves
+ * every DO's recall, and an embedding is a one-shot call over a handful of
+ * messages with no conversation behind it to pin. `supportsParallelCalls: false`
+ * is what keeps `embedMany` sequential — it overrides the caller's
+ * `maxParallelCalls` outright, so one archive cannot fan out across concurrent
+ * binding calls.
  */
 export function embeddingModel(): EmbeddingModel {
   return (embedding ??= agentProvider().textEmbeddingModel(EMBED_MODEL_ID, {

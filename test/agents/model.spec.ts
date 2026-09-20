@@ -29,7 +29,10 @@ import {
  * stayed empty. Only the third argument of `run` tells the truth.
  */
 
-type RunOptions = { gateway?: GatewayOptions };
+type RunOptions = {
+  gateway?: GatewayOptions;
+  extraHeaders?: Record<string, string>;
+};
 
 function stubRun(impl?: (model: string) => unknown) {
   return vi
@@ -50,6 +53,17 @@ function gatewayOf(
   n = 0
 ): GatewayOptions | undefined {
   return (run.mock.calls[n]?.[2] as RunOptions | undefined)?.gateway;
+}
+
+/**
+ * The extra headers the `n`th binding call ran under — where
+ * `x-session-affinity` lands, beside the gateway options rather than inside them.
+ */
+function extraHeadersOf(
+  run: ReturnType<typeof stubRun>,
+  n = 0
+): Record<string, string> | undefined {
+  return (run.mock.calls[n]?.[2] as RunOptions | undefined)?.extraHeaders;
 }
 
 /** A round with every one of the five answered, plus its correlation id. */
@@ -346,5 +360,71 @@ describe("the gateway identity a model call carries", () => {
 
     expect(model).toBe("some-other-model");
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("the session affinity a model call is steered by", () => {
+  // A separate concern from the identity above, and deliberately a separate
+  // describe: `x-session-affinity` steers Workers AI's *model-instance* routing
+  // so a call lands on the replica already holding its prompt prefix. The
+  // gateway neither reads it nor logs it, and the binding is the only layer
+  // where what was actually sent can be seen.
+
+  it("delivers the affinity key to the binding as a header", async () => {
+    const run = stubRun();
+
+    await generateText({
+      model: chatModel(fullRound, { sessionAffinity: "admin:7" }),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS
+    });
+
+    expect(extraHeadersOf(run)).toEqual({ "x-session-affinity": "admin:7" });
+    // And it neither displaced a gateway field nor rode inside one. The two
+    // travel together on the same `run` options, which is exactly why this is
+    // worth asserting: a key that ended up in `metadata` would spend one of the
+    // five and still look like it worked.
+    expect(gatewayOf(run)).toEqual({
+      id: AI_GATEWAY_ID,
+      metadata: fullRoundMetadata,
+      eventId: "task-1:r1"
+    });
+  });
+
+  it("carries the same key when the fallback model serves the call", async () => {
+    // A failover is the same conversation, and the fallback has a prefix cache
+    // of its own. Steering only the primary would make every fallback call pay
+    // full price for a prefix it could have hit.
+    const run = stubRun((model) => {
+      if (model === CHAT_PRIMARY.id)
+        throw new Error("primary is out of capacity");
+      return { response: "from the fallback" };
+    });
+
+    await generateText({
+      model: chatModel(fullRound, { sessionAffinity: "admin:7" }),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS,
+      maxRetries: 0
+    });
+
+    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
+    expect(extraHeadersOf(run, 1)).toEqual({ "x-session-affinity": "admin:7" });
+  });
+
+  it("sends no affinity header when there is no key", async () => {
+    // Absent, not empty. A blank `x-session-affinity` is still a key, and it
+    // would pin every unsteered call in the account to one instance — so the
+    // property has to be missing from the options entirely.
+    const run = stubRun();
+
+    await generateText({
+      model: chatModel(fullRound),
+      prompt: "hi",
+      ...CHAT_CALL_OPTIONS
+    });
+
+    expect(run.mock.calls[0]?.[2]).not.toHaveProperty("extraHeaders");
+    expect(extraHeadersOf(run)).toBeUndefined();
   });
 });
