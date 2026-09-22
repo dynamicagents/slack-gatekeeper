@@ -159,7 +159,7 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 - **AI responses** — Powered by Workers AI (no external API key required)
 - **Task scheduling** — One-time, delayed, and cron-based reminders posted back to Slack
 - **Durable Object persistence** — SQLite-backed state via the Agents SDK
-- **CI** — GitHub Actions sanity check (format + lint + TypeScript) on every push
+- **CI/CD** — GitHub Actions sanity check (format + lint + TypeScript) on every push, and automatic deploy to Cloudflare on every green merge to `main`
 
 ---
 
@@ -210,3 +210,36 @@ Found a bug, have a question, or want to suggest a feature? [Open an issue](http
 ## License
 
 [Apache-2.0](LICENSE)
+
+---
+
+## Continuous deployment
+
+Every merge to `main` deploys automatically:
+
+1. The test workflow runs the full check suite.
+2. On a green run, and only if that commit is still `main`'s tip, the deploy
+   workflow applies pending D1 migrations (`npm run db:migrate`) and publishes
+   the Worker (`npx wrangler deploy`) — the same two commands an operator
+   would run by hand. An older commit whose run finished late stands aside
+   rather than roll production back.
+3. A smoke check polls `/.well-known/jwks.json` until the Worker answers 200.
+   It shows the domain still serves; it cannot tell the new version from the
+   old.
+
+Required one-time configuration:
+
+- A GitHub environment named `deployment` holding two secrets:
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The token needs Account ›
+  Workers Scripts › Edit, Account › D1 › Edit for the migrations, and Zone ›
+  Workers Routes › Edit on the custom domain's zone, which every deploy
+  re-asserts. Bound resources such as Vectorize and Workers AI need no scope of
+  their own to deploy against.
+- The Worker runtime secrets (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
+  `GATEKEEPER_JWT_PRIVATE_KEY`) are deliberately not stored in GitHub. Set them
+  once with `npx wrangler secret put`; they persist on the Worker across
+  deploys.
+
+Note: configure the environment secrets before the deploy workflow first
+reaches `main`. The merge that lands it is itself the first deploy, and fails
+on missing credentials without them.

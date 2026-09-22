@@ -1,0 +1,117 @@
+name: Deploy
+
+# Only once Test has gone green on a push to main: a deploy never ships a commit
+# whose suite was red. `needs:` cannot reach across workflow files, so this keys
+# off Test finishing instead.
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+
+# Nothing by default; each job takes only what it needs.
+permissions: {}
+
+jobs:
+  deploy:
+    # `branches: [main]` above filters `head_branch`, which for a pull_request
+    # run is the *source* branch, so a fork PR from a branch named `main` would
+    # match. The rest closes that: only a push, to this repository, on its main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main'
+    # A second green merge waits for an in-flight deploy rather than killing it
+    # mid-migration. A newer arrival does replace one still *pending*: every
+    # deploy ships all of main, so the one it replaces has nothing left to ship.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    environment:
+      name: deployment
+      url: https://slack.loopingai.org
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `workflow_run` hands us the repository, not the commit Test passed
+          # on; pin the checkout to that exact sha.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      # No Cloudflare credentials on this step: install scripts run here, and
+      # they have no business seeing the token.
+      - run: npm ci
+
+      # `workflow_run` fires in the order Test runs finish, not the order commits
+      # landed, so a slow run for an older commit can finish after a fast one for
+      # a newer commit, and deploying it would roll production back. Only the
+      # commit still at main's tip deploys. An older one stands aside: the newer
+      # commit's run ships it, or, if that suite is red, nothing ships.
+      #
+      # Asked here, inside the concurrency slot and just before the first step
+      # that changes anything, because a run can wait in the queue while main
+      # moves, and a re-run of a failed deploy must ask again rather than trust
+      # an answer from before.
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          tip="$(gh api "repos/$GH_REPO/commits/main" --jq .sha)"
+          if [ "$tip" = "$SHA" ]; then
+            echo "current=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "main has moved on to $tip; not deploying $SHA over it."
+            echo "current=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Migrations first, as by hand, so the Worker that is still live must
+      # tolerate the new schema until its replacement is.
+      - if: steps.tip.outputs.current == 'true'
+        run: npm run db:migrate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # No --env: the same Worker a hand deploy publishes. The message records
+      # which commit each version came from.
+      - if: steps.tip.outputs.current == 'true'
+        run: npx wrangler deploy --message "$SHA"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+
+      # Served straight from GATEKEEPER_JWT_PRIVATE_KEY with no D1 read, so a
+      # 200 shows the Worker is up on its domain and holds its signing key. It
+      # cannot tell the new version from the old, which answers the same way,
+      # so a pass says the domain still serves, not that the new version did.
+      - name: Smoke test
+        if: steps.tip.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          url=https://slack.loopingai.org/.well-known/jwks.json
+          for attempt in $(seq 1 12); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)"
+            if [ "$status" = 200 ]; then
+              echo "$url answered 200."
+              exit 0
+            fi
+            echo "Attempt $attempt: $url answered $status; retrying in 5s."
+            sleep 5
+          done
+          echo "$url never answered 200." >&2
+          exit 1
