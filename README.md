@@ -227,8 +227,11 @@ Every merge to `main` deploys automatically:
 Required one-time configuration:
 
 - A GitHub environment named `deployment` holding two secrets:
-  `CLOUDFLARE_API_TOKEN` (an API token with Workers Scripts, D1, Vectorize and
-  Workers AI edit scopes) and `CLOUDFLARE_ACCOUNT_ID`.
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The token needs Account ›
+  Workers Scripts › Edit, Account › D1 › Edit for the migrations, and Zone ›
+  Workers Routes › Edit on the custom domain's zone, which every deploy
+  re-asserts. Bound resources such as Vectorize and Workers AI need no scope of
+  their own to deploy against.
 - The Worker runtime secrets (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
   `GATEKEEPER_JWT_PRIVATE_KEY`) are deliberately not stored in GitHub. Set them
   once with `npx wrangler secret put`; they persist on the Worker across
