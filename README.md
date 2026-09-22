@@ -218,11 +218,14 @@ Found a bug, have a question, or want to suggest a feature? [Open an issue](http
 Every merge to `main` deploys automatically:
 
 1. The test workflow runs the full check suite.
-2. On a green run, the deploy workflow applies pending D1 migrations
-   (`npm run db:migrate`) and publishes the Worker (`npx wrangler deploy`) —
-   the same two commands an operator would run by hand.
-3. A smoke check polls `/.well-known/jwks.json` until the new deployment
-   answers 200.
+2. On a green run, and only if that commit is still `main`'s tip, the deploy
+   workflow applies pending D1 migrations (`npm run db:migrate`) and publishes
+   the Worker (`npx wrangler deploy`) — the same two commands an operator
+   would run by hand. An older commit whose run finished late stands aside
+   rather than roll production back.
+3. A smoke check polls `/.well-known/jwks.json` until the Worker answers 200.
+   It shows the domain still serves; it cannot tell the new version from the
+   old.
 
 Required one-time configuration:
 
@@ -237,5 +240,6 @@ Required one-time configuration:
   once with `npx wrangler secret put`; they persist on the Worker across
   deploys.
 
-Note: configure the environment secrets before merging the first change after
-this section lands, or that merge's deploy job fails on missing credentials.
+Note: configure the environment secrets before the deploy workflow first
+reaches `main`. The merge that lands it is itself the first deploy, and fails
+on missing credentials without them.
