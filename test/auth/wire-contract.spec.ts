@@ -58,7 +58,7 @@ async function mint(
     audience: audienceFor(ENDPOINT),
     issuer: ISSUER,
     identity: IDENTITY,
-    tenant: "reactive",
+    tenant: "generic",
     ...overrides
   });
 }
@@ -70,7 +70,7 @@ describe("a minted token, read back through the protocol package", () => {
     // wrong, these come back empty, which is exactly what the remote would see.
     const payload = decodeJwt(await mint()) as Record<string, unknown>;
 
-    expect(readTenantClaim(payload)).toBe("reactive");
+    expect(readTenantClaim(payload)).toBe("generic");
     expect(readIdentityClaim(payload)).toEqual(IDENTITY);
   });
 

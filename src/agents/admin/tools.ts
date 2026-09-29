@@ -998,7 +998,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           .describe(
             "Which agent at that endpoint (required). One endpoint can serve " +
               "several agents, so the URL alone does not identify one — the " +
-              "agent's operator gives you this id (e.g. `reactive`). It is sent " +
+              "agent's operator gives you this id (e.g. `generic`). It is sent " +
               "on every request and verified against the agent's card at " +
               "registration."
           ),

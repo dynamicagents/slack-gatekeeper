@@ -164,7 +164,7 @@ describe("signGatekeeperToken", () => {
     it("is rejected by a sibling agent on the same origin", async () => {
       // The reason for the whole change: under an origin-only audience this
       // verified, and one agent could spend another's token.
-      await expect(verifyAs(`${ORIGIN}/reactive/a2a`)).rejects.toThrow();
+      await expect(verifyAs(`${ORIGIN}/generic/a2a`)).rejects.toThrow();
     });
 
     it("is rejected by anything verifying the bare origin", async () => {
