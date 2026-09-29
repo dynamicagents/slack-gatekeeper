@@ -731,7 +731,7 @@ describe("dispatchToAgent (tenant)", () => {
         name: "alpha",
         kind: "remote",
         a2aEndpoint: custom,
-        tenantId: "reactive",
+        tenantId: "generic",
         workspaceId: 7
       },
       {
@@ -774,7 +774,7 @@ describe("dispatchToAgent (tenant)", () => {
         name: "alpha",
         kind: "remote",
         a2aEndpoint: ENDPOINT,
-        tenantId: "reactive",
+        tenantId: "generic",
         workspaceId: 7
       },
       {

@@ -244,7 +244,7 @@ describe("verifyRemoteAgentEndpoint", () => {
     opts: { tenant?: string; name?: string } = {}
   ): AgentCard => ({
     ...baseCard(),
-    name: opts.name ?? "Reactive",
+    name: opts.name ?? "Generic",
     supportedInterfaces: [
       {
         ...baseCard().supportedInterfaces[0],
@@ -254,7 +254,7 @@ describe("verifyRemoteAgentEndpoint", () => {
     ]
   });
 
-  const tenantCard = (tenant: string, name = "Reactive"): AgentCard =>
+  const tenantCard = (tenant: string, name = "Generic"): AgentCard =>
     cardAt(ENDPOINT, { tenant, name });
 
   /** Serve a stub card at the well-known path and a tenant card over JSON-RPC. */
@@ -313,17 +313,17 @@ describe("verifyRemoteAgentEndpoint", () => {
     stubbedKeys = [key.publicJwk];
     stubHost({
       stub: await signCard(baseCard(), key),
-      extended: await signCard(tenantCard("reactive", "Reactive Agent"), key)
+      extended: await signCard(tenantCard("generic", "Generic Agent"), key)
     });
 
-    const verified = await verify("reactive");
+    const verified = await verify("generic");
 
     expect(verified.pin).toEqual({
       cardSigningJku: JKU,
       cardSigningKid: "k1"
     });
     // Not the stub's name — the row is about the tenant, not the origin.
-    expect(verified.displayName).toBe("Reactive Agent");
+    expect(verified.displayName).toBe("Generic Agent");
   });
 
   it("authenticates the extended-card call and names the tenant in it", async () => {
@@ -336,14 +336,14 @@ describe("verifyRemoteAgentEndpoint", () => {
     }[] = [];
     stubHost({
       stub: await signCard(baseCard(), key),
-      extended: await signCard(tenantCard("reactive"), key),
+      extended: await signCard(tenantCard("generic"), key),
       seen
     });
 
-    await verify("reactive");
+    await verify("generic");
 
     expect(seen.at(-1)?.authorization).toBe("Bearer gw-token");
-    expect(seen.at(-1)?.tenant).toBe("reactive");
+    expect(seen.at(-1)?.tenant).toBe("generic");
   });
 
   it("resolves an endpoint on a path nobody supplied", async () => {
@@ -361,11 +361,11 @@ describe("verifyRemoteAgentEndpoint", () => {
     }[] = [];
     stubHost({
       stub: await signCard(cardAt(custom), key),
-      extended: await signCard(cardAt(custom, { tenant: "reactive" }), key),
+      extended: await signCard(cardAt(custom, { tenant: "generic" }), key),
       seen
     });
 
-    const verified = await verify("reactive");
+    const verified = await verify("generic");
 
     expect(verified.endpoint).toBe(custom);
     // …and the extended-card call already went there, not to a guessed path.
@@ -393,10 +393,10 @@ describe("verifyRemoteAgentEndpoint", () => {
     });
     stubHost({
       stub: await signCard(multi(""), key),
-      extended: await signCard(multi("reactive"), key)
+      extended: await signCard(multi("generic"), key)
     });
 
-    const verified = await verify("reactive");
+    const verified = await verify("generic");
 
     expect(verified.endpoint).toBe(jsonRpc);
   });
@@ -416,10 +416,10 @@ describe("verifyRemoteAgentEndpoint", () => {
     };
     stubHost({
       stub: await signCard(grpcOnly, key),
-      extended: await signCard(tenantCard("reactive"), key)
+      extended: await signCard(tenantCard("generic"), key)
     });
 
-    await expect(verify("reactive")).rejects.toThrow(/no JSONRPC interface/);
+    await expect(verify("generic")).rejects.toThrow(/no JSONRPC interface/);
   });
 
   it("rejects an interface advertising a protocol version we do not speak", async () => {
@@ -435,10 +435,10 @@ describe("verifyRemoteAgentEndpoint", () => {
     };
     stubHost({
       stub: await signCard(legacy, key),
-      extended: await signCard(tenantCard("reactive"), key)
+      extended: await signCard(tenantCard("generic"), key)
     });
 
-    await expect(verify("reactive")).rejects.toThrow(/A2A 0\.3/);
+    await expect(verify("generic")).rejects.toThrow(/A2A 0\.3/);
   });
 
   it("rejects a card pointing its endpoint at another origin", async () => {
@@ -450,10 +450,10 @@ describe("verifyRemoteAgentEndpoint", () => {
     stubbedKeys = [key.publicJwk];
     stubHost({
       stub: await signCard(cardAt("https://elsewhere.example.com/a2a"), key),
-      extended: await signCard(tenantCard("reactive"), key)
+      extended: await signCard(tenantCard("generic"), key)
     });
 
-    await expect(verify("reactive")).rejects.toThrow(/different origin/);
+    await expect(verify("generic")).rejects.toThrow(/different origin/);
   });
 
   it("accepts any URL on the host, ignoring the path it was given", async () => {
@@ -464,7 +464,7 @@ describe("verifyRemoteAgentEndpoint", () => {
     const real = "https://agent.example.com/rpc";
     stubHost({
       stub: await signCard(cardAt(real), key),
-      extended: await signCard(cardAt(real, { tenant: "reactive" }), key)
+      extended: await signCard(cardAt(real, { tenant: "generic" }), key)
     });
 
     for (const input of [
@@ -472,7 +472,7 @@ describe("verifyRemoteAgentEndpoint", () => {
       "https://agent.example.com/a2a",
       "https://agent.example.com/.well-known/agent-card.json"
     ]) {
-      expect((await verify("reactive", input)).endpoint).toBe(real);
+      expect((await verify("generic", input)).endpoint).toBe(real);
     }
   });
 
@@ -487,8 +487,8 @@ describe("verifyRemoteAgentEndpoint", () => {
       extended: await signCard(tenantCard("proactive"), key)
     });
 
-    await expect(verify("reactive")).rejects.toThrow(
-      /declaring tenant 'proactive'.*naming 'reactive'/
+    await expect(verify("generic")).rejects.toThrow(
+      /declaring tenant 'proactive'.*naming 'generic'/
     );
   });
 
@@ -500,10 +500,10 @@ describe("verifyRemoteAgentEndpoint", () => {
     stubbedKeys = [host.publicJwk, other.publicJwk];
     stubHost({
       stub: await signCard(baseCard(), host),
-      extended: await signCard(tenantCard("reactive"), other)
+      extended: await signCard(tenantCard("generic"), other)
     });
 
-    await expect(verify("reactive")).rejects.toThrow(
+    await expect(verify("generic")).rejects.toThrow(
       /signed by a different key/
     );
   });

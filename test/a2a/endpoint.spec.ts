@@ -184,7 +184,7 @@ describe("audienceFor", () => {
 
   it("gives sibling mounts on one origin different audiences", () => {
     // The whole point of the change — under `originOf` these were identical.
-    expect(audienceFor("https://host.example.com/reactive/a2a")).not.toBe(
+    expect(audienceFor("https://host.example.com/generic/a2a")).not.toBe(
       audienceFor("https://host.example.com/proactive/a2a")
     );
   });

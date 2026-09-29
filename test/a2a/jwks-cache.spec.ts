@@ -370,7 +370,7 @@ describe("registration fetch count", () => {
 
   const tenantCard = (tenant: string): AgentCard => ({
     ...baseCard(),
-    name: "Reactive Agent",
+    name: "Generic Agent",
     supportedInterfaces: [
       { ...baseCard().supportedInterfaces[0], url: ENDPOINT, tenant }
     ]
@@ -380,7 +380,7 @@ describe("registration fetch count", () => {
     clockAt(T0);
     const key = await makeKey("k1");
     const stub = await signCard(baseCard(), key);
-    const extended = await signCard(tenantCard("reactive"), key);
+    const extended = await signCard(tenantCard("generic"), key);
     const counts = { jwks: 0 };
 
     vi.stubGlobal(
@@ -399,7 +399,7 @@ describe("registration fetch count", () => {
 
     const verified = await verifyRemoteAgentEndpoint({
       url: "https://agent.example.com",
-      tenantId: "reactive",
+      tenantId: "generic",
       allowedDomains: DOMAINS,
       authToken: async () => "gw-token"
     });
