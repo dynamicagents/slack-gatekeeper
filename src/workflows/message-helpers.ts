@@ -278,18 +278,13 @@ export function cancelNotHonoredText(agentName: string): string {
   return `*Agent ${agentName}* couldn't be stopped mid-run. It may keep running, but its reply will be discarded.`;
 }
 
-/**
- * Why a task was stopped. Recorded in the log line — the ledger keeps only
- * `canceled`. `leg-cap` is the ReactionWorkflow running out of legs to watch a
- * fan-out in, which is not the same event as an agent overrunning its deadline
- * and is told apart here so the logs can say which happened.
- */
-export type CancelReason = "user" | "task-timeout" | "leg-cap";
+/** Why a task was stopped. Recorded in the log line — the ledger keeps only `canceled`. */
+export type CancelReason = "user" | "task-timeout";
 
 /** Who or what issued a stop, for the one log line that records it. */
 export interface CancelOrigin {
   reason: CancelReason;
-  /** Slack user id that tapped 🛑; null when the gatekeeper stopped the task itself. */
+  /** Slack user id that tapped 🛑; null when the gatekeeper timed the task out. */
   actorUserId: string | null;
 }
 
@@ -298,9 +293,9 @@ export interface CancelOrigin {
  * gatekeeper ledger from the (synchronous) response — a conformant agent sends no
  * push callback after cancellation, so the gatekeeper is the source of truth here.
  *
- * Shared by every trigger: a human's 🛑 (`CancelWorkflow`) and the gatekeeper's own
- * processing-deadline and leg-cap cancels (`ReactionWorkflow`). They differ only in
- * what the user is told and in the `origin` recorded below.
+ * Shared by both triggers: a human's 🛑 (`CancelWorkflow`) and the gatekeeper's own
+ * processing-deadline cancel (`ReactionWorkflow`). They differ only in what the
+ * user is told and in the `origin` recorded below.
  *
  * Handles the taskId race: if the accept hasn't returned a taskId yet, record a
  * `cancelRequested` intent instead. If that atomic mark reveals the accept just
