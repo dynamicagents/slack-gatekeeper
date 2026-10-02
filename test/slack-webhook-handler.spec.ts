@@ -44,6 +44,28 @@ function spyWorkflow(
     .mockResolvedValue({} as WorkflowInstance);
 }
 
+// Like `spyWorkflow`, but emulating the platform's dedupe: the first create() for
+// an instance id resolves, and a second with the same id rejects the way Workflows
+// does. That rejection is the only thing telling a Slack redelivery of an
+// `event_id` apart from its first delivery, so a test that posts the same event
+// twice has to see it — a plain `mockResolvedValue` makes every retry look like a
+// first delivery and hides whatever the handler does once per created instance.
+// Returns the spy alongside the ids actually created, so a test can tell "called
+// twice" from "created once".
+function spyDedupingWorkflow(binding: Parameters<typeof spyWorkflow>[0]) {
+  const instances: string[] = [];
+  const create = spyWorkflow(binding);
+  create.mockImplementation(async (options?: { id?: string }) => {
+    const id = options?.id ?? "";
+    if (instances.includes(id)) {
+      throw new Error(`instance with id ${id} already exists`);
+    }
+    instances.push(id);
+    return {} as WorkflowInstance;
+  });
+  return { create, instances };
+}
+
 // A channel_messages agent on C1 so the handler's target gate resolves ≥1 agent
 // and still fires the message/reaction workflows (app_mention, edits, plain msgs).
 beforeEach(async () => {
@@ -244,8 +266,12 @@ describe("fan-out limit", () => {
   };
 
   it("wakes at most MAX_WOKEN_AGENTS agents, says so, and skips the rest", async () => {
-    const create = spyWorkflow("MESSAGE_WORKFLOW");
-    spyWorkflow("REACTION_WORKFLOW");
+    // Deduping spies: the second delivery below is a Slack retry of the same
+    // `event_id`, and only the platform's duplicate-instance error tells it apart
+    // from a first delivery.
+    const message = spyDedupingWorkflow("MESSAGE_WORKFLOW");
+    const reaction = spyDedupingWorkflow("REACTION_WORKFLOW");
+    const create = message.create;
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const posts: string[] = [];
     stubSlack((method, body) => {
@@ -273,7 +299,9 @@ describe("fan-out limit", () => {
     ).toBe(true);
     // ...and one line in the thread for the humans, naming the limit and that
     // the rest were skipped.
-    const notice = posts.find((t) => t.includes("gatekeeper's limit"));
+    const noticesOf = (texts: string[]) =>
+      texts.filter((t) => t.includes("gatekeeper's limit"));
+    const notice = noticesOf(posts)[0];
     expect(notice).toContain(`${seeded.length} agents`);
     expect(notice).toContain(`limit of ${MAX_WOKEN_AGENTS} per message`);
     expect(notice).toContain("the other 1 was skipped");
@@ -283,6 +311,16 @@ describe("fan-out limit", () => {
     // than the first delivery's.
     await post(wideMessage("EvWide"));
     expect(wokenBy(create, 1)).toEqual(woken);
+
+    // Both deliveries reached `create`, and both workflows were created exactly
+    // once — the retry's create is the duplicate the platform rejects.
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(message.instances).toEqual(["EvWide"]);
+    expect(reaction.instances).toEqual(["react-EvWide"]);
+    // So the warning is in the thread once. It is user-visible, and the fan-out it
+    // warns about happened once: posting it per delivery rather than per created
+    // instance repeated it for every Slack retry.
+    expect(noticesOf(posts)).toHaveLength(1);
   });
 });
 

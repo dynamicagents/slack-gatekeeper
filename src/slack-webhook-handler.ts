@@ -418,22 +418,33 @@ function isInstanceExistsError(err: unknown): boolean {
   return /already exists/i.test(message);
 }
 
+/**
+ * Start one workflow instance for this event, keyed by `event_id` so a Slack
+ * redelivery is deduped by the platform rather than by us. Never throws.
+ *
+ * Returns whether *this* delivery is the one that created the instance: `false`
+ * both for a duplicate delivery and for a create that failed outright. That
+ * boolean is how a caller tells a first delivery from a retry — see the fan-out
+ * notice in `handleSlackEvent`, which is user-visible and so must be posted once.
+ */
 async function triggerWorkflow(
   workflow: Workflow,
   params: MessageWorkflowParams | LifecycleWorkflowParams | CancelWorkflowParams
-): Promise<void> {
+): Promise<boolean> {
   const id = params.eventId;
   try {
     await workflow.create({ id, params });
+    return true;
   } catch (err) {
     if (isInstanceExistsError(err)) {
       console.log("[gatekeeper] duplicate event — skipping", { eventId: id });
-      return;
+      return false;
     }
     console.error("[gatekeeper] failed to create workflow instance", {
       eventId: id,
       err: String(err)
     });
+    return false;
   }
 }
 
@@ -472,8 +483,9 @@ function fanOutClampedText(resolved: number): string {
  *
  * Never expected to bind: it takes a hundred agents woken by one message, and a
  * channel configured that way wants something other than a gatekeeper. So if it
- * does bind it is said out loud in both directions — a log line and one line in
- * the thread — rather than agents going quietly missing.
+ * does bind it is said out loud in both directions — a log line here and one line
+ * in the thread (see {@link postFanOutClampedNotice}) — rather than agents going
+ * quietly missing.
  *
  * The kept set is picked by agent name, not in whatever order the rows were read,
  * so a Slack redelivery of the same event wakes exactly the same 99 agents.
@@ -481,10 +493,10 @@ function fanOutClampedText(resolved: number): string {
  * and the dedupe anchors derived from it (workflow instance ids, task tokens)
  * would silently cover a different fan-out than the first delivery's.
  */
-async function clampFanOut(
+function clampFanOut(
   targets: ResolvedTarget[],
   params: ClassifiedMessageParams
-): Promise<ResolvedTarget[]> {
+): ResolvedTarget[] {
   if (targets.length <= MAX_WOKEN_AGENTS) return targets;
   console.error(
     "[gatekeeper] fan-out over the woken-agent limit — skipping the excess",
@@ -497,30 +509,47 @@ async function clampFanOut(
   );
   // Codepoint order on a unique key (agent names are the resolver's map key), so
   // the choice is a function of the resolved set alone — no locale, no row order.
-  const kept = [...targets]
+  return [...targets]
     .sort((a, b) =>
       a.agent.name < b.agent.name ? -1 : a.agent.name > b.agent.name ? 1 : 0
     )
     .slice(0, MAX_WOKEN_AGENTS);
+}
+
+/**
+ * Tell the thread that the clamp dropped agents, naming how many were resolved and
+ * how many were skipped.
+ *
+ * Posted only by the delivery that actually created this event's workflows, which
+ * is why it lives apart from {@link clampFanOut}: Slack redelivers the same
+ * `event_id` freely, both workflow creates are deduped by their deterministic
+ * instance ids, and a warning posted on the resolve/clamp path alone would repeat
+ * in the thread for a fan-out that only ran once.
+ *
+ * Best-effort, like every other inline Slack call here: the agents that did fit
+ * still run, and the `console.error` in `clampFanOut` is the durable record either
+ * way.
+ */
+async function postFanOutClampedNotice(
+  resolved: number,
+  params: ClassifiedMessageParams
+): Promise<void> {
   try {
     // App branding (null) — a gatekeeper notice, not an agent reply, posted where
     // this message's replies go.
     await postReply(
       params.channelId,
       replyThreadTs(params),
-      fanOutClampedText(targets.length),
+      fanOutClampedText(resolved),
       null,
       null
     );
   } catch (err) {
-    // Best-effort, like every other inline Slack call here: the agents that did
-    // fit still run, and the log line above is the durable record either way.
     console.error("[gatekeeper] failed to post the fan-out limit notice", {
       eventId: params.eventId,
       err: String(err)
     });
   }
-  return kept;
 }
 
 /**
@@ -533,7 +562,7 @@ async function clampFanOut(
 async function triggerReactionWorkflow(
   workflow: Workflow,
   params: ClassifiedMessageParams
-): Promise<void> {
+): Promise<boolean> {
   try {
     await workflow.create({
       id: reactionInstanceId(params.eventId),
@@ -543,12 +572,14 @@ async function triggerReactionWorkflow(
         ts: params.ts
       }
     });
+    return true;
   } catch (err) {
-    if (isInstanceExistsError(err)) return; // duplicate delivery — already running
+    if (isInstanceExistsError(err)) return false; // duplicate delivery — already running
     console.error("[gatekeeper] failed to start reaction workflow", {
       eventId: params.eventId,
       err: String(err)
     });
+    return false;
   }
 }
 
@@ -697,7 +728,7 @@ export async function handleSlackEvent(
               ? `${base.text} ${base.prevText ?? ""}`.trim()
               : base.text
           });
-          const targets = await clampFanOut(resolved, base);
+          const targets = clampFanOut(resolved, base);
           if (targets.length === 0) {
             console.log("[gatekeeper] no agent woken — staying silent", {
               eventId: base.eventId,
@@ -708,11 +739,22 @@ export async function handleSlackEvent(
           // One workflow instance per event handles every woken agent, local or
           // remote; it dispatches each by `agent.kind` and owns the single
           // collect-reaction signal for the event.
-          await Promise.allSettled([
+          const [, , messageCreate] = await Promise.allSettled([
             addStopReaction(base),
             triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
             triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
           ]);
+          // The clamp notice is the only user-visible post on this path, so it
+          // waits for the dedupe anchor to speak: the MessageWorkflow's create is
+          // what decides whether this delivery is the one that woke these agents,
+          // and a Slack retry of the same `event_id` is told the instance already
+          // exists. Posting it where the clamp is decided instead repeated the
+          // warning in the thread on every redelivery of a fan-out that ran once.
+          const created =
+            messageCreate.status === "fulfilled" && messageCreate.value;
+          if (created && targets.length < resolved.length) {
+            await postFanOutClampedNotice(resolved.length, base);
+          }
         })()
       );
       return OK();
