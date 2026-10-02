@@ -6,7 +6,10 @@ import {
   DEFAULT_TASK_DEADLINE_SECONDS
 } from "@/config";
 import { removeReaction, postReply } from "@/wrappers/slack";
-import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
+import {
+  getPendingAgentTasksByEventId,
+  getPendingAgentTasksWithDeadlinesByEventId
+} from "@/db/models/agent-tasks";
 import { cancelTaskRow } from "@/workflows/message-helpers";
 import {
   REACTION_SYNC_EVENT,
@@ -38,21 +41,23 @@ export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
  * it is carved from — and what remains afterwards must still be a legal
  * `waitForEvent` timeout, which rejects anything below one second.
  *
- * Both clamps only bind when `DEFAULT_TASK_DEADLINE_SECONDS` is set below the grace,
- * which is exactly what this PR's own verification steps ask you to do
- * (shorten it to ~60s to watch the timeout path run). Without them that produces
- * a `"-300 seconds"` timeout, and the leg ends by throwing rather than by
- * deciding — correct-looking behaviour that comes out of the catch block instead
- * of the logic.
+ * The grace is still sized against the *default* because it is one wait shared by
+ * the whole fan-out, and the per-agent deadlines are not known until the first
+ * `evaluate` step has read them. The clamps bind for any agent whose own deadline
+ * is at or below the grace — not only when the global constant is lowered for a
+ * manual test. Without them such an agent produces a `"-300 seconds"` timeout,
+ * and the leg ends by throwing rather than by deciding — correct-looking
+ * behaviour that comes out of the catch block instead of the logic.
  */
 const GRACE_SECONDS = Math.min(
   DELIVERY_RETRY_GRACE_SECONDS,
   DEFAULT_TASK_DEADLINE_SECONDS
 );
-const REMAINING_AFTER_GRACE = Math.max(
-  1,
-  DEFAULT_TASK_DEADLINE_SECONDS - GRACE_SECONDS
-);
+
+/** What is left of one task's budget once the shared grace has been spent in it. */
+function remainingAfterGrace(deadlineSeconds: number): number {
+  return Math.max(1, deadlineSeconds - GRACE_SECONDS);
+}
 
 /**
  * Ceiling on how many times the budget loop may go round. A leg is a real state
@@ -75,17 +80,22 @@ function rejectedDeliveryText(agentName: string, reason: string): string {
 }
 
 /**
- * The processing budget as the user should read it, derived rather than written
- * out so the notice below can't drift from `DEFAULT_TASK_DEADLINE_SECONDS`.
+ * A processing budget as the user should read it, derived from whichever budget
+ * was actually enforced rather than written out — so the notice below always
+ * names the number the task was really held to, not a constant beside it.
  */
-const TASK_DEADLINE_LABEL =
-  DEFAULT_TASK_DEADLINE_SECONDS % 3600 === 0
-    ? `${DEFAULT_TASK_DEADLINE_SECONDS / 3600} hour${DEFAULT_TASK_DEADLINE_SECONDS === 3600 ? "" : "s"}`
-    : `${Math.round(DEFAULT_TASK_DEADLINE_SECONDS / 60)} minutes`;
+export function deadlineLabel(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600;
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
 
 /** Notice posted when a task burned its whole processing budget without replying. */
-function taskTimedOutText(agentName: string): string {
-  return `⏱️ *Agent ${agentName}* didn't reply within the ${TASK_DEADLINE_LABEL} limit, so the gatekeeper stopped it. Any later reply will be discarded.`;
+function taskTimedOutText(agentName: string, deadlineSeconds: number): string {
+  return `⏱️ *Agent ${agentName}* didn't reply within the ${deadlineLabel(deadlineSeconds)} limit, so the gatekeeper stopped it. Any later reply will be discarded.`;
 }
 
 /**
@@ -135,30 +145,70 @@ async function surfaceRejectedDeliveries(eventId: string): Promise<void> {
  */
 type EventState = "drained" | "working" | "parked";
 
+/** One non-terminal task as the budget loop sees it. */
+interface TaskSnapshot {
+  token: string;
+  /** Non-terminal only: `pending` spends budget, `awaiting-input` freezes it. */
+  pending: boolean;
+  /** This task's own agent's leg budget. Always set. */
+  deadlineSeconds: number;
+}
+
+/** The fan-out's state and the tasks it is made of, as of one read. */
+interface EventSnapshot {
+  state: EventState;
+  tasks: TaskSnapshot[];
+}
+
 /** Read the ledger and classify the fan-out. The workflow's only source of truth. */
-async function evaluateEvent(eventId: string): Promise<EventState> {
-  const rows = await getPendingAgentTasksByEventId(eventId);
-  if (rows.length === 0) return "drained";
-  return rows.some((r) => r.status === "pending") ? "working" : "parked";
+async function evaluateEvent(eventId: string): Promise<EventSnapshot> {
+  const rows = await getPendingAgentTasksWithDeadlinesByEventId(eventId);
+  const tasks = rows.map((r) => ({
+    token: r.task.token,
+    pending: r.task.status === "pending",
+    deadlineSeconds: r.deadlineSeconds
+  }));
+  if (tasks.length === 0) return { state: "drained", tasks };
+  return { state: tasks.some((t) => t.pending) ? "working" : "parked", tasks };
+}
+
+/** A task whose own budget is spent, and the budget it was held to. */
+interface ExpiredTask {
+  token: string;
+  deadlineSeconds: number;
 }
 
 /**
- * Stop every task of this event still `pending`, because its processing budget
- * ran out. Runs the same cancellation a human's 🛑 does — a real `tasks/cancel`
- * so the agent stops burning its own compute — differing only in the recorded
- * origin and in what the user is told.
+ * Stop the tasks of this event whose own processing budget ran out. Runs the same
+ * cancellation a human's 🛑 does — a real `tasks/cancel` so the agent stops
+ * burning its own compute — differing only in the recorded origin and in what the
+ * user is told.
+ *
+ * The ledger is re-read at execution time, so a task that completed or parked
+ * during the wait is skipped. The token filter on top of that is what makes
+ * cancellation *differential*: a sibling with budget left is not in `expired` and
+ * so is left to keep working, even though it is `pending` right now.
  *
  * `awaiting-input` rows are excluded by the `pending` filter alone: a task parked
  * on a prompt has not spent any of its budget, and killing it here would break an
  * approval left open over a weekend.
  *
+ * The notice quotes the deadline from the snapshot the decision was made on, so it
+ * names the budget actually spent even if an admin changed the value a moment later.
+ *
  * Best-effort by contract: never throws, so the loop always makes progress.
  */
-async function cancelPendingTasks(eventId: string): Promise<void> {
+async function cancelPendingTasks(
+  eventId: string,
+  expired: ExpiredTask[]
+): Promise<void> {
+  const budgets = new Map(expired.map((e) => [e.token, e.deadlineSeconds]));
   try {
     const rows = await getPendingAgentTasksByEventId(eventId);
     for (const row of rows) {
       if (row.status !== "pending") continue;
+      const deadlineSeconds = budgets.get(row.token);
+      if (deadlineSeconds === undefined) continue; // a sibling with budget left
       try {
         const { agentName } = await cancelTaskRow(row, {
           reason: "task-timeout",
@@ -170,7 +220,7 @@ async function cancelPendingTasks(eventId: string): Promise<void> {
         await postReply(
           row.channelId,
           row.replyThreadTs,
-          taskTimedOutText(agentName),
+          taskTimedOutText(agentName, deadlineSeconds),
           null,
           null
         );
@@ -202,11 +252,15 @@ async function cancelPendingTasks(eventId: string): Promise<void> {
  *      then, any callback we explicitly *rejected* is reported to the thread —
  *      the user learns about a broken agent in minutes, not at the hour mark.
  *
- *   2. A loop that owns the budget. Each pass re-reads the ledger and waits for
- *      whatever could change next: the remaining budget while an agent works, or
- *      the HITL TTL while one is parked on a human prompt. A wake by signal is a
- *      real leg boundary and buys a fresh {@link DEFAULT_TASK_DEADLINE_SECONDS}; a wake by
- *      timeout while working means the budget is spent, so the task is canceled.
+ *   2. A loop that owns *a budget per task*, because each task is held to its own
+ *      agent's `task_deadline_seconds`. Each pass re-reads the ledger (deadlines
+ *      included, so an admin's change takes effect) and waits for whatever could
+ *      change next: the *shortest* remaining budget while agents work, or the HITL
+ *      TTL while one is parked on a human prompt. A wake by signal is a real leg
+ *      boundary and buys every task a fresh leg of **its own agent's** deadline; a
+ *      wake by timeout while working means at least one budget is spent, and only
+ *      the tasks whose own budget is spent are stopped — siblings with time left
+ *      run on into the next leg.
  *
  * Two things make this cheap and robust. Cloudflare bills Workflows on CPU, not
  * wall-clock, and a `waiting` instance holds no concurrency slot — so an hour of
@@ -245,23 +299,54 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
         );
       }
 
-      // Phase 2 — the budget loop. Phase 1's wait was part of the first leg, so
-      // only the remainder is left unless a signal already restarted the clock.
-      let budgetSeconds = graceTimedOut
-        ? REMAINING_AFTER_GRACE
-        : DEFAULT_TASK_DEADLINE_SECONDS;
+      // Phase 2 — the budget loop. One remaining budget per task keyed by token,
+      // because each task is held to its own agent's deadline. Phase 1's wait was
+      // part of the first leg, so a task first seen there starts with only the
+      // remainder unless a signal already restarted the clock.
+      const remaining = new Map<string, number>();
 
       let leg = 0;
       for (; leg < MAX_LEGS; leg++) {
-        const state = await step.do(`evaluate:${leg}`, () =>
+        const snap = await step.do(`evaluate:${leg}`, () =>
           evaluateEvent(p.eventId)
         );
-        if (state === "drained") break;
+        if (snap.state === "drained") break;
+
+        // Reconcile the map against this snapshot. First sight of a task starts its
+        // clock; re-reading each deadline every pass is what lets an admin's change
+        // take effect, bounded by what is left of the leg. Tasks that have gone
+        // terminal drop out, so a token can never outlive its row.
+        for (const t of snap.tasks) {
+          const seen = remaining.get(t.token);
+          if (seen === undefined) {
+            remaining.set(
+              t.token,
+              leg === 0 && graceTimedOut
+                ? remainingAfterGrace(t.deadlineSeconds)
+                : t.deadlineSeconds
+            );
+          } else {
+            remaining.set(t.token, Math.min(seen, t.deadlineSeconds));
+          }
+        }
+        for (const token of [...remaining.keys()]) {
+          if (!snap.tasks.some((t) => t.token === token))
+            remaining.delete(token);
+        }
 
         // Parked tasks spend human time, not budget: wait out the prompt's own
-        // TTL instead, and let the resume signal cut that short.
+        // TTL instead, and let the resume signal cut that short. While working, the
+        // next thing that can happen is the *shortest* remaining budget expiring.
+        const pending = snap.tasks.filter((t) => t.pending);
+        const minRemaining = pending.reduce(
+          (min, t) =>
+            Math.min(min, remaining.get(t.token) ?? t.deadlineSeconds),
+          Number.POSITIVE_INFINITY
+        );
         const waitSeconds =
-          state === "parked" ? HITL_REQUEST_TTL_SECONDS : budgetSeconds;
+          snap.state === "parked" || !Number.isFinite(minRemaining)
+            ? HITL_REQUEST_TTL_SECONDS
+            : Math.max(1, minRemaining);
 
         let timedOut = false;
         try {
@@ -273,13 +358,36 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
           timedOut = true;
         }
 
-        if (timedOut && state === "working") {
-          // The budget is spent and the agent never delivered — stop it.
-          await step.do(`cancel:${leg}`, () => cancelPendingTasks(p.eventId));
+        if (timedOut && snap.state === "working") {
+          // Only the tasks whose own budget is spent. Siblings with more to run
+          // keep going into the next leg, which waits out whatever is left of the
+          // shortest of them.
+          const expired: ExpiredTask[] = pending
+            .filter((t) => (remaining.get(t.token) ?? 0) <= waitSeconds)
+            .map((t) => ({
+              token: t.token,
+              deadlineSeconds: t.deadlineSeconds
+            }));
+          console.log("[reaction] budget spent — canceling", {
+            instanceId: event.instanceId,
+            eventId: p.eventId,
+            leg,
+            waitSeconds,
+            expired
+          });
+          await step.do(`cancel:${leg}`, () =>
+            cancelPendingTasks(p.eventId, expired)
+          );
+          for (const e of expired) remaining.delete(e.token);
+          for (const t of pending) {
+            const left = remaining.get(t.token);
+            if (left !== undefined) remaining.set(t.token, left - waitSeconds);
+          }
         } else if (!timedOut) {
           // A signal only ever fires at a real boundary (the fan-out drained, or a
-          // parked task resumed), so this is the start of a fresh leg.
-          budgetSeconds = DEFAULT_TASK_DEADLINE_SECONDS;
+          // parked task resumed), so this is the start of a fresh leg — and each
+          // task gets a fresh leg of its own agent's budget.
+          for (const t of snap.tasks) remaining.set(t.token, t.deadlineSeconds);
         }
         // parked + timedOut → the prompt outlived its TTL. The maintenance sweep
         // owns that; just loop and re-read what it did.
