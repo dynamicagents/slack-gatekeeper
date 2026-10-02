@@ -9,9 +9,15 @@ import { isRecord, str } from "@/util/json";
 import { normalizeWhitespace } from "@/util/text-diff";
 import { pickDisplayName } from "@/util/slack-text";
 import { getSlackTeamId, setPublicUrl } from "@/db/models/workspace-configs";
-import { STOP_REACTION, reactionInstanceId } from "@/workflows/reaction";
-import { addReaction, getBotUserId } from "@/wrappers/slack";
+import {
+  MAX_WOKEN_AGENTS,
+  STOP_REACTION,
+  reactionInstanceId
+} from "@/workflows/reaction";
+import { replyThreadTs } from "@/workflows/message-helpers";
+import { addReaction, getBotUserId, postReply } from "@/wrappers/slack";
 import { resolveTargets } from "@/router/resolve";
+import type { ResolvedTarget } from "@/router/resolve";
 import type {
   ClassifiedMessageParams,
   MessageWorkflowParams,
@@ -449,6 +455,74 @@ async function addStopReaction(params: ClassifiedMessageParams): Promise<void> {
   }
 }
 
+/** Notice posted when a message woke more agents than the gatekeeper may start. */
+function fanOutClampedText(resolved: number): string {
+  const skipped = resolved - MAX_WOKEN_AGENTS;
+  return `⚠️ This message reached ${resolved} agents, more than the gatekeeper's limit of ${MAX_WOKEN_AGENTS} per message. The first ${MAX_WOKEN_AGENTS} in name order were woken; the other ${skipped} ${skipped === 1 ? "was" : "were"} skipped.`;
+}
+
+/**
+ * Hold one message's fan-out to {@link MAX_WOKEN_AGENTS}. `resolveTargets`
+ * returns every agent attached to the channel, so nothing but configuration
+ * bounds how wide a turn can go — and the ReactionWorkflow can only stop each
+ * woken agent at its own deadline by spending a leg of its budget loop per
+ * distinct expiry, which is why the woken set has to stay under the loop's leg
+ * cap. Enforced here, the single point where the fan-out is decided, before the
+ * reaction or either workflow sees a target.
+ *
+ * Never expected to bind: it takes a hundred agents woken by one message, and a
+ * channel configured that way wants something other than a gatekeeper. So if it
+ * does bind it is said out loud in both directions — a log line and one line in
+ * the thread — rather than agents going quietly missing.
+ *
+ * The kept set is picked by agent name, not in whatever order the rows were read,
+ * so a Slack redelivery of the same event wakes exactly the same 99 agents.
+ * Otherwise a retry could dispatch a different subset under the same `event_id`,
+ * and the dedupe anchors derived from it (workflow instance ids, task tokens)
+ * would silently cover a different fan-out than the first delivery's.
+ */
+async function clampFanOut(
+  targets: ResolvedTarget[],
+  params: ClassifiedMessageParams
+): Promise<ResolvedTarget[]> {
+  if (targets.length <= MAX_WOKEN_AGENTS) return targets;
+  console.error(
+    "[gatekeeper] fan-out over the woken-agent limit — skipping the excess",
+    {
+      eventId: params.eventId,
+      channelId: params.channelId,
+      resolved: targets.length,
+      limit: MAX_WOKEN_AGENTS
+    }
+  );
+  // Codepoint order on a unique key (agent names are the resolver's map key), so
+  // the choice is a function of the resolved set alone — no locale, no row order.
+  const kept = [...targets]
+    .sort((a, b) =>
+      a.agent.name < b.agent.name ? -1 : a.agent.name > b.agent.name ? 1 : 0
+    )
+    .slice(0, MAX_WOKEN_AGENTS);
+  try {
+    // App branding (null) — a gatekeeper notice, not an agent reply, posted where
+    // this message's replies go.
+    await postReply(
+      params.channelId,
+      replyThreadTs(params),
+      fanOutClampedText(targets.length),
+      null,
+      null
+    );
+  } catch (err) {
+    // Best-effort, like every other inline Slack call here: the agents that did
+    // fit still run, and the log line above is the durable record either way.
+    console.error("[gatekeeper] failed to post the fan-out limit notice", {
+      eventId: params.eventId,
+      err: String(err)
+    });
+  }
+  return kept;
+}
+
 /**
  * Kick off the parallel ReactionWorkflow that removes the 🛑 reaction once a
  * reply is posted (or on its timeout backstop). Best-effort and cosmetic: any
@@ -617,12 +691,13 @@ export async function handleSlackEvent(
       // alive until all tasks settle; each already swallows/logs its own errors.
       ctx.waitUntil(
         (async () => {
-          const targets = await resolveTargets({
+          const resolved = await resolveTargets({
             channelId: base.channelId,
             text: base.editKind
               ? `${base.text} ${base.prevText ?? ""}`.trim()
               : base.text
           });
+          const targets = await clampFanOut(resolved, base);
           if (targets.length === 0) {
             console.log("[gatekeeper] no agent woken — staying silent", {
               eventId: base.eventId,

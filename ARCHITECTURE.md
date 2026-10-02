@@ -104,6 +104,12 @@ it is allowed on:
 
 When nothing applies, the resolver returns an empty list and the gatekeeper stays silent.
 
+At the other end, one message wakes at most **99 agents** (`MAX_WOKEN_AGENTS`). The
+`ReactionWorkflow` stops each woken agent at its own deadline by spending a leg of its
+budget loop per distinct expiry, so the fan-out has to stay below that loop's 100-leg cap.
+A channel wide enough to exceed it is clamped where the fan-out is decided: the first 99 by
+name are woken, the rest are skipped, and the thread is told so.
+
 ---
 
 ## Data storage

@@ -1,5 +1,8 @@
 import type { WorkflowStep } from "cloudflare:workers";
-import type { MessageWorkflowParams } from "@/slack/types";
+import type {
+  ClassifiedMessageParams,
+  MessageWorkflowParams
+} from "@/slack/types";
 import { buildUserAuthContext } from "@/auth";
 import {
   cancelAgentTask,
@@ -65,8 +68,12 @@ export interface AgentPlan {
 /**
  * Return the thread_ts to reply into, or null to post at channel level.
  * A real thread reply has a thread_ts that differs from the message's own ts.
+ *
+ * Takes the classifier params rather than the workflow's, so the webhook handler
+ * can place a notice about an event in the same thread the event's replies land in
+ * — before any target has been resolved for it.
  */
-export function replyThreadTs(p: MessageWorkflowParams): string | null {
+export function replyThreadTs(p: ClassifiedMessageParams): string | null {
   return p.threadTs && p.threadTs !== p.ts ? p.threadTs : null;
 }
 

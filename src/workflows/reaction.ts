@@ -12,16 +12,20 @@ import {
 } from "@/db/models/agent-tasks";
 import { cancelTaskRow } from "@/workflows/message-helpers";
 import {
+  MAX_LEGS,
   REACTION_SYNC_EVENT,
   STOP_REACTION
 } from "@/workflows/reaction-helpers";
 
 // Re-exported so callers and tests can keep importing the 🛑 vocabulary from the
 // workflow that owns it, while the definitions sit in `reaction-helpers` where
-// `dispatch` and `message-helpers` can reach them without a cycle.
+// `dispatch`, `message-helpers` and the webhook handler can reach them without a
+// cycle.
 export {
   STOP_REACTION,
   REACTION_SYNC_EVENT,
+  MAX_LEGS,
+  MAX_WOKEN_AGENTS,
   reactionInstanceId
 } from "@/workflows/reaction-helpers";
 
@@ -54,16 +58,6 @@ const GRACE_SECONDS = Math.min(
   DELIVERY_RETRY_GRACE_SECONDS,
   DEFAULT_TASK_DEADLINE_SECONDS
 );
-
-/**
- * Ceiling on how many times the budget loop may go round. A leg is a real state
- * transition, not a slice of time — a parked task waits the full HITL TTL in one
- * leg, woken early by the resume signal — so at roughly two legs per ask/answer
- * round-trip this is budget for ~50 of them, which should be extremely rare to
- * reach. The true bound is the 30-day task sweep: once those rows are gone,
- * `evaluateEvent` reports `drained` and the loop exits on its own.
- */
-const MAX_LEGS = 100;
 
 /**
  * Backstop notice: an accepted turn whose delivery callback we saw explicitly
@@ -315,6 +309,10 @@ async function cancelPendingTasks(
  *      the task run on with what the new limit leaves it, and a lowering takes
  *      effect at the next wake at the latest — the wait already running may be
  *      longer than the new limit, which costs lateness, never a wrong cancel.
+ *
+ *      One leg per distinct expiry is also what bounds how wide a fan-out this
+ *      loop can watch to the end, so how many agents a message may wake is
+ *      guarded where the fan-out is decided; see {@link MAX_WOKEN_AGENTS}.
  *
  * Two things make this cheap and robust. Cloudflare bills Workflows on CPU, not
  * wall-clock, and a `waiting` instance holds no concurrency slot — so an hour of

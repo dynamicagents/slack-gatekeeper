@@ -5,6 +5,7 @@ import {
   _resetAnchorCacheForTest,
   _resetPublicUrlCacheForTest
 } from "../src/slack-webhook-handler";
+import type { MessageWorkflowParams } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import {
   getConfig,
@@ -12,7 +13,7 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
-import { STOP_REACTION } from "@/workflows/reaction";
+import { MAX_WOKEN_AGENTS, STOP_REACTION } from "@/workflows/reaction";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
 import { useStorageReset } from "./helpers/storage";
@@ -184,6 +185,104 @@ describe("message events", () => {
     const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fan-out limit — at most MAX_WOKEN_AGENTS agents per message
+// ---------------------------------------------------------------------------
+
+describe("fan-out limit", () => {
+  // One more channel_messages agent on a channel than a message may wake.
+  const seeded = Array.from(
+    { length: MAX_WOKEN_AGENTS + 1 },
+    (_, i) => `fan-${String(i).padStart(3, "0")}`
+  );
+
+  // Seeded in reverse name order, so row order and name order disagree: a clamp
+  // that kept whatever `resolveTargets` happened to read first would keep a
+  // different set than the one asserted below.
+  beforeEach(async () => {
+    const reversed = [...seeded].reverse();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ${reversed
+        .map(
+          (name) =>
+            `('${name}','remote',1,'channel_messages','https://example.com/${name}','main',3600,0)`
+        )
+        .join(",")}`
+    ).run();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ${reversed
+        .map((name) => `('C_WIDE','${name}')`)
+        .join(",")}`
+    ).run();
+  });
+
+  const wideMessage = (eventId: string) =>
+    JSON.stringify({
+      type: "event_callback",
+      event_id: eventId,
+      team_id: "T1",
+      event: {
+        type: "message",
+        channel_type: "channel",
+        user: "U1",
+        text: "everyone take a look at this",
+        channel: "C_WIDE",
+        ts: "1700000000.000700"
+      }
+    });
+
+  const wokenBy = (
+    create: ReturnType<typeof spyWorkflow>,
+    nth: number
+  ): string[] => {
+    const call = create.mock.calls[nth]?.[0] as
+      { params: MessageWorkflowParams } | undefined;
+    return (call?.params.targets ?? []).map((t) => t.agent.name);
+  };
+
+  it("wakes at most MAX_WOKEN_AGENTS agents, says so, and skips the rest", async () => {
+    const create = spyWorkflow("MESSAGE_WORKFLOW");
+    spyWorkflow("REACTION_WORKFLOW");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const posts: string[] = [];
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") posts.push(body.get("text") ?? "");
+      return { ok: true, ts: "1700000000.000701" };
+    });
+
+    const res = await post(wideMessage("EvWide"));
+    expect(res.status).toBe(200);
+
+    // Exactly one fan-out, 99 agents wide — the whole resolved set less the one
+    // that didn't fit. Nothing is dispatched for the extra: it never reaches the
+    // workflow that would dispatch it.
+    expect(create).toHaveBeenCalledOnce();
+    const woken = wokenBy(create, 0);
+    expect(woken).toHaveLength(MAX_WOKEN_AGENTS);
+    expect([...woken].sort()).toEqual(seeded.slice(0, MAX_WOKEN_AGENTS));
+    expect(woken).not.toContain(seeded[seeded.length - 1]);
+
+    // Never silent in either direction: a log line for the operator...
+    expect(
+      err.mock.calls.some(([msg]) =>
+        String(msg).includes("fan-out over the woken-agent limit")
+      )
+    ).toBe(true);
+    // ...and one line in the thread for the humans, naming the limit and that
+    // the rest were skipped.
+    const notice = posts.find((t) => t.includes("gatekeeper's limit"));
+    expect(notice).toContain(`${seeded.length} agents`);
+    expect(notice).toContain(`limit of ${MAX_WOKEN_AGENTS} per message`);
+    expect(notice).toContain("the other 1 was skipped");
+
+    // A Slack retry of the same delivery must wake the same 99: the dedupe
+    // anchors derived from `event_id` would otherwise cover a different fan-out
+    // than the first delivery's.
+    await post(wideMessage("EvWide"));
+    expect(wokenBy(create, 1)).toEqual(woken);
   });
 });
 
