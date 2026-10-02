@@ -207,7 +207,8 @@ export async function dispatchMessage(
  * The drain check is also what keeps the signal honest. The ReactionWorkflow
  * measures its processing budget with its own timer, so it must only ever be
  * woken at a real leg boundary — signalling on *every* completion would hand a
- * slow sibling a fresh hour each time a fast one finished. Hence the guard: no
+ * slow sibling a fresh leg of its own budget each time a fast one finished.
+ * Hence the guard: no
  * signal until nothing is left.
  */
 export async function collectIfEventDrained(eventId: string): Promise<void> {

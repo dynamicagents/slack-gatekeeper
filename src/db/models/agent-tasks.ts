@@ -353,8 +353,8 @@ export async function completeAgentTask(token: string): Promise<boolean> {
 
 /**
  * Mark a task canceled — the terminal state for a stop, whoever issued it: a
- * human tapping 🛑, or the gatekeeper hitting `TASK_DEADLINE_SECONDS` on a leg that
- * never delivered. The two are indistinguishable to the ledger; the actor is
+ * human tapping 🛑, or the gatekeeper hitting the agent's own task deadline on a
+ * leg that never delivered. The two are indistinguishable to the ledger; the actor is
  * captured in the `[cancel] canceling task` log line instead.
  *
  * Unlike the old behaviour, this is applied on *every* cancel outcome — including

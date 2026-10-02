@@ -30,8 +30,9 @@ export const STOP_REACTION = "octagonal_sign";
  *
  * **The workflow's processing budget depends on this firing only at real leg
  * boundaries.** It measures a leg with its own `waitForEvent` timeout rather than
- * a stored timestamp, so a signal sent mid-leg would silently hand the agent a
- * fresh hour. Both senders respect that today: `collectIfEventDrained` signals
+ * a stored timestamp, so a signal sent mid-leg would silently hand every agent
+ * of the fan-out a fresh leg of its own budget. Both senders respect that today:
+ * `collectIfEventDrained` signals
  * only once no non-terminal task remains (not when one agent of a fan-out
  * finishes), and the resume path signals exactly when a new leg starts. Anything
  * added later must hold to the same rule.

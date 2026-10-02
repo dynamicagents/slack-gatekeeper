@@ -1,7 +1,10 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { ReactionWorkflowParams } from "@/slack/types";
-import { HITL_REQUEST_TTL_SECONDS, TASK_DEADLINE_SECONDS } from "@/config";
+import {
+  HITL_REQUEST_TTL_SECONDS,
+  DEFAULT_TASK_DEADLINE_SECONDS
+} from "@/config";
 import { removeReaction, postReply } from "@/wrappers/slack";
 import { getPendingAgentTasksByEventId } from "@/db/models/agent-tasks";
 import { cancelTaskRow } from "@/workflows/message-helpers";
@@ -35,7 +38,7 @@ export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
  * it is carved from — and what remains afterwards must still be a legal
  * `waitForEvent` timeout, which rejects anything below one second.
  *
- * Both clamps only bind when `TASK_DEADLINE_SECONDS` is set below the grace,
+ * Both clamps only bind when `DEFAULT_TASK_DEADLINE_SECONDS` is set below the grace,
  * which is exactly what this PR's own verification steps ask you to do
  * (shorten it to ~60s to watch the timeout path run). Without them that produces
  * a `"-300 seconds"` timeout, and the leg ends by throwing rather than by
@@ -44,11 +47,11 @@ export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
  */
 const GRACE_SECONDS = Math.min(
   DELIVERY_RETRY_GRACE_SECONDS,
-  TASK_DEADLINE_SECONDS
+  DEFAULT_TASK_DEADLINE_SECONDS
 );
 const REMAINING_AFTER_GRACE = Math.max(
   1,
-  TASK_DEADLINE_SECONDS - GRACE_SECONDS
+  DEFAULT_TASK_DEADLINE_SECONDS - GRACE_SECONDS
 );
 
 /**
@@ -73,12 +76,12 @@ function rejectedDeliveryText(agentName: string, reason: string): string {
 
 /**
  * The processing budget as the user should read it, derived rather than written
- * out so the notice below can't drift from `TASK_DEADLINE_SECONDS`.
+ * out so the notice below can't drift from `DEFAULT_TASK_DEADLINE_SECONDS`.
  */
 const TASK_DEADLINE_LABEL =
-  TASK_DEADLINE_SECONDS % 3600 === 0
-    ? `${TASK_DEADLINE_SECONDS / 3600} hour${TASK_DEADLINE_SECONDS === 3600 ? "" : "s"}`
-    : `${Math.round(TASK_DEADLINE_SECONDS / 60)} minutes`;
+  DEFAULT_TASK_DEADLINE_SECONDS % 3600 === 0
+    ? `${DEFAULT_TASK_DEADLINE_SECONDS / 3600} hour${DEFAULT_TASK_DEADLINE_SECONDS === 3600 ? "" : "s"}`
+    : `${Math.round(DEFAULT_TASK_DEADLINE_SECONDS / 60)} minutes`;
 
 /** Notice posted when a task burned its whole processing budget without replying. */
 function taskTimedOutText(agentName: string): string {
@@ -202,7 +205,7 @@ async function cancelPendingTasks(eventId: string): Promise<void> {
  *   2. A loop that owns the budget. Each pass re-reads the ledger and waits for
  *      whatever could change next: the remaining budget while an agent works, or
  *      the HITL TTL while one is parked on a human prompt. A wake by signal is a
- *      real leg boundary and buys a fresh {@link TASK_DEADLINE_SECONDS}; a wake by
+ *      real leg boundary and buys a fresh {@link DEFAULT_TASK_DEADLINE_SECONDS}; a wake by
  *      timeout while working means the budget is spent, so the task is canceled.
  *
  * Two things make this cheap and robust. Cloudflare bills Workflows on CPU, not
@@ -246,7 +249,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
       // only the remainder is left unless a signal already restarted the clock.
       let budgetSeconds = graceTimedOut
         ? REMAINING_AFTER_GRACE
-        : TASK_DEADLINE_SECONDS;
+        : DEFAULT_TASK_DEADLINE_SECONDS;
 
       let leg = 0;
       for (; leg < MAX_LEGS; leg++) {
@@ -276,7 +279,7 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
         } else if (!timedOut) {
           // A signal only ever fires at a real boundary (the fan-out drained, or a
           // parked task resumed), so this is the start of a fresh leg.
-          budgetSeconds = TASK_DEADLINE_SECONDS;
+          budgetSeconds = DEFAULT_TASK_DEADLINE_SECONDS;
         }
         // parked + timedOut → the prompt outlived its TTL. The maintenance sweep
         // owns that; just loop and re-read what it did.
