@@ -47,11 +47,14 @@ export const REACTION_SYNC_EVENT = "ledger_changed";
  * extremely rare to reach. The true bound is the 30-day task sweep: once those
  * rows are gone, `evaluateEvent` reports `drained` and the loop exits on its own.
  *
- * It is the backstop of the {@link MAX_WOKEN_AGENTS} guard, not a case with
- * handling of its own: a fan-out held under that bound cannot run the loop out of
- * legs, so reaching this cap means the documented invariant was violated
- * upstream. It is logged loudly and the workflow then gives up watching — the 🛑
- * comes off and the 30-day task sweep still owns the rows.
+ * It is the backstop of the {@link MAX_WOKEN_AGENTS} guard rather than a case with
+ * handling of its own: that guard holds the one dimension configuration alone can
+ * blow up — distinct deadline expiries — inside this cap, but it is not a bound on
+ * the loop's whole appetite, since HITL round-trips spend legs from the same budget
+ * (see there). So reaching this cap means either the fan-out bound was violated
+ * upstream or the run simply asked for more legs than the loop has. Either way it
+ * is logged loudly and the workflow then gives up watching — the 🛑 comes off and
+ * the 30-day task sweep still owns the rows.
  */
 export const MAX_LEGS = 100;
 
@@ -66,6 +69,18 @@ export const MAX_LEGS = 100;
  * spend N legs, plus one more leg to see the ledger drained and stop. Leaving a
  * leg of headroom is therefore what keeps the widest legal fan-out inside the
  * budget, and it is why the fan-out must be less than 100.
+ *
+ * The whole arithmetic, so the −1 is not read as more than it is: N expiry legs
+ * plus one drained-observation leg is exactly what fits in {@link MAX_LEGS}, and
+ * nothing beyond that is reserved. HITL draws on the same leg budget — roughly two
+ * legs per ask/answer round-trip, one to park and one to resume — and no fixed
+ * reserve could cover it, because a single turn may ask arbitrarily many questions.
+ * So a max-width fan-out that also needs HITL can still run the loop out of legs;
+ * so can one agent asking fifty questions, which was true before this guard
+ * existed and is not changed by it. The guard bounds the dimension that
+ * configuration alone decides, not the loop's total appetite — when the legs do run
+ * out, the `console.error` at the cap is the tripwire and the 30-day task sweep
+ * still owns the rows.
  */
 export const MAX_WOKEN_AGENTS = MAX_LEGS - 1;
 
