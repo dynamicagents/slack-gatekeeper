@@ -9,7 +9,7 @@ import {
   reactionInstanceId
 } from "@/workflows/reaction";
 import type { ReactionWorkflowParams } from "@/slack/types";
-import { registerAgent, updateAgent } from "@/db/models/agents";
+import { registerAgent } from "@/db/models/agents";
 import {
   setPublicUrl,
   setAllowedRemoteAgentDomains
@@ -37,23 +37,6 @@ const ENDPOINT = "https://agent.example.com/a2a";
  */
 const GRACE_STEP = "await collect signal";
 const LEG0_STEP = "sync:0";
-
-/**
- * The leg-0 read as it stood *before* an admin moved the deadline: the stale value
- * the loop sizes its wait from, and the one the cancel step must not decide on.
- *
- * Mocked rather than raced, because a wait cannot be held open from a test: a real
- * `waitForEvent` timeout never resumes (workerd cancels a worker that sits waiting
- * on it), and a forced one fires the instant the wait is entered. Making the read
- * *before* the wait the mocked one puts the admin's write inside it by
- * construction, with no timing to depend on.
- */
-function staleSnapshot(token: string, deadlineSeconds: number) {
-  return {
-    state: "working",
-    tasks: [{ token, pending: true, deadlineSeconds }]
-  };
-}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -519,96 +502,6 @@ describe("ReactionWorkflow", () => {
       expect(notices[0].text).toContain(short);
       // And the 🛑 stays while a sibling is still working.
       expect(captured.reactions).toHaveLength(0);
-    } finally {
-      await introspector.dispose();
-    }
-  });
-
-  it("spares a task whose deadline was raised while it was already waiting", async () => {
-    const captured = captureWithCancellableAgent();
-    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
-    try {
-      const p = makeParams();
-      const token = `rtok-${p.eventId}`.toLowerCase();
-      // Half an hour when the wait started...
-      await seedPendingTask(p.eventId, token, undefined, 30 * 60);
-
-      await introspector.modifyAll(async (m) => {
-        await m.mockStepResult(
-          { name: "evaluate:0" },
-          staleSnapshot(token, 30 * 60)
-        );
-        await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
-      });
-
-      // ...and two hours by the time it ends, because an admin raised it while
-      // the task was waiting on the old limit.
-      await updateAgent(token, { taskDeadlineSeconds: 2 * 60 * 60 });
-
-      await env.REACTION_WORKFLOW.create({
-        id: reactionInstanceId(p.eventId),
-        params: p
-      });
-      const [instance] = await introspector.get();
-
-      // The cancel step re-reads the ledger, so it decides against the limit in
-      // force now: nothing expired, and the task comes back as a survivor charged
-      // for the half hour it did spend.
-      expect(
-        await instance.waitForStepResult({ name: "cancel:0" })
-      ).toMatchObject({
-        expired: [],
-        survivors: [{ token, spent: 30 * 60 }]
-      });
-      expect((await getAgentTaskByToken(token))?.status).toBe("pending");
-      expect(captured.cancelCalls).toBe(0);
-      expect(captured.posts).toHaveLength(0);
-      // And the loop runs on into the next leg on the raised budget, with the 🛑
-      // still in place.
-      expect(
-        await instance.waitForStepResult({ name: "evaluate:1" })
-      ).toMatchObject({ state: "working" });
-      expect(captured.reactions).toHaveLength(0);
-    } finally {
-      await introspector.dispose();
-    }
-  });
-
-  it("cancels at a deadline lowered during the wait, naming the new limit", async () => {
-    const captured = captureWithCancellableAgent();
-    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
-    try {
-      const p = makeParams();
-      const token = `ltok-${p.eventId}`.toLowerCase();
-      // Two hours when the wait started — which is what made it that long...
-      await seedPendingTask(p.eventId, token, undefined, 2 * 60 * 60);
-
-      await introspector.modifyAll(async (m) => {
-        await m.mockStepResult(
-          { name: "evaluate:0" },
-          staleSnapshot(token, 2 * 60 * 60)
-        );
-        await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
-      });
-
-      // ...and half an hour by the time it ends.
-      await updateAgent(token, { taskDeadlineSeconds: 30 * 60 });
-
-      await env.REACTION_WORKFLOW.create({
-        id: reactionInstanceId(p.eventId),
-        params: p
-      });
-      const [instance] = await introspector.get();
-      await instance.waitForStatus("complete");
-
-      // Charged for the wait it really sat through, but held to the limit in
-      // force now — and told about that one, not the one it was waiting on.
-      expect((await getAgentTaskByToken(token))?.status).toBe("canceled");
-      const notice = captured.posts.find((x) => x.text.includes("limit"));
-      expect(notice?.text).toContain("30 minutes limit");
-      expect(notice?.text).not.toContain("2 hours");
     } finally {
       await introspector.dispose();
     }
