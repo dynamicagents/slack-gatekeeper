@@ -13,10 +13,12 @@ import {
   suspendForInput,
   isTerminalTaskStatus,
   getPendingAgentTasksByEventId,
+  getPendingAgentTasksWithDeadlinesByEventId,
   deleteAgentTask,
   sweepStaleAgentTasks,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
+import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
 import { useStorageReset } from "../../helpers/storage";
 
 useStorageReset();
@@ -220,6 +222,49 @@ describe("agent-tasks model", () => {
       );
       const rows = await getPendingAgentTasksByChannelAndTs("C9", "1800.2");
       expect(rows.map((r) => r.token)).toEqual(["keep"]);
+    });
+  });
+
+  describe("getPendingAgentTasksWithDeadlinesByEventId", () => {
+    it("pairs each non-terminal task with its own agent's leg budget", async () => {
+      // One agent on the gatekeeper default, one that was registered with its own.
+      await registerAgent({
+        name: "slowagent",
+        kind: "remote",
+        a2aEndpoint: "https://slow.example.com/a2a",
+        tenantId: "main",
+        notifyOn: "mention",
+        taskDeadlineSeconds: 7200,
+        workspaceId: 0
+      });
+      await createAgentTask(input("dl-live", { eventId: "EvDl" }));
+      await createAgentTask(input("dl-parked", { eventId: "EvDl" }));
+      await suspendForInput("dl-parked");
+      await createAgentTask(input("dl-done", { eventId: "EvDl" }));
+      await completeAgentTask("dl-done");
+      await createAgentTask(
+        input("dl-slow", { eventId: "EvDl", agentName: "slowagent" })
+      );
+
+      const rows = await getPendingAgentTasksWithDeadlinesByEventId("EvDl");
+      // Exactly the set the un-joined read returns — a parked task is still in
+      // flight, a completed one is not, and the join drops neither nor invents one.
+      const plain = await getPendingAgentTasksByEventId("EvDl");
+      expect(rows.map((r) => r.task.token).sort()).toEqual(
+        plain.map((r) => r.token).sort()
+      );
+      expect(rows.map((r) => r.task.token).sort()).toEqual([
+        "dl-live",
+        "dl-parked",
+        "dl-slow"
+      ]);
+
+      const budgets = new Map(
+        rows.map((r) => [r.task.token, r.deadlineSeconds])
+      );
+      expect(budgets.get("dl-live")).toBe(DEFAULT_TASK_DEADLINE_SECONDS);
+      expect(budgets.get("dl-parked")).toBe(DEFAULT_TASK_DEADLINE_SECONDS);
+      expect(budgets.get("dl-slow")).toBe(7200);
     });
   });
 
