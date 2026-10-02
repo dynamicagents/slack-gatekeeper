@@ -59,11 +59,19 @@ const GRACE_SECONDS = Math.min(
  * Ceiling on how many times the budget loop may go round. A leg is a real state
  * transition, not a slice of time — a parked task waits the full HITL TTL in one
  * leg, woken early by the resume signal — so at roughly two legs per ask/answer
- * round-trip this is budget for ~50 of them, which should be extremely rare to
- * reach. The true bound is the 30-day task sweep: once those rows are gone,
- * `evaluateEvent` reports `drained` and the loop exits on its own.
+ * round-trip this is budget for ~50 of them, or one leg per distinct per-agent
+ * expiry in a fan-out, either of which should be extremely rare to reach. The true
+ * bound is the 30-day task sweep: once those rows are gone, `evaluateEvent`
+ * reports `drained` and the loop exits on its own.
+ *
+ * Reaching it is safe rather than an abandonment. Up to 100 distinct-deadline
+ * expiries (or ~50 human round-trips) are handled properly, each stopped at its
+ * own agent's deadline with the notice that names it; anything still pending at
+ * the cap is drained by {@link drainAtCap} — canceled for real, told the truth
+ * about why — before the 🛑 comes off. So the reaction never disappears from a
+ * message whose agents are still running.
  */
-const MAX_LEGS = 100;
+export const MAX_LEGS = 100;
 
 /**
  * Backstop notice: an accepted turn whose delivery callback we saw explicitly
@@ -102,6 +110,16 @@ export function deadlineLabel(seconds: number): string {
 /** Notice posted when a task burned its whole processing budget without replying. */
 function taskTimedOutText(agentName: string, deadlineSeconds: number): string {
   return `⏱️ *Agent ${agentName}* didn't reply within the ${deadlineLabel(deadlineSeconds)} limit, so the gatekeeper stopped it. Any later reply will be discarded.`;
+}
+
+/**
+ * Notice posted for a task the leg cap stopped. Deliberately *not* the timeout
+ * notice: no agent deadline ran out here — the gatekeeper ran out of legs to
+ * watch the fan-out in — and "didn't reply within the N limit" would be a lie
+ * about an agent that still had budget left.
+ */
+function cappedOutText(agentName: string): string {
+  return `⚠️ *Agent ${agentName}* was stopped because this message's agent activity exceeded the gatekeeper's safety cap of ${MAX_LEGS} legs. Any later reply will be discarded.`;
 }
 
 /**
@@ -288,6 +306,57 @@ async function cancelPendingTasks(
 }
 
 /**
+ * Last act before the 🛑 comes off at the leg cap: stop everything still
+ * *pending* for this event, so the reaction is never taken off a message whose
+ * agents are still running. Reached only when {@link MAX_LEGS} legs were not
+ * enough, which takes an extraordinary fan-out (one leg per distinct deadline) or
+ * ~50 human round-trips.
+ *
+ * Each stopped task is told the truth — the cap stopped it, not its own deadline,
+ * which may still have hours left on it.
+ *
+ * `awaiting-input` rows are left alone, as everywhere else in this file: that
+ * stretch is human time, bounded by the prompt's own TTL, and an answer given
+ * later still posts its reply. The cap gives up *watching* those tasks, not on them.
+ *
+ * The ledger is read at execution time, like every other decision here. Best-effort
+ * by contract: never throws, so the reaction still comes off.
+ */
+async function drainAtCap(eventId: string): Promise<void> {
+  try {
+    const rows = await getPendingAgentTasksByEventId(eventId);
+    for (const row of rows) {
+      if (row.status !== "pending") continue;
+      try {
+        const { agentName } = await cancelTaskRow(row, {
+          reason: "leg-cap",
+          actorUserId: null
+        });
+        // App branding (null) — a gatekeeper notice, not an agent reply.
+        await postReply(
+          row.channelId,
+          row.replyThreadTs,
+          cappedOutText(agentName),
+          null,
+          null
+        );
+      } catch (err) {
+        console.error("[reaction] failed to cancel task at the leg cap", {
+          agent: row.agentName,
+          token: row.token,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[reaction] failed to load tasks for the leg-cap drain", {
+      eventId,
+      error: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
+
+/**
  * Durable owner of the 🛑 reaction's lifetime and of each task's processing
  * budget. The webhook handler adds the reaction inline (so it appears immediately,
  * without waiting for a workflow cold start); this workflow runs alongside — never
@@ -315,6 +384,9 @@ async function cancelPendingTasks(
  *      the task run on with what the new limit leaves it, and a lowering takes
  *      effect at the next wake at the latest — the wait already running may be
  *      longer than the new limit, which costs lateness, never a wrong cancel.
+ *
+ *      If the loop ever runs out of legs, the fan-out is drained rather than
+ *      abandoned; see {@link MAX_LEGS}.
  *
  * Two things make this cheap and robust. Cloudflare bills Workflows on CPU, not
  * wall-clock, and a `waiting` instance holds no concurrency slot — so an hour of
@@ -457,6 +529,9 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
           eventId: p.eventId,
           channelId: p.channelId
         });
+        // The 🛑 must not come off work that is still running, so stop it for real
+        // first — and say that the cap, not any agent's deadline, is what stopped it.
+        await step.do("drain-at-cap", () => drainAtCap(p.eventId));
       }
 
       await step.do("remove-reaction", () =>

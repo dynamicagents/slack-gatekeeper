@@ -5,6 +5,7 @@ import { AgentCard, Task, TaskState } from "@a2a-js/sdk";
 import {
   STOP_REACTION,
   REACTION_SYNC_EVENT,
+  MAX_LEGS,
   deadlineLabel,
   reactionInstanceId
 } from "@/workflows/reaction";
@@ -613,6 +614,107 @@ describe("ReactionWorkflow", () => {
       await introspector.dispose();
     }
   });
+
+  it("drains what is still pending at the leg cap before letting the 🛑 go", async () => {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      const working = `captok-${p.eventId}`.toLowerCase();
+      const parked = `capark-${p.eventId}`.toLowerCase();
+      await seedPendingTask(p.eventId, working);
+      await seedPendingTask(p.eventId, parked);
+      expect(await suspendForInput(parked)).toBe(true);
+
+      // One signal for the grace wait and one per leg. Every wake is a real leg
+      // boundary, so no budget is ever spent and nothing is ever expired: the loop
+      // runs out of legs with a task still working, which is the cap-hit the
+      // reviewer's 101-deadline fan-out reaches the expensive way.
+      await introspector.modifyAll(async (m) => {
+        for (let i = 0; i <= MAX_LEGS; i++) {
+          await m.mockEvent({ type: REACTION_SYNC_EVENT, payload: {} });
+        }
+      });
+
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      // The task is stopped for real rather than left running under a 🛑 that
+      // just vanished.
+      expect((await getAgentTaskByToken(working))?.status).toBe("canceled");
+      expect(captured.cancelCalls).toBeGreaterThan(0);
+      const notice = captured.posts.find((x) => x.text.includes("safety cap"));
+      expect(notice?.text).toContain(working);
+      expect(notice?.text).toContain("discarded");
+      // ...and the notice doesn't claim a deadline ran out: this agent still had
+      // its whole hour.
+      expect(captured.posts.some((x) => x.text.includes("limit"))).toBe(false);
+      // A task parked on a human prompt is left alone, as everywhere else: its
+      // answer still posts.
+      expect((await getAgentTaskByToken(parked))?.status).toBe(
+        "awaiting-input"
+      );
+      expect(captured.reactions.map((c) => c.method)).toEqual([
+        "reactions.remove"
+      ]);
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("stops every agent of a fan-out wider than the leg cap", async () => {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      // The reviewer's case, at its exact boundary: one more distinct deadline
+      // than there are legs to spend them in. A second apart each, so every leg
+      // expires exactly one agent and the fan-out needs every leg it has.
+      const tokens: string[] = [];
+      for (let k = 1; k <= MAX_LEGS + 1; k++) {
+        const token = `fan${k}-${p.eventId}`.toLowerCase();
+        tokens.push(token);
+        await seedPendingTask(p.eventId, token, undefined, 360 + k);
+      }
+      const last = tokens[tokens.length - 1];
+
+      await introspector.modifyAll(async (m) => {
+        await m.forceEventTimeout({ name: GRACE_STEP });
+        for (let leg = 0; leg < MAX_LEGS; leg++) {
+          await m.forceEventTimeout({ name: `sync:${leg}` });
+        }
+      });
+
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      // The hundred the loop had legs for were each stopped at their own
+      // deadline, and told so.
+      const timedOut = captured.posts.filter((x) => x.text.includes("limit"));
+      expect(timedOut).toHaveLength(MAX_LEGS);
+      // The one past the cap is stopped too — the whole point — but by the cap,
+      // which is what its notice says.
+      const notice = captured.posts.find((x) => x.text.includes("safety cap"));
+      expect(notice?.text).toContain(last);
+      for (const token of tokens) {
+        expect((await getAgentTaskByToken(token))?.status).toBe("canceled");
+      }
+      // Only now does the 🛑 come off: nothing is still running under it.
+      expect(captured.reactions.map((c) => c.method)).toEqual([
+        "reactions.remove"
+      ]);
+    } finally {
+      await introspector.dispose();
+    }
+  }, 120_000);
 
   it("does not spend the budget while a task is parked on a human prompt", async () => {
     const captured = captureWithCancellableAgent();
