@@ -1101,7 +1101,9 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
               "gatekeeper stops the task, in seconds. Omit to leave it " +
               "unchanged; pass 3600 to put it back to the 1 hour default. Any " +
               "positive whole number; there is no upper limit, but anything " +
-              "under 360 is in practice enforced at about 6 minutes."
+              "under 360 is in practice enforced at about 6 minutes. The new " +
+              "value applies to the agent's next turns: a turn already running " +
+              "keeps the limit it started with."
           )
       }),
       execute: (args) => agentsUpdate(deps, args)

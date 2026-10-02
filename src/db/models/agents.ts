@@ -64,6 +64,10 @@ export interface UpdateAgentPatch {
    * New leg budget in seconds. Absent leaves the stored value alone, like every
    * other field here; there is no way to clear it, because "no deadline" is not a
    * state an agent can be in. Resetting means passing the default explicitly.
+   *
+   * The new value applies to tasks started after the change. A task already being
+   * watched keeps the deadline it started with — the ReactionWorkflow reads an
+   * agent's budget once, when it first sees the task.
    */
   taskDeadlineSeconds?: number;
   cardSigningJku?: string | null;

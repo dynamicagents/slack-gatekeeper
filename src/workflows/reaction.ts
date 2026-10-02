@@ -257,14 +257,15 @@ async function cancelPendingTasks(
  *      the user learns about a broken agent in minutes, not at the hour mark.
  *
  *   2. A loop that owns *a budget per task*, because each task is held to its own
- *      agent's `task_deadline_seconds`. Each pass re-reads the ledger (deadlines
- *      included, so an admin's change takes effect) and waits for whatever could
- *      change next: the *shortest* remaining budget while agents work, or the HITL
- *      TTL while one is parked on a human prompt. A wake by signal is a real leg
- *      boundary and buys every task a fresh leg of **its own agent's** deadline; a
- *      wake by timeout while working means at least one budget is spent, and only
- *      the tasks whose own budget is spent are stopped — siblings with time left
- *      run on into the next leg.
+ *      agent's `task_deadline_seconds` as that read when the task was first seen —
+ *      changing an agent's deadline re-times its *next* tasks, never one already
+ *      being watched here. Each pass re-reads the ledger and waits for whatever
+ *      could change next: the *shortest* remaining budget while agents work, or
+ *      the HITL TTL while one is parked on a human prompt. A wake by signal is a
+ *      real leg boundary and buys every task a fresh leg of **its own agent's**
+ *      deadline; a wake by timeout while working means at least one budget is
+ *      spent, and only the tasks whose own budget is spent are stopped — siblings
+ *      with time left run on into the next leg.
  *
  *      One leg per distinct expiry is also what bounds how wide a fan-out this
  *      loop can watch to the end, so how many agents a message may wake is
@@ -321,20 +322,19 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
         if (snap.state === "drained") break;
 
         // Reconcile the map against this snapshot. First sight of a task starts its
-        // clock; re-reading each deadline every pass is what lets an admin's change
-        // take effect, bounded by what is left of the leg. Tasks that have gone
-        // terminal drop out, so a token can never outlive its row.
+        // clock, on its agent's deadline as read *here*; from then on the map is
+        // what the task is held to, so an admin changing the deadline later does
+        // not re-time a task already being watched — the new value applies to new
+        // tasks only. Tasks that have gone terminal drop out, so a token can never
+        // outlive its row.
         for (const t of snap.tasks) {
-          const seen = remaining.get(t.token);
-          if (seen === undefined) {
+          if (!remaining.has(t.token)) {
             remaining.set(
               t.token,
               leg === 0 && graceTimedOut
                 ? remainingAfterGrace(t.deadlineSeconds)
                 : t.deadlineSeconds
             );
-          } else {
-            remaining.set(t.token, Math.min(seen, t.deadlineSeconds));
           }
         }
         for (const token of [...remaining.keys()]) {
