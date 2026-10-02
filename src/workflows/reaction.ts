@@ -43,7 +43,9 @@ export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
 /**
  * The grace is spent *inside* the first leg, so it can never outlast the budget
  * it is carved from — and what remains afterwards must still be a legal
- * `waitForEvent` timeout, which rejects anything below one second.
+ * `waitForEvent` timeout, which rejects anything below one second. That is only
+ * the lower edge of legal: the upper one is {@link MAX_WAIT_SECONDS}, held by
+ * {@link clampWaitSeconds} where the per-leg wait is computed.
  *
  * The grace is still sized against the *default* because it is one wait shared by
  * the whole fan-out, and the per-agent deadlines are not known until the first
@@ -61,6 +63,40 @@ const GRACE_SECONDS = Math.min(
 /** What is left of one task's budget once the shared grace has been spent in it. */
 function remainingAfterGrace(deadlineSeconds: number): number {
   return Math.max(1, deadlineSeconds - GRACE_SECONDS);
+}
+
+/**
+ * Longest timeout `waitForEvent` will take. The platform accepts between one
+ * second and 365 days
+ * (https://developers.cloudflare.com/workflows/build/events-and-parameters/),
+ * while nothing bounds an agent's `task_deadline_seconds` — an admin may set a
+ * budget longer than a year, deliberately.
+ *
+ * Handing such a value to the wait throws *on entry*, which is the dangerous part:
+ * the loop's catch reads a throw as "the wait elapsed", so it would decrement a
+ * budget no time was spent against, cancel the task, and tell the user it ran past
+ * a limit it never reached.
+ */
+const MAX_WAIT_SECONDS = 365 * 24 * 60 * 60;
+
+/**
+ * One leg's timeout, held inside what `waitForEvent` will accept: at least a
+ * second, at most {@link MAX_WAIT_SECONDS}. Both edges are reachable from
+ * configuration alone — a deadline at or under the retry grace leaves nothing
+ * positive to wait, a multi-year deadline overshoots the platform cap — and an
+ * out-of-range value throws where the loop cannot tell it apart from the wait
+ * having elapsed.
+ *
+ * Capping the wait does not cap the deadline: a budget above the cap is served in
+ * slices. The loop wakes at the cap with budget still in the map, re-reads the
+ * ledger and waits again, so the task is stopped at its own full deadline — a
+ * year's worth of legs later.
+ *
+ * Exported for the unit test, which is the only way to observe the upper edge:
+ * driving it for real would mean waiting out a year.
+ */
+export function clampWaitSeconds(seconds: number): number {
+  return Math.min(MAX_WAIT_SECONDS, Math.max(1, seconds));
 }
 
 /**
@@ -265,7 +301,9 @@ async function cancelPendingTasks(
  *      real leg boundary and buys every task a fresh leg of **its own agent's**
  *      deadline; a wake by timeout while working means at least one budget is
  *      spent, and only the tasks whose own budget is spent are stopped — siblings
- *      with time left run on into the next leg.
+ *      with time left run on into the next leg. Each wait is held to a legal
+ *      `waitForEvent` timeout ({@link clampWaitSeconds}), so a budget longer than
+ *      the platform's maximum is served in slices rather than refused.
  *
  *      One leg per distinct expiry is also what bounds how wide a fan-out this
  *      loop can watch to the end, so how many agents a message may wake is
@@ -344,17 +382,19 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
 
         // Parked tasks spend human time, not budget: wait out the prompt's own
         // TTL instead, and let the resume signal cut that short. While working, the
-        // next thing that can happen is the *shortest* remaining budget expiring.
+        // next thing that can happen is the *shortest* remaining budget expiring —
+        // or, for a budget longer than a legal timeout, this leg's slice of it.
         const pending = snap.tasks.filter((t) => t.pending);
         const minRemaining = pending.reduce(
           (min, t) =>
             Math.min(min, remaining.get(t.token) ?? t.deadlineSeconds),
           Number.POSITIVE_INFINITY
         );
-        const waitSeconds =
+        const waitSeconds = clampWaitSeconds(
           snap.state === "parked" || !Number.isFinite(minRemaining)
             ? HITL_REQUEST_TTL_SECONDS
-            : Math.max(1, minRemaining);
+            : minRemaining
+        );
 
         let timedOut = false;
         try {
@@ -369,7 +409,9 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
         if (timedOut && snap.state === "working") {
           // Only the tasks whose own budget is spent. Siblings with more to run
           // keep going into the next leg, which waits out whatever is left of the
-          // shortest of them.
+          // shortest of them — and a budget that outran the leg's legal maximum is
+          // such a sibling of itself: nothing expired, so the next leg serves the
+          // next slice.
           const expired: ExpiredTask[] = pending
             .filter((t) => (remaining.get(t.token) ?? 0) <= waitSeconds)
             .map((t) => ({

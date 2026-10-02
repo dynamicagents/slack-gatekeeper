@@ -5,6 +5,7 @@ import { AgentCard, Task, TaskState } from "@a2a-js/sdk";
 import {
   STOP_REACTION,
   REACTION_SYNC_EVENT,
+  clampWaitSeconds,
   deadlineLabel,
   reactionInstanceId
 } from "@/workflows/reaction";
@@ -560,5 +561,28 @@ describe("deadlineLabel", () => {
     expect(deadlineLabel(1)).toBe("1 second");
     expect(deadlineLabel(90)).toBe("90 seconds");
     expect(deadlineLabel(3601)).toBe("3601 seconds");
+  });
+});
+
+describe("clampWaitSeconds", () => {
+  const DAY = 24 * 60 * 60;
+
+  it("holds a wait inside the timeouts waitForEvent accepts", () => {
+    // 365 days is the platform maximum, and an admin may set a longer deadline:
+    // passing it through would throw on entry to the wait, which the loop would
+    // read as the wait having elapsed. Sliced instead — the task still stops at
+    // its own full deadline, one leg per slice.
+    expect(clampWaitSeconds(400 * DAY)).toBe(365 * DAY);
+    // The lower edge: a deadline at or under the retry grace leaves nothing
+    // positive to wait, and zero or less is just as illegal as a year too long.
+    expect(clampWaitSeconds(0)).toBe(1);
+    expect(clampWaitSeconds(-300)).toBe(1);
+  });
+
+  it("leaves every ordinary budget exactly as it is", () => {
+    expect(clampWaitSeconds(3600)).toBe(3600);
+    expect(clampWaitSeconds(1)).toBe(1);
+    expect(clampWaitSeconds(7 * DAY)).toBe(7 * DAY); // the HITL TTL wait
+    expect(clampWaitSeconds(365 * DAY)).toBe(365 * DAY); // the edge itself is legal
   });
 });
