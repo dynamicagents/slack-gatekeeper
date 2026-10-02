@@ -552,4 +552,13 @@ describe("deadlineLabel", () => {
     expect(deadlineLabel(60)).toBe("1 minute");
     expect(deadlineLabel(86400)).toBe("24 hours");
   });
+
+  it("keeps the seconds of any limit that is not a whole minute", () => {
+    // An admin may set any positive whole number of seconds, and the notice has
+    // to name the one that was set: rounding these into minutes reported limits
+    // that never existed ("0 minutes", "2 minutes").
+    expect(deadlineLabel(1)).toBe("1 second");
+    expect(deadlineLabel(90)).toBe("90 seconds");
+    expect(deadlineLabel(3601)).toBe("3601 seconds");
+  });
 });

@@ -83,14 +83,24 @@ function rejectedDeliveryText(agentName: string, reason: string): string {
  * A processing budget as the user should read it, derived from whichever budget
  * was actually enforced rather than written out — so the notice below always
  * names the number the task was really held to, not a constant beside it.
+ *
+ * Only the units that divide the value exactly are used: an admin may set any
+ * positive whole number of seconds, and rounding one of those into minutes would
+ * put a number in the notice that was never the limit (`1` read back as
+ * "0 minutes", `90` as "2 minutes"). Falling through to seconds is sometimes
+ * ugly — "3601 seconds" — but it is the number the admin chose, and the notice's
+ * only job is to name the limit that was enforced.
  */
 export function deadlineLabel(seconds: number): string {
   if (seconds % 3600 === 0) {
     const hours = seconds / 3600;
     return `${hours} hour${hours === 1 ? "" : "s"}`;
   }
-  const minutes = Math.round(seconds / 60);
-  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
 /** Notice posted when a task burned its whole processing budget without replying. */
