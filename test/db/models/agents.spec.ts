@@ -46,15 +46,17 @@ describe("agents", () => {
     // `NOT NULL` with no default, plus a CHECK — "required" is the database's
     // rule rather than every insert remembering. Without the CHECK, `''` would
     // satisfy NOT NULL and become the sentinel this column exists to avoid.
+    // Every other required column is supplied, so the rejection can only be
+    // about the tenant this test is named for.
     await expect(
       env.DB.prepare(
-        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, workspace_id) VALUES ('no-tenant', 'remote', 1, 'mention', 'https://example.com/x', 0)"
+        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, task_deadline_seconds, workspace_id) VALUES ('no-tenant', 'remote', 1, 'mention', 'https://example.com/x', 3600, 0)"
       ).run()
     ).rejects.toThrow();
 
     await expect(
       env.DB.prepare(
-        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('empty-tenant', 'remote', 1, 'mention', 'https://example.com/x', '', 0)"
+        "INSERT INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('empty-tenant', 'remote', 1, 'mention', 'https://example.com/x', '', 3600, 0)"
       ).run()
     ).rejects.toThrow();
   });
@@ -69,7 +71,7 @@ describe("agents", () => {
   it("resolves an agent for a mapped channel", async () => {
     // Insert a custom agent directly, then map it to a channel.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-x', 'remote', 1, 'mention', 'https://example.com/custom-x', 'main', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('custom-x', 'remote', 1, 'mention', 'https://example.com/custom-x', 'main', 3600, 0)"
     ).run();
     await env.DB.prepare(
       "INSERT INTO agent_channels (channel_id, agent_name) VALUES ('C_MAP', 'custom-x')"
@@ -161,7 +163,7 @@ describe("agentRenderIdentity", () => {
 
   it("uses the row as-is for a custom agent (its identity is not workspace-scoped)", async () => {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, display_name, icon_url, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-y', 'remote', 'Custom Y', 'https://gw.example.com/icons/0/custom-y/cc.jpg', 1, 'mention', 'https://example.com/y', 'main', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, display_name, icon_url, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('custom-y', 'remote', 'Custom Y', 'https://gw.example.com/icons/0/custom-y/cc.jpg', 1, 'mention', 'https://example.com/y', 'main', 3600, 0)"
     ).run();
     const agent = await getAgent("custom-y");
     expect(await agentRenderIdentity(agent!, "C_ANY")).toEqual({
@@ -172,7 +174,7 @@ describe("agentRenderIdentity", () => {
 
   it("falls back to the machine name when an agent has no display name", async () => {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('custom-z', 'remote', 1, 'mention', 'https://example.com/z', 'main', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('custom-z', 'remote', 1, 'mention', 'https://example.com/z', 'main', 3600, 0)"
     ).run();
     const agent = await getAgent("custom-z");
     expect(await agentRenderIdentity(agent!, "C_ANY")).toEqual({

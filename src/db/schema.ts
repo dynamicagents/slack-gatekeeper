@@ -138,6 +138,20 @@ export const agents = sqliteTable(
     notifyOn: text("notify_on", {
       enum: ["mention", "channel_messages"]
     }).notNull(),
+    // How long THIS agent gets to finish one processing leg before the
+    // ReactionWorkflow cancels its task and says so in the channel. Required: every
+    // row carries a concrete deadline, so nothing downstream has to decide what an
+    // absent one means — there is no "no limit".
+    //
+    // Required and deliberately **without** a default, for the same reason
+    // `tenantId` has none: a database default would make the column optional at
+    // every insert forever, and it would put a second copy of the number somewhere
+    // nobody thinks to change. The one authoritative default is
+    // `DEFAULT_TASK_DEADLINE_SECONDS` in `src/config.ts`, which `registerAgent`
+    // passes explicitly on every insert. With nothing to fall back on, a write
+    // path that forgets this column fails loudly instead of quietly storing an
+    // hour. Rows that predate the column were backfilled once, by 0021's rebuild.
+    taskDeadlineSeconds: integer("task_deadline_seconds").notNull(),
     workspaceId: integer("workspace_id")
       .notNull()
       .references(() => workspaces.id),
