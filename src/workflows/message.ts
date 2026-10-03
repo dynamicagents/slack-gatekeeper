@@ -144,7 +144,8 @@ async function runAgentTask(
  * *last* pending task of the fan-out is terminal — `collectIfEventDrained` at the
  * end here (and in every terminal delivery) clears it only when nothing is left.
  * If an agent never delivers, the ReactionWorkflow cancels it once its processing
- * budget (`TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
+ * budget (its agent's `task_deadline_seconds`, which defaults to
+ * `DEFAULT_TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
  *
  * Steps: `resolve` → one `record-tasks` (all rows up front) → per agent
  * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) → `collect`.

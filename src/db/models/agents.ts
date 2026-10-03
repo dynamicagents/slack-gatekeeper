@@ -4,6 +4,7 @@ import * as schema from "../schema";
 import { getWorkspaceByAdminChannel } from "./workspaces";
 import { getAdminDisplayName, getAdminIconUrl } from "./workspace-configs";
 import { sanitizeDisplayName } from "@/util/slack-text";
+import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
 /** Where an agent runs: `local` in-process, `remote` over HTTP. */
@@ -35,6 +36,14 @@ export interface RegisterAgentInput {
   tenantId: string;
   /** Required (no default): when the agent is woken — mention vs every message. */
   notifyOn: NotifyOn;
+  /**
+   * This agent's processing-leg budget in seconds. Optional *here* only so the
+   * fallback lives in exactly one place: omitted, the row is written with
+   * {@link DEFAULT_TASK_DEADLINE_SECONDS}. The column itself has no database
+   * default, and the stored value is never null — an agent always has a limit —
+   * so no reader has to coalesce.
+   */
+  taskDeadlineSeconds?: number;
   workspaceId: number;
   /** Pinned AgentCard signing identity (custom agents; verified at registration). */
   cardSigningJku?: string | null;
@@ -51,6 +60,16 @@ export interface UpdateAgentPatch {
   tenantId?: string;
   enabled?: boolean;
   notifyOn?: NotifyOn;
+  /**
+   * New leg budget in seconds. Absent leaves the stored value alone, like every
+   * other field here; there is no way to clear it, because "no deadline" is not a
+   * state an agent can be in. Resetting means passing the default explicitly.
+   *
+   * The new value applies to tasks started after the change. A task already being
+   * watched keeps the deadline it started with — the ReactionWorkflow reads an
+   * agent's budget once, when it first sees the task.
+   */
+  taskDeadlineSeconds?: number;
   cardSigningJku?: string | null;
   cardSigningKid?: string | null;
 }
@@ -84,6 +103,12 @@ export async function registerAgent(
       a2aEndpoint: input.a2aEndpoint,
       tenantId: input.tenantId,
       notifyOn: input.notifyOn,
+      // Always written explicitly: the column has no database default, so the
+      // config constant is the one place the default is decided — and a write
+      // path that forgets it fails on NOT NULL rather than storing an hour nobody
+      // chose.
+      taskDeadlineSeconds:
+        input.taskDeadlineSeconds ?? DEFAULT_TASK_DEADLINE_SECONDS,
       workspaceId: input.workspaceId,
       cardSigningJku: input.cardSigningJku ?? null,
       cardSigningKid: input.cardSigningKid ?? null
@@ -280,6 +305,9 @@ export async function updateAgent(
       ...(patch.tenantId !== undefined ? { tenantId: patch.tenantId } : {}),
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.notifyOn !== undefined ? { notifyOn: patch.notifyOn } : {}),
+      ...(patch.taskDeadlineSeconds !== undefined
+        ? { taskDeadlineSeconds: patch.taskDeadlineSeconds }
+        : {}),
       ...(patch.cardSigningJku !== undefined
         ? { cardSigningJku: patch.cardSigningJku }
         : {}),

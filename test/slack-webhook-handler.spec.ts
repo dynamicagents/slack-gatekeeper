@@ -5,6 +5,7 @@ import {
   _resetAnchorCacheForTest,
   _resetPublicUrlCacheForTest
 } from "../src/slack-webhook-handler";
+import type { MessageWorkflowParams } from "../src/slack-webhook-handler";
 import { slackHeaders } from "./helpers/slack";
 import {
   getConfig,
@@ -12,7 +13,7 @@ import {
   SystemConfigKeys
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
-import { STOP_REACTION } from "@/workflows/reaction";
+import { MAX_WOKEN_AGENTS, STOP_REACTION } from "@/workflows/reaction";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
 import { useStorageReset } from "./helpers/storage";
@@ -43,11 +44,33 @@ function spyWorkflow(
     .mockResolvedValue({} as WorkflowInstance);
 }
 
+// Like `spyWorkflow`, but emulating the platform's dedupe: the first create() for
+// an instance id resolves, and a second with the same id rejects the way Workflows
+// does. That rejection is the only thing telling a Slack redelivery of an
+// `event_id` apart from its first delivery, so a test that posts the same event
+// twice has to see it — a plain `mockResolvedValue` makes every retry look like a
+// first delivery and hides whatever the handler does once per created instance.
+// Returns the spy alongside the ids actually created, so a test can tell "called
+// twice" from "created once".
+function spyDedupingWorkflow(binding: Parameters<typeof spyWorkflow>[0]) {
+  const instances: string[] = [];
+  const create = spyWorkflow(binding);
+  create.mockImplementation(async (options?: { id?: string }) => {
+    const id = options?.id ?? "";
+    if (instances.includes(id)) {
+      throw new Error(`instance with id ${id} already exists`);
+    }
+    instances.push(id);
+    return {} as WorkflowInstance;
+  });
+  return { create, instances };
+}
+
 // A channel_messages agent on C1 so the handler's target gate resolves ≥1 agent
 // and still fires the message/reaction workflows (app_mention, edits, plain msgs).
 beforeEach(async () => {
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('wf-c1', 'remote', 1, 'channel_messages', 'https://example.com/wf-c1', 'main', 0)"
+    "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('wf-c1', 'remote', 1, 'channel_messages', 'https://example.com/wf-c1', 'main', 3600, 0)"
   ).run();
   await env.DB.prepare(
     "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'wf-c1')"
@@ -184,6 +207,120 @@ describe("message events", () => {
     const res = await post(body);
     expect(res.status).toBe(200);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fan-out limit — at most MAX_WOKEN_AGENTS agents per message
+// ---------------------------------------------------------------------------
+
+describe("fan-out limit", () => {
+  // One more channel_messages agent on a channel than a message may wake.
+  const seeded = Array.from(
+    { length: MAX_WOKEN_AGENTS + 1 },
+    (_, i) => `fan-${String(i).padStart(3, "0")}`
+  );
+
+  // Seeded in reverse name order, so row order and name order disagree: a clamp
+  // that kept whatever `resolveTargets` happened to read first would keep a
+  // different set than the one asserted below.
+  beforeEach(async () => {
+    const reversed = [...seeded].reverse();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ${reversed
+        .map(
+          (name) =>
+            `('${name}','remote',1,'channel_messages','https://example.com/${name}','main',3600,0)`
+        )
+        .join(",")}`
+    ).run();
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ${reversed
+        .map((name) => `('C_WIDE','${name}')`)
+        .join(",")}`
+    ).run();
+  });
+
+  const wideMessage = (eventId: string) =>
+    JSON.stringify({
+      type: "event_callback",
+      event_id: eventId,
+      team_id: "T1",
+      event: {
+        type: "message",
+        channel_type: "channel",
+        user: "U1",
+        text: "everyone take a look at this",
+        channel: "C_WIDE",
+        ts: "1700000000.000700"
+      }
+    });
+
+  const wokenBy = (
+    create: ReturnType<typeof spyWorkflow>,
+    nth: number
+  ): string[] => {
+    const call = create.mock.calls[nth]?.[0] as
+      { params: MessageWorkflowParams } | undefined;
+    return (call?.params.targets ?? []).map((t) => t.agent.name);
+  };
+
+  it("wakes at most MAX_WOKEN_AGENTS agents, says so, and skips the rest", async () => {
+    // Deduping spies: the second delivery below is a Slack retry of the same
+    // `event_id`, and only the platform's duplicate-instance error tells it apart
+    // from a first delivery.
+    const message = spyDedupingWorkflow("MESSAGE_WORKFLOW");
+    const reaction = spyDedupingWorkflow("REACTION_WORKFLOW");
+    const create = message.create;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const posts: string[] = [];
+    stubSlack((method, body) => {
+      if (method === "chat.postMessage") posts.push(body.get("text") ?? "");
+      return { ok: true, ts: "1700000000.000701" };
+    });
+
+    const res = await post(wideMessage("EvWide"));
+    expect(res.status).toBe(200);
+
+    // Exactly one fan-out, 99 agents wide — the whole resolved set less the one
+    // that didn't fit. Nothing is dispatched for the extra: it never reaches the
+    // workflow that would dispatch it.
+    expect(create).toHaveBeenCalledOnce();
+    const woken = wokenBy(create, 0);
+    expect(woken).toHaveLength(MAX_WOKEN_AGENTS);
+    expect([...woken].sort()).toEqual(seeded.slice(0, MAX_WOKEN_AGENTS));
+    expect(woken).not.toContain(seeded[seeded.length - 1]);
+
+    // Never silent in either direction: a log line for the operator...
+    expect(
+      err.mock.calls.some(([msg]) =>
+        String(msg).includes("fan-out over the woken-agent limit")
+      )
+    ).toBe(true);
+    // ...and one line in the thread for the humans, naming the limit and that
+    // the rest were skipped.
+    const noticesOf = (texts: string[]) =>
+      texts.filter((t) => t.includes("gatekeeper's limit"));
+    const notice = noticesOf(posts)[0];
+    expect(notice).toContain(`${seeded.length} agents`);
+    expect(notice).toContain(`limit of ${MAX_WOKEN_AGENTS} per message`);
+    expect(notice).toContain("the other 1 was skipped");
+
+    // A Slack retry of the same delivery must wake the same 99: the dedupe
+    // anchors derived from `event_id` would otherwise cover a different fan-out
+    // than the first delivery's.
+    await post(wideMessage("EvWide"));
+    expect(wokenBy(create, 1)).toEqual(woken);
+
+    // Both deliveries reached `create`, and both workflows were created exactly
+    // once — the retry's create is the duplicate the platform rejects.
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(message.instances).toEqual(["EvWide"]);
+    expect(reaction.instances).toEqual(["react-EvWide"]);
+    // So the warning is in the thread once. It is user-visible, and the fan-out it
+    // warns about happened once: posting it per delivery rather than per created
+    // instance repeated it for every Slack retry.
+    expect(noticesOf(posts)).toHaveLength(1);
   });
 });
 
@@ -692,7 +829,7 @@ describe("lifecycle events", () => {
   it("wakes a mention-only agent when its name appears in prevText of a message_deleted", async () => {
     // Register a mention-only agent named "del-agent" on channel C1.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('del-agent', 'remote', 1, 'mention', 'https://example.com/del-agent', 'main', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('del-agent', 'remote', 1, 'mention', 'https://example.com/del-agent', 'main', 3600, 0)"
     ).run();
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'del-agent')"
@@ -728,7 +865,7 @@ describe("lifecycle events", () => {
   it("does not wake a mention-only agent when its name appears in neither text nor prevText of a message_deleted", async () => {
     // Register a mention-only agent named "quiet-agent" on channel C1.
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id) VALUES ('quiet-agent', 'remote', 1, 'mention', 'https://example.com/quiet-agent', 'main', 0)"
+      "INSERT OR IGNORE INTO agents (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id) VALUES ('quiet-agent', 'remote', 1, 'mention', 'https://example.com/quiet-agent', 'main', 3600, 0)"
     ).run();
     await env.DB.prepare(
       "INSERT OR IGNORE INTO agent_channels (channel_id, agent_name) VALUES ('C1', 'quiet-agent')"

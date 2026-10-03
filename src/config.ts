@@ -135,17 +135,26 @@ export const HITL_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60;
  * itself and tells the user. The 🛑 stop reaction lives for exactly this long, so
  * the human keeps a working stop control for the whole run.
  *
+ * **The default only, and the only place the number is written.** The budget is
+ * per agent: every `agents` row carries its own `task_deadline_seconds`
+ * (required, and with no database default), and this is the value
+ * `registerAgent` writes when a caller registers an agent without naming one.
+ * Changing it here is the whole change — the schema holds no default, so there
+ * is nothing to update in the database, and the only `3600` in SQL is
+ * migration 0021's one-time backfill of the rows that predate the column.
+ *
  * A *leg*, not a task lifetime. The clock runs only while a task is `pending`;
  * parking on a human-in-the-loop prompt stops it (that stretch is human time,
  * bounded by {@link HITL_REQUEST_TTL_SECONDS} instead), and a human answer starts
- * a fresh hour. Charging a slow human to the agent's budget would kill approvals
- * left over a weekend, which is the case that TTL exists for.
+ * a fresh leg of that agent's budget. Charging a slow human to the agent's budget
+ * would kill approvals left over a weekend, which is the case that TTL exists for.
  *
  * Only remote agents can reach this. A built-in runs inside a Durable Object held
  * alive by `SETTLE_TIMEOUT_MS` (8 minutes) — see `a2a/notifications/local.ts`,
- * which explains why that one must *not* be raised to match.
+ * which explains why that one must *not* be raised to match. Built-ins are also
+ * unmodifiable through the admin tools, so they keep this value for good.
  */
-export const TASK_DEADLINE_SECONDS = 60 * 60;
+export const DEFAULT_TASK_DEADLINE_SECONDS = 60 * 60;
 
 /**
  * How long a completed agent task is kept before it is swept, covering both the

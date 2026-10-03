@@ -32,6 +32,13 @@ import {
   setAdminIconUrl,
   setAdminDisplayName
 } from "@/db/models/workspace-configs";
+// The gatekeeper default a create without a deadline is written with. Its
+// companion figure — the 6-minute delivery grace, below which a deadline is in
+// practice enforced at the grace mark — is prose in the descriptions below
+// rather than an import: `DELIVERY_RETRY_GRACE_SECONDS` lives in
+// `src/workflows/reaction.ts`, and importing it here would pull the
+// `WorkflowEntrypoint` module into the admin tools.
+import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
 import { SHARED_INFRA_ROOTS } from "@/a2a/endpoint";
 import { hasSlackBroadcast, sanitizeDisplayName } from "@/util/slack-text";
 import {
@@ -109,6 +116,7 @@ function shape(a: AgentRow, channels: string[]): ToolResult {
     iconUrl: a.iconUrl,
     enabled: a.enabled,
     notifyOn: a.notifyOn,
+    taskDeadlineSeconds: a.taskDeadlineSeconds,
     a2aEndpoint: a.a2aEndpoint,
     tenantId: a.tenantId,
     workspaceId: a.workspaceId,
@@ -135,6 +143,24 @@ function ensureNoBroadcastName(displayName?: string): ToolResult | null {
         "Display name cannot contain a channel-wide mention — @channel, @here, " +
         "@everyone, or their <!channel> / <!subteam^…> form. They would notify " +
         "everyone in the channel."
+    };
+  }
+  return null;
+}
+
+/**
+ * Reject a value that is not a deadline at all. A type sanity check, not a policy
+ * on the range: how long an agent may take is the operator's business, so there is
+ * no upper bound and nothing is clamped — a nonsense value comes back as a tool
+ * result the model can read and retry, rather than a zod schema failure it cannot.
+ */
+function ensureValidDeadline(seconds?: number): ToolResult | null {
+  if (seconds === undefined) return null;
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    return {
+      error:
+        "taskDeadlineSeconds must be a whole number of seconds greater than " +
+        `zero. Omit it for the ${DEFAULT_TASK_DEADLINE_SECONDS / 60}-minute default.`
     };
   }
   return null;
@@ -257,6 +283,7 @@ export type AgentsCreateArgs = {
   a2aEndpoint: string;
   tenantId: string;
   notifyOn: NotifyOn;
+  taskDeadlineSeconds?: number;
 };
 
 export async function agentsCreate(
@@ -267,6 +294,8 @@ export async function agentsCreate(
   if (denied) return denied;
   const rejected = ensureNoBroadcastName(args.displayName);
   if (rejected) return rejected;
+  const badDeadline = ensureValidDeadline(args.taskDeadlineSeconds);
+  if (badDeadline) return badDeadline;
 
   if (RESERVED_NAMES.has(args.name))
     return { error: `"${args.name}" is a reserved built-in agent name.` };
@@ -295,6 +324,10 @@ export async function agentsCreate(
     a2aEndpoint: verified.endpoint,
     tenantId: args.tenantId.trim(),
     notifyOn: args.notifyOn,
+    // Absent is not "no limit": pass the gatekeeper default explicitly so the
+    // stored row always names the budget it will actually be held to.
+    taskDeadlineSeconds:
+      args.taskDeadlineSeconds ?? DEFAULT_TASK_DEADLINE_SECONDS,
     workspaceId: deps.wsId,
     cardSigningJku: verified.pin.cardSigningJku,
     cardSigningKid: verified.pin.cardSigningKid
@@ -309,6 +342,7 @@ export type AgentsUpdateArgs = {
   a2aEndpoint?: string;
   tenantId?: string;
   notifyOn?: NotifyOn;
+  taskDeadlineSeconds?: number;
 };
 
 export async function agentsUpdate(
@@ -319,6 +353,8 @@ export async function agentsUpdate(
   if (denied) return denied;
   const rejected = ensureNoBroadcastName(args.displayName);
   if (rejected) return rejected;
+  const badDeadline = ensureValidDeadline(args.taskDeadlineSeconds);
+  if (badDeadline) return badDeadline;
 
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
@@ -380,6 +416,9 @@ export async function agentsUpdate(
     a2aEndpoint: verified?.endpoint,
     tenantId: args.tenantId?.trim(),
     notifyOn: args.notifyOn,
+    // Omitted leaves the stored budget alone — the same patch semantics as every
+    // field here. Back to the default means naming the default.
+    taskDeadlineSeconds: args.taskDeadlineSeconds,
     ...(verified
       ? {
           cardSigningJku: verified.pin.cardSigningJku,
@@ -1006,6 +1045,15 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           .enum(["mention", "channel_messages"])
           .describe(
             "When the agent is woken (required): `mention` = only on a name mention; `channel_messages` = every channel message"
+          ),
+        taskDeadlineSeconds: z
+          .number()
+          .optional()
+          .describe(
+            "How long this agent gets to finish one turn before the gatekeeper " +
+              "stops the task, in seconds. Omit for the 1 hour default. Any " +
+              "positive whole number; there is no upper limit, but anything " +
+              "under 360 is in practice enforced at about 6 minutes."
           )
       }),
       execute: (args) => agentsCreate(deps, args)
@@ -1013,7 +1061,8 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     agents_update: tool({
       description:
         "Change a custom agent's fields (display name, enabled, endpoint, " +
-        "notifyOn). Built-in admin/onboarding agents cannot be modified.",
+        "notifyOn, taskDeadlineSeconds). Built-in admin/onboarding agents " +
+        "cannot be modified.",
       inputSchema: z.object({
         name: z.string(),
         displayName: z.string().optional(),
@@ -1043,6 +1092,18 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
           .optional()
           .describe(
             "Change when the agent is woken: mention vs channel_messages"
+          ),
+        taskDeadlineSeconds: z
+          .number()
+          .optional()
+          .describe(
+            "Change how long this agent gets to finish one turn before the " +
+              "gatekeeper stops the task, in seconds. Omit to leave it " +
+              "unchanged; pass 3600 to put it back to the 1 hour default. Any " +
+              "positive whole number; there is no upper limit, but anything " +
+              "under 360 is in practice enforced at about 6 minutes. The new " +
+              "value applies to the agent's next turns: a turn already running " +
+              "keeps the limit it started with."
           )
       }),
       execute: (args) => agentsUpdate(deps, args)

@@ -391,8 +391,8 @@ describe("MessageWorkflow — remote custom agents", () => {
   beforeEach(async () => {
     await env.DB.prepare(
       `INSERT OR IGNORE INTO agents
-         (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, workspace_id)
-       VALUES ('${AGENT_NAME}', 'remote', 1, 'channel_messages', '${REMOTE_ENDPOINT}', '${REMOTE_TENANT}', 0)`
+         (name, kind, enabled, notify_on, a2a_endpoint, tenant_id, task_deadline_seconds, workspace_id)
+       VALUES ('${AGENT_NAME}', 'remote', 1, 'channel_messages', '${REMOTE_ENDPOINT}', '${REMOTE_TENANT}', 3600, 0)`
     ).run();
     await env.DB.prepare(
       `INSERT OR IGNORE INTO agent_channels (channel_id, agent_name, workspace_id)

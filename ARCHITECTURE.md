@@ -74,14 +74,14 @@ a per-task token.
 
 Six Workflows are bound in `wrangler.jsonc`; all live in `src/workflows/`.
 
-| Workflow              | Started by                               | Does                                                                                   |
-| --------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------- |
-| `MessageWorkflow`     | a classified Slack message               | Resolves targets, records correlation rows, dispatches one A2A task per agent          |
-| `LifecycleWorkflow`   | membership / team-join events            | Keeps the D1 registry in step with Slack membership                                    |
-| `ReactionWorkflow`    | a trigger message's agents starting work | Owns the 🛑 reaction's removal and the processing deadline; cancels tasks that overrun |
-| `CancelWorkflow`      | a 🛑 stop reaction                       | Cancels every non-terminal task that trigger message woke, then confirms               |
-| `ReconcileWorkflow`   | nightly cron                             | Convergence backstop — repairs registry drift against Slack reality                    |
-| `MaintenanceWorkflow` | nightly cron                             | Expires human-in-the-loop prompts past their TTL and sweeps resolved rows              |
+| Workflow              | Started by                               | Does                                                                                                    |
+| --------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `MessageWorkflow`     | a classified Slack message               | Resolves targets, records correlation rows, dispatches one A2A task per agent                           |
+| `LifecycleWorkflow`   | membership / team-join events            | Keeps the D1 registry in step with Slack membership                                                     |
+| `ReactionWorkflow`    | a trigger message's agents starting work | Owns the 🛑 reaction's removal and **each agent's own** processing deadline; cancels tasks that overrun |
+| `CancelWorkflow`      | a 🛑 stop reaction                       | Cancels every non-terminal task that trigger message woke, then confirms                                |
+| `ReconcileWorkflow`   | nightly cron                             | Convergence backstop — repairs registry drift against Slack reality                                     |
+| `MaintenanceWorkflow` | nightly cron                             | Expires human-in-the-loop prompts past their TTL and sweeps resolved rows                               |
 
 ---
 
@@ -104,6 +104,12 @@ it is allowed on:
 
 When nothing applies, the resolver returns an empty list and the gatekeeper stays silent.
 
+At the other end, one message wakes at most **99 agents** (`MAX_WOKEN_AGENTS`). The
+`ReactionWorkflow` stops each woken agent at its own deadline by spending a leg of its
+budget loop per distinct expiry, so the fan-out has to stay below that loop's 100-leg cap.
+A channel wide enough to exceed it is clamped where the fan-out is decided: the first 99 by
+name are woken, the rest are skipped, and the thread is told so.
+
 ---
 
 ## Data storage
@@ -111,17 +117,17 @@ When nothing applies, the resolver returns an empty list and the gatekeeper stay
 Registry state lives in **D1** (`da-registry`, bound as `DB`), schema in `src/db/schema.ts`
 and migrations in `migrations/` (drizzle-generated; `npm run db:generate`). Nine tables:
 
-| Table               | Purpose                                                                                       |
-| ------------------- | --------------------------------------------------------------------------------------------- |
-| `workspaces`        | Workspaces, each with an admin channel. Workspace `0` is the org scope.                       |
-| `slack_users`       | Slack user profiles and permission flags                                                      |
-| `slack_channels`    | Channel ids and names seen by the gatekeeper                                                  |
-| `workspace_admins`  | Which users administer which workspace                                                        |
-| `agents`            | The agent registry — kind (`local`/`remote`), tenant, endpoint, card signing pin, `notify_on` |
-| `agent_channels`    | Which agents are allowed on which channels                                                    |
-| `agent_tasks`       | Correlation rows tying an A2A task back to its Slack message                                  |
-| `hitl_requests`     | Open human-in-the-loop prompts and their TTL                                                  |
-| `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                |
+| Table               | Purpose                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `workspaces`        | Workspaces, each with an admin channel. Workspace `0` is the org scope.                                                                                            |
+| `slack_users`       | Slack user profiles and permission flags                                                                                                                           |
+| `slack_channels`    | Channel ids and names seen by the gatekeeper                                                                                                                       |
+| `workspace_admins`  | Which users administer which workspace                                                                                                                             |
+| `agents`            | The agent registry — kind (`local`/`remote`), tenant, endpoint, card signing pin, `notify_on`, `task_deadline_seconds` (per-agent reply budget, 1 hour by default) |
+| `agent_channels`    | Which agents are allowed on which channels                                                                                                                         |
+| `agent_tasks`       | Correlation rows tying an A2A task back to its Slack message                                                                                                       |
+| `hitl_requests`     | Open human-in-the-loop prompts and their TTL                                                                                                                       |
+| `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                                                                                     |
 
 Per-agent conversation history and memory are **not** in D1 — they live in each agent
 DO's own SQLite storage. Archived history is embedded into **Vectorize** (`agent-recall`)

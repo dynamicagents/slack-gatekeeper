@@ -139,6 +139,45 @@ export async function getPendingAgentTasksByEventId(
     );
 }
 
+/** A non-terminal task of one event, paired with its agent's leg budget. */
+export interface PendingAgentTaskWithDeadline {
+  task: AgentTaskRow;
+  /** `agents.task_deadline_seconds` — always a concrete number, never null. */
+  deadlineSeconds: number;
+}
+
+/**
+ * The same set as {@link getPendingAgentTasksByEventId}, joined to each task's
+ * agent so the ReactionWorkflow can enforce one budget per task rather than one
+ * budget per event.
+ *
+ * The join cannot drop a row: `agent_tasks.agent_name` is a NOT NULL foreign key
+ * to `agents.name`, D1 enforces it, and `unregisterAgent` deletes the task rows
+ * before the parent — so every non-terminal task has an agent row to join to.
+ */
+export async function getPendingAgentTasksWithDeadlinesByEventId(
+  eventId: string
+): Promise<PendingAgentTaskWithDeadline[]> {
+  const db = getDb();
+  const rows = await db
+    .select({
+      task: schema.agentTasks,
+      deadlineSeconds: schema.agents.taskDeadlineSeconds
+    })
+    .from(schema.agentTasks)
+    .innerJoin(
+      schema.agents,
+      eq(schema.agentTasks.agentName, schema.agents.name)
+    )
+    .where(
+      and(
+        eq(schema.agentTasks.eventId, eventId),
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
+      )
+    );
+  return rows;
+}
+
 /**
  * Fill in the A2A Task id once the accept response is known, and atomically
  * report whether a stop was requested in the meantime. The row is written before
@@ -353,8 +392,8 @@ export async function completeAgentTask(token: string): Promise<boolean> {
 
 /**
  * Mark a task canceled — the terminal state for a stop, whoever issued it: a
- * human tapping 🛑, or the gatekeeper hitting `TASK_DEADLINE_SECONDS` on a leg that
- * never delivered. The two are indistinguishable to the ledger; the actor is
+ * human tapping 🛑, or the gatekeeper hitting the agent's own task deadline on a
+ * leg that never delivered. The two are indistinguishable to the ledger; the actor is
  * captured in the `[cancel] canceling task` log line instead.
  *
  * Unlike the old behaviour, this is applied on *every* cancel outcome — including

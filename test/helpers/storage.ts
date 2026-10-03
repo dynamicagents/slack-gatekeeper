@@ -19,7 +19,7 @@ const migrations = (env as unknown as { TEST_MIGRATIONS: D1Migration[] })
  * ```
  *
  * It is a **per-file declaration** rather than a global hook because the replay
- * is 21 migrations and costs roughly a third of a second per test, which a spec
+ * is 22 migrations and costs roughly a third of a second per test, which a spec
  * that never reads or writes storage has no reason to pay. Declaring it in the
  * file is also what makes the difference legible: the reader sees the hook where
  * the tests that need it are, instead of inferring it from a list somewhere else.

@@ -36,7 +36,8 @@ const DELIVERY_BACKOFF_MS = [250, 1000];
  * barrier normally resolves on delivery); this only bounds `ctx.waitUntil` if a
  * terminal is somehow never emitted, well past any real turn budget.
  *
- * Deliberately **not** raised to match `TASK_DEADLINE_SECONDS` (1 hour), however
+ * Deliberately **not** raised to match a task deadline
+ * (`DEFAULT_TASK_DEADLINE_SECONDS`, 1 hour, and per-agent raisable from there), however
  * tempting the symmetry looks. This barrier keeps a Durable Object resident, and
  * Durable Objects bill wall-clock duration for their full 128 MB allocation for
  * as long as they are alive — so unlike the gatekeeper's hour-long *wait* (a

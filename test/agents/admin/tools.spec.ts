@@ -26,6 +26,7 @@ import {
   setWorkspaceAdminChannel
 } from "@/db/models/workspaces";
 import { getAgent } from "@/db/models/agents";
+import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
 import {
   setPublicUrl,
   getAdminIconUrl,
@@ -257,6 +258,141 @@ describe("admin tools — agents_create / agents_read", () => {
     const other = deps(wsB, ctx({ adminWorkspaces: [wsB] }));
     expect(await agentsDelete(other, { name: "wsa-agent" })).toHaveProperty(
       "error"
+    );
+  });
+});
+
+describe("admin tools — per-agent task deadline", () => {
+  /** The `taskDeadlineSeconds` an `agents_read`/`agents_update` result reports. */
+  function readDeadline(result: unknown): unknown {
+    return (result as { agents: Array<{ taskDeadlineSeconds: unknown }> })
+      .agents[0].taskDeadlineSeconds;
+  }
+
+  it("defaults to the gatekeeper's hour and surfaces it on read", async () => {
+    const wsId = await freshWsId("tools-ws-dl-default");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsCreate(d, {
+      name: "dl-default-agent",
+      a2aEndpoint: "https://example.com/dl-default-agent",
+      tenantId: "main",
+      notifyOn: "mention"
+    });
+
+    expect((await getAgent("dl-default-agent"))?.taskDeadlineSeconds).toBe(
+      DEFAULT_TASK_DEADLINE_SECONDS
+    );
+    // A number the model can read, never null — there is no "no limit".
+    expect(
+      readDeadline(await agentsRead(d, { name: "dl-default-agent" }))
+    ).toBe(DEFAULT_TASK_DEADLINE_SECONDS);
+  });
+
+  it("stores a chosen deadline, changes it, and resets it to the default", async () => {
+    const wsId = await freshWsId("tools-ws-dl-set");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    const created = (await agentsCreate(d, {
+      name: "dl-set-agent",
+      a2aEndpoint: "https://example.com/dl-set-agent",
+      tenantId: "main",
+      notifyOn: "mention",
+      taskDeadlineSeconds: 7200
+    })) as { agent: { taskDeadlineSeconds: number } };
+    expect(created.agent.taskDeadlineSeconds).toBe(7200);
+
+    const updated = (await agentsUpdate(d, {
+      name: "dl-set-agent",
+      taskDeadlineSeconds: 1800
+    })) as { agent: { taskDeadlineSeconds: number } };
+    expect(updated.agent.taskDeadlineSeconds).toBe(1800);
+    expect((await getAgent("dl-set-agent"))?.taskDeadlineSeconds).toBe(1800);
+
+    // An unrelated patch leaves it alone — the same semantics as every field.
+    await agentsUpdate(d, { name: "dl-set-agent", enabled: false });
+    expect((await getAgent("dl-set-agent"))?.taskDeadlineSeconds).toBe(1800);
+
+    // There is no "clear"; back to the default means naming the default.
+    await agentsUpdate(d, {
+      name: "dl-set-agent",
+      taskDeadlineSeconds: DEFAULT_TASK_DEADLINE_SECONDS
+    });
+    expect((await getAgent("dl-set-agent"))?.taskDeadlineSeconds).toBe(
+      DEFAULT_TASK_DEADLINE_SECONDS
+    );
+  });
+
+  it("refuses a value that is not a deadline, and has no upper bound", async () => {
+    const wsId = await freshWsId("tools-ws-dl-guard");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    await agentsCreate(d, {
+      name: "dl-guard-agent",
+      a2aEndpoint: "https://example.com/dl-guard-agent",
+      tenantId: "main",
+      notifyOn: "mention",
+      taskDeadlineSeconds: 1800
+    });
+
+    // Refused, never clamped — and the stored value is untouched.
+    for (const bad of [0, -60, 1800.5]) {
+      const res = (await agentsUpdate(d, {
+        name: "dl-guard-agent",
+        taskDeadlineSeconds: bad
+      })) as { error?: string };
+      expect(res.error).toContain("taskDeadlineSeconds");
+      expect((await getAgent("dl-guard-agent"))?.taskDeadlineSeconds).toBe(
+        1800
+      );
+    }
+
+    // The same guard runs on create, before anything is written.
+    const rejected = (await agentsCreate(d, {
+      name: "dl-guard-never",
+      a2aEndpoint: "https://example.com/dl-guard-never",
+      tenantId: "main",
+      notifyOn: "mention",
+      taskDeadlineSeconds: -1
+    })) as { error?: string };
+    expect(rejected.error).toContain("taskDeadlineSeconds");
+    expect(await getAgent("dl-guard-never")).toBeNull();
+
+    // A week is as legitimate as a minute: how long an agent may take is the
+    // operator's business, so there is no ceiling.
+    await agentsUpdate(d, {
+      name: "dl-guard-agent",
+      taskDeadlineSeconds: 604800
+    });
+    expect((await getAgent("dl-guard-agent"))?.taskDeadlineSeconds).toBe(
+      604800
+    );
+  });
+
+  it("refuses a built-in agent and a caller who is not an admin", async () => {
+    const wsId = await freshWsId("tools-ws-dl-deny");
+    const d = deps(wsId, ctx({ adminWorkspaces: [wsId] }));
+    // Built-ins keep the backfilled hour for good — `requireWritableAgent` is
+    // what makes a changed deadline a remote-agent-only affair.
+    expect(
+      await agentsUpdate(d, { name: "admin", taskDeadlineSeconds: 60 })
+    ).toHaveProperty("error");
+    expect((await getAgent("admin"))?.taskDeadlineSeconds).toBe(
+      DEFAULT_TASK_DEADLINE_SECONDS
+    );
+
+    await agentsCreate(d, {
+      name: "dl-deny-agent",
+      a2aEndpoint: "https://example.com/dl-deny-agent",
+      tenantId: "main",
+      notifyOn: "mention"
+    });
+    const outsider = deps(wsId, ctx({ adminWorkspaces: [wsId + 1000] }));
+    expect(
+      await agentsUpdate(outsider, {
+        name: "dl-deny-agent",
+        taskDeadlineSeconds: 60
+      })
+    ).toHaveProperty("error");
+    expect((await getAgent("dl-deny-agent"))?.taskDeadlineSeconds).toBe(
+      DEFAULT_TASK_DEADLINE_SECONDS
     );
   });
 });

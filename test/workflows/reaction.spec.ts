@@ -5,6 +5,8 @@ import { AgentCard, Task, TaskState } from "@a2a-js/sdk";
 import {
   STOP_REACTION,
   REACTION_SYNC_EVENT,
+  clampWaitSeconds,
+  deadlineLabel,
   reactionInstanceId
 } from "@/workflows/reaction";
 import type { ReactionWorkflowParams } from "@/slack/types";
@@ -185,11 +187,16 @@ function captureWithCancellableAgent(): {
   };
 }
 
-/** Seed a pending remote task (and its agent) for `eventId`. */
+/**
+ * Seed a pending remote task (and its agent) for `eventId`. `taskDeadlineSeconds`
+ * goes straight to `registerAgent`, so omitting it leaves the agent on the
+ * gatekeeper default — which is what the byte-identical-default tests rely on.
+ */
 async function seedPendingTask(
   eventId: string,
   token: string,
-  lastError?: string
+  lastError?: string,
+  taskDeadlineSeconds?: number
 ): Promise<void> {
   await registerAgent({
     name: token, // unique per task to avoid cross-test collisions
@@ -198,6 +205,7 @@ async function seedPendingTask(
     a2aEndpoint: ENDPOINT,
     tenantId: "main",
     notifyOn: "mention",
+    taskDeadlineSeconds,
     workspaceId: 0
   });
   await createAgentTask({
@@ -390,6 +398,116 @@ describe("ReactionWorkflow", () => {
     }
   });
 
+  it("names the agent's own limit, not the gatekeeper default", async () => {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      const token = `ntok-${p.eventId}`.toLowerCase();
+      // Half an hour rather than the default hour.
+      await seedPendingTask(p.eventId, token, undefined, 30 * 60);
+
+      await introspector.modifyAll(async (m) => {
+        await m.forceEventTimeout({ name: GRACE_STEP });
+        await m.forceEventTimeout({ name: LEG0_STEP });
+      });
+
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      expect((await getAgentTaskByToken(token))?.status).toBe("canceled");
+      const notice = captured.posts.find((x) => x.text.includes("limit"));
+      expect(notice?.text).toContain("30 minutes limit");
+      // The notice quotes the budget actually enforced, so the default must not
+      // leak into it.
+      expect(notice?.text).not.toContain("1 hour");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("stops each agent of a fan-out at its own deadline, in order", async () => {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      const short = `ntok-short-${p.eventId}`.toLowerCase();
+      const long = `ntok-long-${p.eventId}`.toLowerCase();
+      await seedPendingTask(p.eventId, short, undefined, 30 * 60);
+      await seedPendingTask(p.eventId, long, undefined, 2 * 60 * 60);
+
+      // A forced timeout fires per step name, so the second leg needs its own:
+      // the short agent expires in leg 0 and the long one in leg 1.
+      await introspector.modifyAll(async (m) => {
+        await m.forceEventTimeout({ name: GRACE_STEP });
+        await m.forceEventTimeout({ name: LEG0_STEP });
+        await m.forceEventTimeout({ name: "sync:1" });
+      });
+
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStatus("complete");
+
+      const notices = captured.posts.filter((x) => x.text.includes("limit"));
+      expect(notices).toHaveLength(2);
+      expect(notices[0].text).toContain(short);
+      expect(notices[0].text).toContain("30 minutes limit");
+      expect(notices[1].text).toContain(long);
+      expect(notices[1].text).toContain("2 hours limit");
+      expect((await getAgentTaskByToken(short))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(long))?.status).toBe("canceled");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("leaves a sibling with budget left running when the short one expires", async () => {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      const short = `ptok-short-${p.eventId}`.toLowerCase();
+      const long = `ptok-long-${p.eventId}`.toLowerCase();
+      await seedPendingTask(p.eventId, short, undefined, 30 * 60);
+      await seedPendingTask(p.eventId, long, undefined, 2 * 60 * 60);
+
+      // Only leg 0 times out, so the long agent's own wait is left hanging.
+      await introspector.modifyAll(async (m) => {
+        await m.forceEventTimeout({ name: GRACE_STEP });
+        await m.forceEventTimeout({ name: LEG0_STEP });
+      });
+
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStepResult({ name: "cancel:0" });
+      // The next leg still has work to do — which is the whole point: a shared
+      // budget would have stopped both here.
+      expect(
+        await instance.waitForStepResult({ name: "evaluate:1" })
+      ).toMatchObject({ state: "working" });
+
+      expect((await getAgentTaskByToken(short))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(long))?.status).toBe("pending");
+      const notices = captured.posts.filter((x) => x.text.includes("limit"));
+      expect(notices).toHaveLength(1);
+      expect(notices[0].text).toContain(short);
+      // And the 🛑 stays while a sibling is still working.
+      expect(captured.reactions).toHaveLength(0);
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
   it("does not spend the budget while a task is parked on a human prompt", async () => {
     const captured = captureWithCancellableAgent();
     const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
@@ -411,9 +529,9 @@ describe("ReactionWorkflow", () => {
         params: p
       });
       const [instance] = await introspector.get();
-      expect(await instance.waitForStepResult({ name: "evaluate:0" })).toBe(
-        "parked"
-      );
+      expect(
+        await instance.waitForStepResult({ name: "evaluate:0" })
+      ).toMatchObject({ state: "parked" });
       expect(captured.cancelCalls).toBe(0);
       expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
       // Crucially the 🛑 is still there — it is the only one-tap way to stop a
@@ -422,5 +540,49 @@ describe("ReactionWorkflow", () => {
     } finally {
       await introspector.dispose();
     }
+  });
+});
+
+describe("deadlineLabel", () => {
+  it("reads a budget the way the notice should say it", () => {
+    // The default's text is byte-identical to what the old constant produced —
+    // the existing "1 hour limit" assertion above is the other half of that pin.
+    expect(deadlineLabel(3600)).toBe("1 hour");
+    expect(deadlineLabel(7200)).toBe("2 hours");
+    expect(deadlineLabel(1800)).toBe("30 minutes");
+    expect(deadlineLabel(60)).toBe("1 minute");
+    expect(deadlineLabel(86400)).toBe("24 hours");
+  });
+
+  it("keeps the seconds of any limit that is not a whole minute", () => {
+    // An admin may set any positive whole number of seconds, and the notice has
+    // to name the one that was set: rounding these into minutes reported limits
+    // that never existed ("0 minutes", "2 minutes").
+    expect(deadlineLabel(1)).toBe("1 second");
+    expect(deadlineLabel(90)).toBe("90 seconds");
+    expect(deadlineLabel(3601)).toBe("3601 seconds");
+  });
+});
+
+describe("clampWaitSeconds", () => {
+  const DAY = 24 * 60 * 60;
+
+  it("holds a wait inside the timeouts waitForEvent accepts", () => {
+    // 365 days is the platform maximum, and an admin may set a longer deadline:
+    // passing it through would throw on entry to the wait, which the loop would
+    // read as the wait having elapsed. Sliced instead — the task still stops at
+    // its own full deadline, one leg per slice.
+    expect(clampWaitSeconds(400 * DAY)).toBe(365 * DAY);
+    // The lower edge: a deadline at or under the retry grace leaves nothing
+    // positive to wait, and zero or less is just as illegal as a year too long.
+    expect(clampWaitSeconds(0)).toBe(1);
+    expect(clampWaitSeconds(-300)).toBe(1);
+  });
+
+  it("leaves every ordinary budget exactly as it is", () => {
+    expect(clampWaitSeconds(3600)).toBe(3600);
+    expect(clampWaitSeconds(1)).toBe(1);
+    expect(clampWaitSeconds(7 * DAY)).toBe(7 * DAY); // the HITL TTL wait
+    expect(clampWaitSeconds(365 * DAY)).toBe(365 * DAY); // the edge itself is legal
   });
 });
