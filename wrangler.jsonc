@@ -6,7 +6,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "slack-gatekeeper",
   "main": "src/server.ts",
-  "compatibility_date": "2026-03-02",
+  "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   // The public origin. This is not just where Slack posts: the first
   // signature-verified request pins it as `public_url` in D1, which becomes the
