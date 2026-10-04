@@ -58,9 +58,10 @@ export function buildAgentAvatarPrompt(input: AgentAvatarPromptInput): string {
 }
 
 /**
- * Generate an avatar via Workers AI. Isolated here (like `embed()` in shared/recall)
- * so the AI binding call is the only impure part. FLUX.2 returns the image as a
- * base64-encoded JPEG in `{ image }`; we decode it to bytes for DO storage.
+ * Generate an avatar via Workers AI. Isolated here (as `@/agents/model` isolates
+ * the chat model) so the AI binding call is the only impure part. FLUX.2 returns
+ * the image as a base64-encoded JPEG in `{ image }`; we decode it to bytes for DO
+ * storage.
  */
 export async function generateAvatar(prompt: string): Promise<GeneratedImage> {
   // FLUX.2 klein takes a multipart form input (not plain JSON). FormData doesn't
@@ -71,15 +72,14 @@ export async function generateAvatar(prompt: string): Promise<GeneratedImage> {
   // NB: this call deliberately does NOT route through the AI Gateway. The gateway can't
   // carry a binary multipart body via the `env.AI.run` binding — it rejects a
   // ReadableStream and JSON-serializes an ArrayBuffer body to `{}` ("Invalid input").
-  // Chat/embed go through the gateway because their inputs are plain JSON.
+  // Chat calls go through the gateway because their inputs are plain JSON.
   const form = new FormData();
   form.append("prompt", prompt);
   form.append("width", "512");
   form.append("height", "512");
   const formResponse = new Response(form);
 
-  // The `Ai` binding overloads don't cover this model id, so cast like shared/recall
-  // does for the embedding model.
+  // The `Ai` binding overloads don't cover this model id, so cast at the call.
   const res = (await env.AI.run(
     AVATAR_IMAGE_MODEL_ID as Parameters<Ai["run"]>[0],
     {

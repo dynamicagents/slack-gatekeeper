@@ -1,16 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
-import { embedMany, generateText } from "ai";
+import { generateText } from "ai";
 import {
   chatModel,
-  embeddingModel,
   gatewayLogFields,
   CHAT_CALL_OPTIONS,
   GATEWAY_METADATA_MAX,
   type GatewayCall,
   type GatewayCallFields
 } from "@/agents/model";
-import { AI_GATEWAY_ID, CHAT_MODEL, EMBED_MODEL_ID } from "@/config";
+import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
 
 /**
  * What reaches `env.AI.run`, which is the only thing AI Gateway ever sees.
@@ -242,29 +241,6 @@ describe("the gateway identity a model call carries", () => {
       workspaceId: 7
     });
     expect(gatewayOf(run)?.eventId).toBeUndefined();
-  });
-
-  it("still routes recall's embeddings through the gateway", async () => {
-    // The regression this exists for. Dropping the top-level `gateway` from
-    // `createWorkersAI` is what made per-call metadata reachable, and it also
-    // silently unhooks any model that does not carry one of its own. Embeddings
-    // would simply stop appearing in the gateway log, with nothing failing.
-    const run = stubRun(() => ({ data: [Array<number>(1024).fill(0.1)] }));
-
-    await embedMany({
-      model: embeddingModel(),
-      values: ["a message worth remembering"],
-      telemetry: { isEnabled: false }
-    });
-
-    expect(run.mock.calls[0]?.[0]).toBe(EMBED_MODEL_ID);
-    // No `agent`: one memoised model serves both agents' recall, so either name on
-    // it would be wrong half the time. No `eventId` either — an embedding belongs
-    // to a compaction's archive, not to the task that triggered it.
-    expect(gatewayOf(run)).toEqual({
-      id: AI_GATEWAY_ID,
-      metadata: { phase: "embed" }
-    });
   });
 
   it("asks the model for the deepest reasoning that model offers", async () => {

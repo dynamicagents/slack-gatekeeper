@@ -17,13 +17,6 @@
     "binding": "AI",
     "remote": true
   },
-  "vectorize": [
-    {
-      "binding": "VECTORIZE",
-      "index_name": "agent-recall",
-      "remote": true
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {

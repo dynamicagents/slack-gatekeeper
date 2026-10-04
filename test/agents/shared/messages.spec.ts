@@ -339,7 +339,7 @@ describe("assistantSessionMessage", () => {
     expect((m.parts[0] as { output: unknown }).output).toEqual({ a: 1 });
   });
 
-  it("leaves sessionText as the reply alone, so recall never sees tool JSON", () => {
+  it("leaves sessionText as the reply alone, so no reader sees tool JSON", () => {
     const m = assistantSessionMessage("the reply", [
       {
         toolCallId: "tc1",

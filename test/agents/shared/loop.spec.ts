@@ -2228,7 +2228,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
       input: { name: "arc-player" },
       output: { ok: true }
     });
-    // The reply is still the only text — recall and FTS see no tool JSON.
+    // The reply is still the only text — a reader of history sees no tool JSON.
     expect(sessionText(session.messages[1])).toBe("Updated the endpoint.");
   });
 

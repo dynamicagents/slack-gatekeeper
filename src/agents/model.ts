@@ -1,13 +1,8 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { wrapLanguageModel, type EmbeddingModel, type LanguageModel } from "ai";
+import { wrapLanguageModel, type LanguageModel } from "ai";
 import { env } from "cloudflare:workers";
 import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
-import {
-  AI_GATEWAY_ID,
-  CHAT_MODEL,
-  EMBED_MAX_PER_CALL,
-  EMBED_MODEL_ID
-} from "@/config";
+import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
 
 /**
  * Options every chat call carries, in one place because they must not drift: the
@@ -37,7 +32,7 @@ export const CHAT_CALL_OPTIONS = {
 export type GatewayAgent = "admin" | "onboarding";
 
 /** What a model call is for, as the AI Gateway log will record it. */
-export type GatewayPhase = "round" | "compaction" | "embed";
+export type GatewayPhase = "round" | "compaction";
 
 /**
  * How many custom metadata entries AI Gateway saves on one call.
@@ -57,9 +52,9 @@ export const GATEWAY_METADATA_MAX = 5;
  * they would be given up in:
  *
  * - `agent` and `workspaceId` are the two dimensions worth slicing spend by.
- * - `phase` is what no filter can derive. A round, a compaction summary and a
- *   recall embedding are three different costs against the same gateway, and
- *   without this a row is just a prompt with no idea which of them it was.
+ * - `phase` is what no filter can derive. A round and a compaction summary are
+ *   two different costs against the same gateway, and without this a row is just
+ *   a prompt with no idea which of them it was.
  * - `channel` is the A2A context id, `${channelId}:${threadTs}` for a local turn —
  *   the join back to the `[agent-turn]` line in Workers Logs, and to the Slack
  *   thread a human can actually read.
@@ -74,10 +69,6 @@ export const GATEWAY_METADATA_MAX = 5;
  * see {@link gatewayLogFields} for why nothing can arrive by accident either.
  */
 export interface GatewayCallFields {
-  /**
-   * Absent on an embedding: {@link embeddingModel} is memoised once per isolate and
-   * serves both agents' recall, so either name on it would be wrong half the time.
-   */
   agent?: GatewayAgent;
   phase: GatewayPhase;
   channel?: string;
@@ -233,27 +224,4 @@ export function chatModel(
     }),
     middleware: normalizeToolInputMiddleware
   });
-}
-
-let embedding: EmbeddingModel | undefined;
-
-/**
- * The model episodic recall embeds with.
- *
- * Still memoised: an embedding call carries no turn, so its metadata is the same
- * every time — and one model serves both agents' recall, which is why it names a
- * `phase` and no `agent`. For the same reason it carries no
- * {@link ModelOverrides.sessionAffinity}: one model memoised per isolate serves
- * every DO's recall, and an embedding is a one-shot call over a handful of
- * messages with no conversation behind it to pin. `supportsParallelCalls: false`
- * is what keeps `embedMany` sequential — it overrides the caller's
- * `maxParallelCalls` outright, so one archive cannot fan out across concurrent
- * binding calls.
- */
-export function embeddingModel(): EmbeddingModel {
-  return (embedding ??= agentProvider().textEmbeddingModel(EMBED_MODEL_ID, {
-    maxEmbeddingsPerCall: EMBED_MAX_PER_CALL,
-    supportsParallelCalls: false,
-    gateway: gatewayFor({ phase: "embed" })
-  }));
 }

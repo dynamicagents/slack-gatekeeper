@@ -130,8 +130,8 @@ and migrations in `migrations/` (drizzle-generated; `npm run db:generate`). Nine
 | `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                                                                                     |
 
 Per-agent conversation history and memory are **not** in D1 — they live in each agent
-DO's own SQLite storage. Archived history is embedded into **Vectorize** (`agent-recall`)
-for recall across compaction boundaries.
+DO's own SQLite storage. History past the compaction threshold is folded into a summary
+there; the raw messages it displaces are not kept.
 
 ---
 

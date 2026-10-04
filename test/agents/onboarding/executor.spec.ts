@@ -7,10 +7,8 @@ import { TaskState } from "@a2a-js/sdk";
 import {
   FakeSession,
   fakeAgentSession,
-  fakeRecallEnv,
   fakeSessionHost,
   okResult,
-  toolCallResult,
   makeRequest,
   terminalTaskText,
   terminalTaskState
@@ -88,34 +86,8 @@ describe("OnboardingAgentExecutor", () => {
     expect(terminalTaskText(t.published)).toBeTruthy();
   });
 
-  it("offers recall and routes it through the user namespace", async () => {
-    const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
-    const { query } = fakeRecallEnv();
-    let call = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        (call++ === 0
-          ? toolCallResult("recall", { query: "what did I set up before?" })
-          : okResult("Found it in past context.")) as never
-    });
-    const exec = new OnboardingAgentExecutor(sqlHost, {
-      model,
-      createSession: () => fakeAgentSession(session)
-    });
-
-    const t = onboardingRequest();
-    await exec.execute(t.requestContext, t.eventBus);
-
-    expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(2);
-    // Recall must be scoped to the caller's user namespace.
-    expect(query).toHaveBeenCalledTimes(1);
-    const opts = query.mock.calls[0][1] as { namespace: string };
-    expect(opts.namespace).toBe("onboarding:U_onb");
-  });
-
   it("errors at the boundary when caller context is absent (no null path)", async () => {
-    const session = new FakeSession([{ id: "c1" }]);
+    const session = new FakeSession();
     let modelCalled = false;
     const model = new MockLanguageModelV4({
       doGenerate: async () => {

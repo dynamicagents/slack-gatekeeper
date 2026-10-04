@@ -82,7 +82,7 @@ export function slackTsToIso(ts: string): string {
  * Project a {@link TurnContext} into the authoritative `<turn>` wrapper the
  * Gatekeeper inlines into the outbound message text — the single source of
  * who/where/when read by the model, by remote agents, and (via {@link parseTurn})
- * by the recall archiver. Attributes are escaped with {@link escAttr}; the body
+ * by anything reading history back. Attributes are escaped with {@link escAttr}; the body
  * is sanitized with {@link sanitizeBody} to strip any `<turn>`/`</turn>` lookalikes
  * that could spoof provenance in the model-visible history.
  */

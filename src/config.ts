@@ -37,41 +37,6 @@ export const CHAT_MODEL = {
  */
 export const AVATAR_IMAGE_MODEL_ID = "@cf/black-forest-labs/flux-2-klein-9b";
 
-/**
- * Workers AI embedding model for episodic recall (archived compacted history).
- * bge-m3 — multilingual (Slack channels are not English-only) with a long context
- * window. 1024-dimensional — must match the `agent-recall` Vectorize index dims.
- */
-export const EMBED_MODEL_ID = "@cf/baai/bge-m3";
-
-/**
- * How many texts one embedding request carries. The provider would default to 3000;
- * this keeps the request the size the recall store has always sent.
- */
-export const EMBED_MAX_PER_CALL = 100;
-
-/**
- * UTF-8 **bytes** an input is truncated to before it is embedded.
- *
- * Stands in for the binding's `truncate_inputs`, which cannot be reached through the
- * provider: it spreads extra settings into `binding.run`'s *options*, while Cloudflare
- * declares `truncate_inputs` on the model's *inputs*, and `AiOptions` is a closed type
- * with nowhere to smuggle it through. That flag defaults to `false`, so without a cap
- * of our own one over-long message errors the whole batch instead of being shortened.
- *
- * **Bytes rather than characters**, because only bytes bound the *tokens*
- * {@link EMBED_MODEL_ID} counts against its 60,000-token window: its SentencePiece
- * vocabulary spends at least one byte per token, so the encoded length is an upper
- * bound on the token count. A character count is not — one uncommon character can cost
- * several tokens, so a character cap that looks safe for Latin text can still overflow
- * on rarer scripts and reject the whole batch.
- *
- * 48,000 leaves headroom under the window, and leaves ordinary messages untouched:
- * Slack's own per-message ceiling is 40,000 characters. Only the vector is affected —
- * Vectorize still stores the full text as metadata, so recall quotes messages exactly.
- */
-export const EMBED_INPUT_MAX_BYTES = 48_000;
-
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";
 

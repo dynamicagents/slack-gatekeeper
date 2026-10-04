@@ -1,11 +1,6 @@
 import type { LanguageModel, ToolSet } from "ai";
 import { generateText } from "ai";
-import type {
-  AppendOptions,
-  CompactionFunction,
-  SessionMessage,
-  Sessions
-} from "agents/sessions";
+import type { AppendOptions, SessionMessage, Sessions } from "agents/sessions";
 import { createCompactFunction } from "agents/sessions";
 import type { SqlProvider } from "agents/context";
 import { AgentContextProvider, ContextBlocks } from "agents/context";
@@ -31,8 +26,6 @@ export interface SessionLike {
     options?: AppendOptions
   ): Promise<unknown> | unknown;
   getHistory(): Promise<SessionMessage[]>;
-  /** Compaction overlays so far — non-empty ⇒ an episodic archive exists. */
-  getCompactions(): Promise<unknown[]>;
 }
 
 /**
@@ -70,40 +63,6 @@ export interface AgentSessionOptions {
    * see `COMPACT_TAIL_TOKENS` for why the two are one decision.
    */
   compactTailTokens: number;
-  /**
-   * Archive the raw messages displaced by each compaction (episodic recall).
-   * Best-effort: a throw here must never abort compaction.
-   */
-  onArchive?: (messages: SessionMessage[]) => Promise<void>;
-}
-
-/**
- * Wrap a compaction function so the raw messages it folds into a summary are
- * also handed to `onArchive` (which embeds them for later recall). The displaced
- * range is `fromMessageId..toMessageId` of the result, sliced from the `history`
- * the compaction saw. Archival failure is swallowed — compaction must still
- * shorten history even if the recall store is briefly unavailable.
- */
-export function archivingCompaction(
-  base: CompactionFunction,
-  onArchive?: (messages: SessionMessage[]) => Promise<void>
-): CompactionFunction {
-  if (!onArchive) return base;
-  return async (history) => {
-    const result = await base(history);
-    if (result) {
-      const from = history.findIndex((m) => m.id === result.fromMessageId);
-      const to = history.findIndex((m) => m.id === result.toMessageId);
-      if (from !== -1 && to !== -1) {
-        try {
-          await onArchive(history.slice(from, to + 1));
-        } catch (err) {
-          console.error("[recall] archive on compaction failed", err);
-        }
-      }
-    }
-    return result;
-  };
 }
 
 /**
@@ -140,16 +99,14 @@ export function buildAgentSession(
   model: LanguageModel,
   opts: AgentSessionOptions
 ): AgentSession {
-  const compact = archivingCompaction(
-    createCompactFunction({
-      summarize: compactionSummarizer(model),
-      keepRecentTokens: opts.compactTailTokens
-    }),
-    opts.onArchive
-  );
   const session = agent.sessions
     .session()
-    .onCompaction(compact)
+    .onCompaction(
+      createCompactFunction({
+        summarize: compactionSummarizer(model),
+        keepRecentTokens: opts.compactTailTokens
+      })
+    )
     .compactAfter(opts.compactAfterTokens);
   const context = new ContextBlocks(
     [

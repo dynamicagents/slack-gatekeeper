@@ -384,8 +384,8 @@ export async function dispatchToAgent(
 
   // The Gatekeeper owns provenance: who/where/when is inlined into the turn text via
   // the `<turn>` wrapper, once, identically for local and remote agents. Nothing
-  // structured rides alongside — downstream agents (and the recall archiver) read
-  // it back from the text. See renderTurn / parseTurn in shared/messages.
+  // structured rides alongside — downstream agents, and anything reading history
+  // back, read it out of the text. See renderTurn / parseTurn in shared/messages.
   const text = renderTurn(payload.text, turnContextFromPayload(payload));
 
   if (!ns) {

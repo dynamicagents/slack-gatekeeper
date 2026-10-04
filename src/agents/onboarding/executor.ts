@@ -15,8 +15,6 @@ import {
 import { executeAgentTurn, turnGatewayCall } from "@/agents/shared/loop";
 import { isCancelRequested } from "@/db/models/agent-tasks";
 import { callerContext } from "@/agents/shared/prompt";
-import { archiveMessages } from "@/agents/shared/recall";
-import { recallTools } from "@/agents/shared/recall-tool";
 import { A2AAgent } from "../base";
 import { onboardingSoul } from "./prompt";
 import { buildOnboardingTools } from "./tools";
@@ -43,7 +41,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
   ) {}
 
   /** Lazily build the one session for this DO (one per user). */
-  private getSession(namespace: string): AgentSession {
+  private getSession(): AgentSession {
     if (!this.built) {
       // Labelled so a compaction summary is distinguishable from a round in the
       // AI Gateway log. No workspace: this agent runs per user, not per
@@ -61,8 +59,7 @@ export class OnboardingAgentExecutor implements AgentExecutor {
               "Durable facts about this user — their name, role, and what they're trying to set up. Keep it concise.",
             memoryMaxTokens: 1000,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
-            compactTailTokens: COMPACT_TAIL_TOKENS,
-            onArchive: (msgs) => archiveMessages(namespace, msgs)
+            compactTailTokens: COMPACT_TAIL_TOKENS
           });
     }
     return this.built;
@@ -100,18 +97,12 @@ export class OnboardingAgentExecutor implements AgentExecutor {
           );
         }
         const ctx = metadata.user;
-        // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
-        const namespace = `onboarding:${ctx.slackUserId}`;
-        const { session, context } = this.getSession(namespace);
-        const hasArchive = (await session.getCompactions()).length > 0;
+        const { session, context } = this.getSession();
         return {
           session,
           context,
           systemSuffix: callerContext(ctx),
-          tools: {
-            ...buildOnboardingTools({ ctx }),
-            ...recallTools(namespace, hasArchive)
-          }
+          tools: buildOnboardingTools({ ctx })
         };
       }
     });

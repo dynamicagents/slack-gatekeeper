@@ -177,7 +177,7 @@ Register it with this gatekeeper using its **endpoint** and its **tenant id** �
 
 A deployed instance of this gatekeeper is **permanently bound to a single Slack workspace** (team ID). On the first `reconcile()` run, the bot's workspace is pinned as a write-once anchor in D1. Every subsequent reconcile, and every inbound Slack event, asserts this anchor. A mismatch causes an immediate abort — no registry writes occur.
 
-This is intentional. Every channel ID, user ID, primary-owner flag, and auth assumption stored in D1 and Vectorize is workspace-specific. Swapping the bot token to a different workspace while reusing the same Worker state would silently corrupt all of that data.
+This is intentional. Every channel ID, user ID, primary-owner flag, and auth assumption stored in D1 is workspace-specific. Swapping the bot token to a different workspace while reusing the same Worker state would silently corrupt all of that data.
 
 ### Migrating to a new workspace
 
@@ -186,7 +186,7 @@ There is no in-place migration path. The only safe approach is:
 1. **Export your current config** — ask the admin agent to list all workspace and agent configurations (channels, roles, agent IDs, etc.).
 2. **Deploy a brand-new Worker** for the new workspace (`npx wrangler deploy` on a fresh clone, with new secrets).
 3. **Re-create your configuration** on the new Worker — paste the exported config into the admin agent on the new workspace and let it recreate the entries.
-4. **Delete the old Worker** if no longer needed. Note that some bindings are independent global primitives and must be deleted separately: **D1 databases**, **Vectorize indexes**, and **KV namespaces**. Secrets and Durable Objects are deleted automatically with the Worker.
+4. **Delete the old Worker** if no longer needed. Note that some bindings are independent global primitives and must be deleted separately: **D1 databases** and **KV namespaces**. Secrets and Durable Objects are deleted automatically with the Worker.
 
 ---
 
@@ -233,7 +233,7 @@ Required one-time configuration:
   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The token needs Account ›
   Workers Scripts › Edit, Account › D1 › Edit for the migrations, and Zone ›
   Workers Routes › Edit on the custom domain's zone, which every deploy
-  re-asserts. Bound resources such as Vectorize and Workers AI need no scope of
+  re-asserts. Bound resources such as Workers AI need no scope of
   their own to deploy against.
 - The Worker runtime secrets (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
   `GATEKEEPER_JWT_PRIVATE_KEY`) are deliberately not stored in GitHub. Set them
