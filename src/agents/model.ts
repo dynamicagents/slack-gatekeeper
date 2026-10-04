@@ -1,7 +1,6 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { wrapLanguageModel, type LanguageModel } from "ai";
+import type { LanguageModel } from "ai";
 import { env } from "cloudflare:workers";
-import { normalizeToolInputMiddleware } from "@/agents/model-middleware";
 import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
 
 /**
@@ -40,9 +39,10 @@ export type GatewayPhase = "round" | "compaction";
  * The first five a request carries are stored and the rest silently ignored, and
  * values may only be scalars. Nothing fails when a sixth is sent: the call
  * succeeds and the row is written one dimension short, with no error anywhere to
- * say which. So {@link GatewayCallFields} stays at or under this, and a new
- * dimension past it has to displace one in a diff a reviewer can see —
- * `model.spec.ts` fails the build if the declared set outgrows it.
+ * say which. {@link GatewayCallFields} declares four, so there is one entry of
+ * headroom — and because {@link gatewayLogFields} lists what it sends by hand, a
+ * fifth and a sixth both arrive in a diff someone reads rather than going missing
+ * from every call in production.
  */
 export const GATEWAY_METADATA_MAX = 5;
 
@@ -202,10 +202,9 @@ function agentProvider() {
  * Built per call rather than memoised, because the gateway metadata is per call
  * and the provider freezes it at model construction. A `customProvider` registry
  * cannot serve this: it maps a *name* to one model instance, which is exactly
- * what per-turn metadata cannot be. The cost is two object allocations per turn —
- * `wrapLanguageModel` and the `WorkersAIChatLanguageModel` are plain objects that
- * open no connection — against a gateway log that can say which thread it
- * belonged to.
+ * what per-turn metadata cannot be. The cost is one object allocation per turn —
+ * a `WorkersAIChatLanguageModel` is a plain object that opens no connection —
+ * against a gateway log that can say which thread it belonged to.
  */
 export function chatModel(
   call: GatewayCall,
@@ -216,12 +215,9 @@ export function chatModel(
   // `x-session-affinity` header, and an empty one would pin every unkeyed call in
   // the account to a single instance.
   const affinity = overrides.sessionAffinity;
-  return wrapLanguageModel({
-    model: agentProvider()(CHAT_MODEL.id, {
-      gateway: gatewayFor(call),
-      reasoning_effort: CHAT_MODEL.reasoningEffort,
-      ...(affinity ? { sessionAffinity: affinity } : {})
-    }),
-    middleware: normalizeToolInputMiddleware
+  return agentProvider()(CHAT_MODEL.id, {
+    gateway: gatewayFor(call),
+    reasoning_effort: CHAT_MODEL.reasoningEffort,
+    ...(affinity ? { sessionAffinity: affinity } : {})
   });
 }
