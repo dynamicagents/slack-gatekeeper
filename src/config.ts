@@ -1,58 +1,34 @@
 /** Name of the Slack channel whose members are org-level admins. */
 export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
 
-/** A chat model and the reasoning budget that belongs to that model. */
-interface ChatModel {
-  /** A Workers AI model id. Must support function calling. */
-  readonly id: string;
-  /**
-   * The highest `reasoning_effort` **this model's own documentation** defines.
-   * Not shared with any other model — see {@link CHAT_MODELS}.
-   */
-  readonly reasoningEffort: string;
-}
-
 /**
- * The chat models all in-repo agents run on, in the order they are tried: the
- * primary first, then the fallback the middleware reaches for when the primary
- * fails or answers in prose under an enforced tool choice. Both must support
- * function calling.
+ * The one chat model every in-repo agent runs on, and the reasoning budget that
+ * belongs to that model. Must support function calling.
  *
- * `reasoningEffort` is paired with its `id` because it is a property of that
- * model, not a global preference: Cloudflare documents a different
- * `reasoning_effort` enum per model and they do not overlap above `high`.
+ * `reasoningEffort` is paired with its `id` rather than standing alone because it
+ * is a property of that model, not a global preference: Cloudflare documents a
+ * different `reasoning_effort` enum per model and they do not overlap above
+ * `high`.
  *
  * **Nothing will tell you when it is wrong.** Workers AI coerces an unknown
- * effort instead of rejecting it: a single shared `"medium"` was once aimed at
- * GLM-5.2, whose enum has no `medium` at all, and every AI Gateway request body
- * showed it arriving as `high`. So when you change a model here, check its page
- * for its `reasoning_effort` enum, record it in the comment above the entry, and
- * set `reasoningEffort` to the highest that model offers — left to the
- * provider's default depth, GLM has answered registry questions from the
- * conversation instead of calling the tool that would have checked.
+ * effort instead of rejecting it: a shared `"medium"` was once aimed at GLM-5.2,
+ * whose enum has no `medium` at all, and every AI Gateway request body showed it
+ * arriving as `high`. So when you change the model here, check its page for its
+ * `reasoning_effort` enum, record it in the comment below, and set
+ * `reasoningEffort` to the highest that model offers — left to the provider's
+ * default depth, GLM has answered registry questions from the conversation
+ * instead of calling the tool that would have checked.
  *
- * The two efforts do not travel the same way. The primary's rides as a model
- * setting; the fallback's cannot, because `workers-ai-provider` types
- * `reasoning_effort` as the flash models' `"low" | "medium" | "high"`, so `max`
- * does not typecheck there even though `binding.run` forwards it untouched. It
- * goes through `providerOptions["workers-ai"]` instead, applied by the fallback
- * middleware. One consequence while editing: the primary's effort is typechecked
- * against that enum and the fallback's is not, so a primary ceiling the provider
- * does not declare is a compile error rather than a silent coercion.
+ * `as const` keeps both as literals, which is what lets the provider accept the
+ * id and typecheck the effort against the enum it declares for *this* model — so
+ * a ceiling the provider does not know about is a compile error at the model
+ * settings rather than a silent coercion on every call.
  */
-export const CHAT_MODELS = [
+export const CHAT_MODEL = {
   // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | medium | high
-  { id: "@cf/zai-org/glm-5.3-flash", reasoningEffort: "high" },
-  // @cf/zai-org/glm-5.2 — reasoning_effort: none | high | max
-  { id: "@cf/zai-org/glm-5.2", reasoningEffort: "max" }
-  // `satisfies` rather than an annotation: it makes the pairing structural — an
-  // entry added with an `id` and no `reasoningEffort` will not compile — while
-  // `as const` keeps both as literals, which is what lets the provider accept the
-  // id and typecheck the primary's effort against its declared enum.
-] as const satisfies readonly ChatModel[];
-
-/** The model a turn is run on, and the fallback tried within the failing call. */
-export const [CHAT_PRIMARY, CHAT_FALLBACK] = CHAT_MODELS;
+  id: "@cf/zai-org/glm-5.3-flash",
+  reasoningEffort: "high"
+} as const;
 
 /**
  * Workers AI text-to-image model for admin avatar generation. FLUX.2 [klein] 9B —

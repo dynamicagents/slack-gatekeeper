@@ -121,9 +121,9 @@ export function stubAgentAi(text = "stubbed agent reply") {
     }
     // An agent running with `requireFinalReply` cannot end a turn in prose, so
     // the stub has to answer the way the real contract does. Replying with text
-    // would make the turn spend its whole step budget and then a salvage call,
-    // outliving the test that stubbed this binding and rejecting against the real
-    // one on its detached promise.
+    // would make the turn spend its whole step budget, outliving the test that
+    // stubbed this binding and rejecting against the real one on its detached
+    // promise.
     const requiresFinalReply = (inputs?.tools ?? []).some(
       (t) => t?.function?.name === "final_reply"
     );

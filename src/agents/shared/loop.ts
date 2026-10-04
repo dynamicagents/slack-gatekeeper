@@ -6,7 +6,6 @@ import type {
   FinishReason,
   GenerateTextOnStepEndCallback,
   LanguageModel,
-  ModelMessage,
   OnToolExecutionEndCallback,
   PrepareStepFunction,
   StopCondition,
@@ -102,8 +101,7 @@ const NOT_CARRIED_OUT = "Not carried out.";
  * schema object `finalReplyTool` declares, so the two cannot disagree.
  *
  * Typed by what it reads rather than as `GenerateTextResult`, whose three type
- * parameters describe a tool set this turn only assembles at runtime — and so that
- * the one-tool salvage call can be read by the same function.
+ * parameters describe a tool set this turn only assembles at runtime.
  */
 function readFinalReply(result: {
   finalStep: {
@@ -202,17 +200,7 @@ function workspaceIdOf(
 }
 
 /**
- * A turn's rounds of asking, as the AI Gateway log numbers them.
- *
- * Two, at most: the loop itself, and — only when that came back with no answer —
- * the one salvage below. They are separate charges for the same turn, and the
- * number is the only thing in the gateway log that tells them apart.
- */
-const MAIN_ROUND = 1;
-const SALVAGE_ROUND = 2;
-
-/**
- * What an executor labels one round of a turn with, for the AI Gateway log.
+ * What an executor labels a turn's round of asking with, for the AI Gateway log.
  *
  * Here rather than in each executor because it reads the same wire metadata this
  * module already reads, off the same request — and because an executor has to
@@ -228,18 +216,16 @@ const SALVAGE_ROUND = 2;
  */
 export function turnGatewayCall(
   agent: GatewayAgent,
-  requestContext: RequestContext,
-  round: number
+  requestContext: RequestContext
 ): GatewayCall {
   const metadata = (requestContext.userMessage.metadata ??
     {}) as Partial<AgentTurnMetadata>;
   return {
     agent,
     phase: "round",
-    round,
     channel: requestContext.contextId,
     workspaceId: workspaceIdOf(metadata),
-    eventId: `${requestContext.taskId}:r${round}`
+    eventId: requestContext.taskId
   };
 }
 
@@ -267,19 +253,10 @@ export interface PreparedTurn {
 
 export interface AgentTurnConfig {
   /**
-   * The one model a turn runs on, built per round of asking.
-   *
-   * A function rather than a model because a model freezes its gateway metadata at
-   * construction, and `round` — with the `eventId` derived from it — is the one
-   * entry that differs between the loop's own round and the salvage after it. The
-   * cost is a second object allocation on the turns that salvage; the alternative
-   * is two charges that look identical in the gateway log.
-   *
-   * It carries its own fallback — see
-   * {@link file://../model-fallback-middleware.ts model-fallback-middleware.ts} —
-   * so a second model is not this layer's concern.
+   * The one model a turn runs on, built by the executor with this turn's gateway
+   * identity frozen into it — see {@link turnGatewayCall}.
    */
-  model: (round: number) => LanguageModel;
+  model: LanguageModel;
   /**
    * Assemble the session/tools/system for this turn. Runs *inside* the protected
    * body, so throwing here (e.g. missing required metadata) yields the friendly
@@ -417,12 +394,11 @@ function publishInputRequired(
  * + publish the final reply, and always `finished()`. Agent-specific behavior
  * (which session, which tools, which caller context) is supplied by `cfg.prepare`.
  *
- * One call, because the SDK's loop already owns everything a wrapper around it
- * would re-implement: a rejected ending comes back to the model as a failed tool
- * result on the next step, the forced final round is that loop's last step, and
- * an unreachable model is answered a layer down by the model's own fallback. The
- * single exception is `salvageEnding` below, for a turn the loop leaves with no
- * answer at all.
+ * One call, and only one: the SDK's loop already owns everything a wrapper around
+ * it would re-implement — a rejected ending comes back to the model as a failed
+ * tool result on the next step, and the forced final round is that loop's last
+ * step. A turn the loop leaves with no answer at all is reported as one, not
+ * asked again.
  */
 export async function executeAgentTurn(
   requestContext: RequestContext,
@@ -432,10 +408,7 @@ export async function executeAgentTurn(
   const userMessage = requestContext.userMessage;
   const text = textOf(userMessage);
   const metadata = (userMessage.metadata ?? {}) as Partial<AgentTurnMetadata>;
-  // Built here, once, so the turn log can name the model before anything can fail.
-  // The salvage builds its own below, and only if it runs.
-  const roundModel = cfg.model(MAIN_ROUND);
-  const modelId = modelIdOf(roundModel);
+  const modelId = modelIdOf(cfg.model);
   // Opened before anything can fail, and flushed in the `finally`, so a turn that
   // throws on its first await still reports what it was and how long it took.
   const turnLog = startTurnLog({
@@ -579,10 +552,10 @@ export async function executeAgentTurn(
         : history
     );
 
-    // Every tool call this turn actually executed, across every attempt — the
-    // primary's, a repair's, and the fallback's alike. All of them really ran and
-    // really had side effects, so all of them are recorded: a fallback that
-    // repeated an update performed two updates, and history should say so.
+    // Every tool call this turn actually executed, across every attempt — its own
+    // and a repair's alike. All of them really ran and really had side effects, so
+    // all of them are recorded: a repair that repeated an update performed two
+    // updates, and history should say so.
     //
     // `final_reply` never appears here. It has no `execute`, so it produces no
     // result to record — its text is the message body, not an action.
@@ -663,8 +636,7 @@ export async function executeAgentTurn(
      * `ToolChoiceViolationError` at `generate-text.ts:1150`, so the promise never
      * resolves and there is no result — but the callback has already fired at
      * `:1128`. Reading usage from the result would report nothing for exactly the
-     * turns that cost the most, which is both models answering in prose and then
-     * a salvage on top.
+     * turns that spent every step and then answered in prose.
      */
     const onLanguageModelCallEnd = (event: ModelCallLike): void => {
       turnLog.modelCall(event);
@@ -775,7 +747,7 @@ export async function executeAgentTurn(
 
     const runTurn = () =>
       generateText({
-        model: roundModel,
+        model: cfg.model,
         instructions,
         messages,
         tools: turnTools,
@@ -798,38 +770,9 @@ export async function executeAgentTurn(
         onToolExecutionEnd,
         onLanguageModelCallEnd,
         // The telemetry opt-out, shared with the compaction summarizer so the two
-        // call sites cannot drift. Reasoning depth is not here: it belongs to the
-        // model, because the primary and the fallback do not accept the same
-        // levels — see {@link file://../model.ts model.ts}.
-        ...CHAT_CALL_OPTIONS
-      });
-
-    /**
-     * Ask for an ending, once, with nothing else on the table.
-     *
-     * Reached only when the loop came back with no reply: the model narrated under
-     * the advisory `required` and the SDK raised the violation, or the ending step's
-     * own call was malformed with no budget left to repair it. Both are endings the
-     * turn can still recover, and the enforced tool choice is the one lever the
-     * failed steps did not have.
-     *
-     * No `onStepEnd`: nothing but the reply is declared, so there is no action to
-     * record and no intermediate text to publish.
-     */
-    const salvageEnding = (seed: ModelMessage[]) =>
-      generateText({
-        // Its own model, so its own `round` — a salvage is a second charge against
-        // the gateway, and the turn log's `salvaged` flag is on the other side of
-        // the join from the row that paid for it.
-        model: cfg.model(SALVAGE_ROUND),
-        instructions: instructions + FINAL_ROUND_CONTRACT,
-        messages: seed,
-        tools: { [FINAL_REPLY_TOOL_NAME]: finalReplyTool },
-        toolChoice: { type: "tool", toolName: FINAL_REPLY_TOOL_NAME },
-        stopWhen: [isStepCount(1)],
-        // The one callback the salvage does want: it is a charged call like any
-        // other, and the case it exists for is the one where it narrates too.
-        onLanguageModelCallEnd,
+        // call sites cannot drift. Reasoning depth is not here either: it is a
+        // property of the model, set where the model is built — see
+        // {@link file://../model.ts model.ts}.
         ...CHAT_CALL_OPTIONS
       });
 
@@ -840,12 +783,12 @@ export async function executeAgentTurn(
       result = await runTurn();
       reply = required ? readFinalReply(result) : readPlainReply(result);
     } catch (err) {
-      // Narration under an enforced tool choice arrives as a throw, not a result —
-      // the SDK enforces the constraint it cannot make the model honour, and it only
-      // does so once the model's own fallback has answered in prose too. It is an
-      // *ending*, not an outage: both models were reachable and answered, they just
-      // answered in prose. Catching it here keeps the turn off the failure path and
-      // on the one that asks once more for an answer.
+      // Narration under an enforced tool choice arrives as a throw, not a result:
+      // the SDK enforces the constraint it cannot make the model honour, and the
+      // throw carries the whole run away with it. It is an *ending*, not an
+      // outage — the model was reachable and answered, it just answered in prose
+      // — so catching it here keeps the turn off the failure path and on the one
+      // that reports having nothing to say.
       if (!ToolChoiceViolationError.isInstance(err)) throw err;
       console.warn("[agent-loop] narrated under an enforced tool choice", {
         model: modelId,
@@ -873,54 +816,16 @@ export async function executeAgentTurn(
     // The prompt the last step stopped on, if it stopped on one.
     const pause = result ? openCallOf(result.finalStep) : undefined;
 
-    // A 🛑 or a prompt out-ranks the reply and ends the turn here: neither is a
-    // reason to spend another call.
-    const interrupted = (await checkCanceled()) || pause !== undefined;
-
-    if (required && reply === undefined && !interrupted) {
-      turnLog.salvaged();
-      console.warn("[agent-loop] no ending; asking once more with none else", {
-        model: modelId,
-        finishReason: result?.finishReason,
-        contextId: requestContext.contextId
-      });
-      try {
-        // With a result there is a whole run to report, so hand it over. A violation
-        // discards the run, leaving only history — which is all the round this
-        // replaces ever had. What history must *not* still carry is an approval the
-        // SDK was never told the outcome of: seeded with that, the salvage collects
-        // the same decision again and sends the call on with no result at all. So the
-        // settled record is folded in instead.
-        const seed = result
-          ? [...messages, ...result.responseMessages]
-          : approvalAction
-            ? await toModelMessages([
-                ...history,
-                toolCallSessionMessage(approvalAction)
-              ])
-            : messages;
-        const salvaged = await salvageEnding(seed);
-        reply = readFinalReply(salvaged);
-      } catch (err) {
-        if (!ToolChoiceViolationError.isInstance(err)) throw err;
-        console.warn("[agent-loop] narrated again under the enforced ending", {
-          model: modelId,
-          contextId: requestContext.contextId
-        });
-      }
-    }
-
     // Every exit below persists `persisted()` alongside whatever the turn managed
     // to say. The tools ran and their side effects are real however the turn ended;
     // a side effect the transcript does not show is exactly how a later turn ends
     // up guessing at what happened.
 
     // Re-check after generation, not only between steps. A turn the model answers
-    // in a single step has no step boundary to be interrupted at, and neither does
-    // a salvage call, so this is the only chance to notice a 🛑 that landed while
-    // either was generating. The work is already spent by then, but the answer must
-    // still be withheld: the user was told "🛑 Stopped.", and delivering the reply
-    // anyway is the bug this fixes.
+    // in a single step has no step boundary to be interrupted at, so this is the
+    // only chance to notice a 🛑 that landed while it was generating. The work is
+    // already spent by then, but the answer must still be withheld: the user was
+    // told "🛑 Stopped.", and delivering the reply anyway is the bug this fixes.
     await checkCanceled();
 
     // Stopped: whatever was produced is abandoned work, not an answer. Publish an

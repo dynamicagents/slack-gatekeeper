@@ -104,13 +104,9 @@ export class AdminAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      // Per round, not per instance: the model carries this round's identity into
+      // Per turn, not per instance: the model carries this turn's identity into
       // the AI Gateway log, and that is the only channel the gateway has for it.
-      model: (round) =>
-        chatModel(
-          turnGatewayCall("admin", requestContext, round),
-          this.options
-        ),
+      model: chatModel(turnGatewayCall("admin", requestContext), this.options),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
