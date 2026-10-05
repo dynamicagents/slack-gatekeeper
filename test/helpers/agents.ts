@@ -1,235 +1,59 @@
 import { vi } from "vitest";
-import { env } from "cloudflare:workers";
-import type { SessionMessage, Sessions } from "agents/sessions";
-import type { AgentExecutionEvent } from "@a2a-js/sdk/server";
-import type { TaskState } from "@a2a-js/sdk";
-import { partsText } from "@/a2a/parts";
-import type {
-  AgentSession,
-  ContextLike,
-  SessionHost,
-  SessionLike
-} from "@/agents/shared/session";
-import type { OpenCall, OpenCallStore } from "@/agents/shared/open-call";
-import { userMessage } from "./a2a";
+import { exports } from "cloudflare:workers";
 
 /**
- * In-memory stand-in for the `{ session, context }` pair an agent DO owns, for
- * driving executors and turns without a Durable Object. One object plays both
- * halves — a fake has no reason to keep history and the prompt blocks apart —
- * and {@link fakeAgentSession} splits it back into the pair the seams take.
+ * Driving the built-in agents end to end.
  *
- * `appendSpy` lets tests assert on persisted messages.
- */
-export class FakeSession implements SessionLike, ContextLike {
-  messages: SessionMessage[] = [];
-  appendSpy = vi.fn(async (m: SessionMessage) => {
-    this.messages.push(m);
-  });
-  async appendMessage(m: SessionMessage) {
-    return this.appendSpy(m);
-  }
-  async getHistory() {
-    return this.messages;
-  }
-  async refreshSystemPrompt() {
-    return "SYSTEM PROMPT";
-  }
-  async tools() {
-    return {};
-  }
-}
-
-/** A {@link FakeSession} as the `{ session, context }` pair the seams expect. */
-export function fakeAgentSession(fake: FakeSession): AgentSession {
-  return { session: fake, context: fake };
-}
-
-/**
- * The `SessionHost` an executor is constructed with, for specs that drive one
- * without a Durable Object. Every such spec also supplies `createSession`, so
- * neither half of the host is ever read — `sessions` throws rather than
- * returning an empty stub, so a spec that stops passing that seam fails loudly
- * instead of silently building a session on nothing.
- */
-export function fakeSessionHost(): SessionHost {
-  return {
-    sql: () => [],
-    get sessions(): Sessions {
-      throw new Error("fakeSessionHost: `sessions` should not be reached");
-    }
-  };
-}
-
-/**
- * A Map-backed `OpenCallStore`: `held` lets a spec seed a question a turn asked
- * earlier, or check what a pausing turn kept.
- */
-export class MemoryOpenCalls implements OpenCallStore {
-  held = new Map<string, OpenCall>();
-  async put(call: OpenCall) {
-    this.held.set(call.requestId, call);
-  }
-  async settle(requestId: string, record: (call: OpenCall) => Promise<void>) {
-    const call = this.held.get(requestId) ?? null;
-    if (!call) return null;
-    await record(call);
-    this.held.delete(requestId);
-    return call;
-  }
-}
-
-/**
- * Stub the whole `AI` binding so a built-in agent's turn completes offline.
+ * A built-in is a core tenant on this Worker, and core talks to the gatekeeper
+ * over HTTP like any remote agent would: its edge fetches the gatekeeper's
+ * JWKS to verify a dispatch, and its task host POSTs every reply to
+ * `/a2a/notifications`. In production both reach this same Worker at its
+ * public URL; here {@link stubOutbound} sends them there, through its own
+ * default export, and
+ * hands everything else to a Slack stub.
  *
- * `remoteBindings: false` (vitest.config.ts) makes the real binding throw
- * "Binding AI needs to be run remotely". Specs that only trigger an agent turn
- * as a *side effect* — a Slack event that wakes the admin/onboarding DO — never
- * await that turn, so the failure escapes on the DO's detached promise and
- * vitest reports it as an unhandled rejection. Restore with
- * `vi.restoreAllMocks()`.
+ * The model is the one thing faked, in `test/worker.ts`.
  */
-export function stubAgentAi(text = "stubbed agent reply") {
-  return vi.spyOn(env.AI, "run").mockImplementation((async (
-    _model: string,
-    inputs?: { tools?: { function?: { name?: string } }[] }
-  ) => {
-    // An agent running with `requireFinalReply` cannot end a turn in prose, so
-    // the stub has to answer the way the real contract does. Replying with text
-    // would make the turn spend its whole step budget, outliving the test that
-    // stubbed this binding and rejecting against the real one on its detached
-    // promise.
-    const requiresFinalReply = (inputs?.tools ?? []).some(
-      (t) => t?.function?.name === "final_reply"
-    );
-    return requiresFinalReply
-      ? {
-          response: "",
-          tool_calls: [{ name: "final_reply", arguments: { text } }]
-        }
-      : { response: text };
-  }) as never);
-}
 
-// Minimal valid generate result. The shape is the v4 one the provider actually
-// speaks — `finishReason` as an object, structured `usage` — and `MockLanguageModelV4`
-// declares that same spec, so what a spec returns here is what the SDK reads with
-// nothing converting in between.
-export function okResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    finishReason: { unified: "stop" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
-
-/** Like `okResult` but signals the model hit its output-length cap. */
-export function lengthResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    finishReason: { unified: "length" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
-
-export function toolCallResult(toolName: string, input: unknown) {
-  return {
-    content: [
-      {
-        type: "tool-call",
-        toolCallId: "tc1",
-        toolName,
-        input: JSON.stringify(input)
-      }
-    ],
-    finishReason: { unified: "tool-calls" },
-    usage: {
-      inputTokens: { total: 1, noCache: 1 },
-      outputTokens: { total: 1 },
-      totalTokens: 2
-    },
-    warnings: []
-  };
-}
+export { SCRIPTED_REPLY } from "../worker";
 
 /**
- * How an agent running with `requireFinalReply` ends a turn: the reply arrives as
- * the `final_reply` control call's input, not as plain text. Use this wherever a
- * spec would otherwise have used {@link okResult} to answer.
+ * Stub global fetch: a request to `origin` — the gatekeeper's own `public_url`
+ * in the spec — goes to this Worker; anything else is a Slack Web API call,
+ * answered by `slack(method, body)` the way `stubSlack` answers it. Call
+ * `vi.unstubAllGlobals()` in `afterEach` to restore.
  */
-export function finalReplyResult(text: string, toolCallId = "fr1") {
-  return {
-    ...toolCallResult("final_reply", { text }),
-    content: [
-      {
-        type: "tool-call",
-        toolCallId,
-        toolName: "final_reply",
-        input: JSON.stringify({ text })
-      }
-    ]
-  };
-}
-
-/** Extract text from the terminal A2A task-status event captured by a test bus. */
-export function terminalTaskText(
-  events: AgentExecutionEvent[]
-): string | undefined {
-  const event = events.at(-1);
-  if (event?.kind !== "statusUpdate") return undefined;
-  return partsText(event.data.status?.message?.parts);
-}
-
-/**
- * The terminal A2A state a test bus captured. A2A v1.0 carries no structured
- * task error, so this state is the only machine-readable signal that a turn
- * failed — assert on it rather than on wording in the reply.
- */
-export function terminalTaskState(
-  events: AgentExecutionEvent[]
-): TaskState | undefined {
-  const event = events.at(-1);
-  if (event?.kind !== "statusUpdate") return undefined;
-  return event.data.status?.state;
-}
-
-/** A one-turn agent request plus a capturing event bus, shared by executor specs. */
-export function makeRequest(opts: {
-  contextId: string;
-  text: string;
-  metadata: Record<string, unknown>;
-}) {
-  const published: AgentExecutionEvent[] = [];
-  let finished = false;
-  const eventBus = {
-    publish: (e: unknown) => published.push(e as never),
-    finished: () => {
-      finished = true;
+export function stubOutbound(
+  origin: string,
+  slack: (method: string, body: URLSearchParams) => unknown
+): void {
+  vi.stubGlobal(
+    "fetch",
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.origin === origin) return exports.default.fetch(request);
+      const method = url.pathname.split("/").pop() ?? "";
+      const form = new TextDecoder().decode(await request.arrayBuffer());
+      const payload = slack(method, new URLSearchParams(form));
+      return Response.json(payload);
     }
-  };
-  const requestContext = {
-    contextId: opts.contextId,
-    taskId: "task-test",
-    userMessage: userMessage(opts.text, {
-      contextId: opts.contextId,
-      metadata: opts.metadata
-    })
-  };
-  return {
-    published,
-    isFinished: () => finished,
-    // Cast at the boundary — we only exercise the fields the executor reads.
-    eventBus: eventBus as never,
-    requestContext: requestContext as never
-  };
+  );
+}
+
+/**
+ * Wait until `done()` holds, for what a built-in delivers after the workflow
+ * that dispatched it has finished: its reply travels through core's task
+ * workflow and push callback, so the dispatching workflow reaching `complete`
+ * says nothing about it having landed.
+ */
+export async function eventually(
+  done: () => boolean | Promise<boolean>,
+  timeoutMs = 20_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await done())) {
+    if (Date.now() > deadline) throw new Error("eventually: timed out");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }

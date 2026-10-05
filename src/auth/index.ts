@@ -1,2 +1,2 @@
-export { authorize, buildUserAuthContext } from "./authorize";
-export type { UserAuthContext, PermissionRequirement } from "./authorize";
+export { buildUserAuthContext } from "./authorize";
+export type { UserAuthContext } from "./authorize";

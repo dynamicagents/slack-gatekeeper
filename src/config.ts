@@ -1,3 +1,5 @@
+import type { WorkersAIModelOptions } from "@dynamicagents/core/model";
+
 /** Name of the Slack channel whose members are org-level admins. */
 export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
 
@@ -16,29 +18,26 @@ export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
  * arriving as `high`. So when you change the model here, read that model's enum
  * off `worker-configuration.d.ts` — `wrangler types` writes one input type per
  * catalog model, and it is the copy that moves when the catalog does — record it
- * in the comment below, and set `reasoningEffort` to the highest that model
- * offers. Left to the default depth, GLM has answered registry questions from the
- * conversation instead of calling the tool that would have checked.
+ * in the comment below, and set `reasoningEffort` to the highest that both the
+ * model and core's `workersAIModel` accept. Left to the default depth, GLM has
+ * answered registry questions from the conversation instead of calling the tool
+ * that would have checked.
  *
- * `as const` keeps both as literals, which is what lets the provider accept the
- * id; `satisfies` is what still rejects a level this model does not declare, now
- * that the provider cannot. `workers-ai-provider` types its `reasoning_effort`
- * model setting `low | medium | high`, a generation behind the runtime, so `max`
- * does not compile as a model setting at all and travels as a per-call
- * `providerOptions["workers-ai"]` entry instead — see `CHAT_CALL_OPTIONS` in
- * `agents/model.ts`. That route is plain JSON to the compiler, which is why the
- * ceiling is checked here against the generated types rather than there against
- * the provider's.
+ * `satisfies` checks the level against both: the model's enum as the generated
+ * types declare it, and core's option type, which is `workers-ai-provider`'s
+ * `low | medium | high` — a generation behind the runtime, which is why `max`
+ * is out of reach here even where a model offers it.
  */
 export const CHAT_MODEL = {
   // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | high | max
   id: "@cf/zai-org/glm-5.3-flash",
-  reasoningEffort: "max"
+  reasoningEffort: "high"
 } as const satisfies {
   id: keyof AiModels;
   reasoningEffort: NonNullable<
     AiModels["@cf/zai-org/glm-5.3-flash"]["inputs"]["reasoning_effort"]
-  >;
+  > &
+    NonNullable<WorkersAIModelOptions["reasoningEffort"]>;
 };
 
 /**
@@ -52,22 +51,18 @@ export const AVATAR_IMAGE_MODEL_ID = "@cf/black-forest-labs/flux-2-klein-9b";
 export const AI_GATEWAY_ID = "default";
 
 /**
- * History token estimate that triggers Session compaction, and the token budget
- * for the verbatim tail that compaction leaves untouched.
+ * History token estimate past which a built-in agent compacts, and the recent
+ * tail compaction keeps verbatim — core's `compactAfterTokens` and
+ * `keepRecentTokens`. One policy for every built-in.
  *
- * One policy for every in-repo agent. (The `memory` block size *is* tuned per
- * agent; this is not.)
+ * **The two constants move together.** Compaction summarizes what lies before
+ * the tail, so a threshold not comfortably above the tail leaves nothing to
+ * summarize and every later turn pays for a wasted summarizer call. A tail of
+ * roughly a third of the threshold keeps the middle worth compressing.
  *
- * **The two constants move together.** Compaction summarizes the span between
- * the protected head and the tail, so a threshold that is not comfortably above
- * the tail budget leaves nothing to summarize: the compaction function returns
- * null, history is never shortened, and every later message pays for a wasted
- * summarizer call. A tail of roughly a third of the threshold keeps the middle
- * worth compressing. Raise one and you must raise the other.
- *
- * The AI SDK re-sends the whole history on every tool step, so this ceiling —
- * not the model's context window, which is far larger — is what per-turn latency
- * and cost scale with.
+ * The whole history is re-sent on every tool step, so this ceiling — not the
+ * model's context window, which is far larger — is what per-turn latency and
+ * cost scale with.
  */
 export const COMPACT_AFTER_TOKENS = 12_000;
 export const COMPACT_TAIL_TOKENS = 4_000;
@@ -101,20 +96,17 @@ export const HITL_REQUEST_TTL_SECONDS = 7 * 24 * 60 * 60;
  * a fresh leg of that agent's budget. Charging a slow human to the agent's budget
  * would kill approvals left over a weekend, which is the case that TTL exists for.
  *
- * Only remote agents can reach this. A built-in runs inside a Durable Object held
- * alive by `SETTLE_TIMEOUT_MS` (8 minutes) — see `a2a/notifications/local.ts`,
- * which explains why that one must *not* be raised to match. Built-ins are also
- * unmodifiable through the admin tools, so they keep this value for good.
+ * Built-ins are held to it like any other agent, and are unmodifiable through
+ * the admin tools, so they keep this value for good.
  */
 export const DEFAULT_TASK_DEADLINE_SECONDS = 60 * 60;
 
 /**
- * How long a completed agent task is kept before it is swept, covering both the
- * `agent_tasks` correlation rows in D1 (remote agents) and the A2A Tasks a local
- * agent persists in its own Durable Object storage — one policy, because
- * retention should not depend on which side of that boundary an agent runs on.
+ * How long a completed `agent_tasks` correlation row is kept in D1 before the
+ * maintenance sweep removes it. The built-ins' own A2A tasks are core's, which
+ * keeps them on a retention policy of its own.
  *
  * Must stay comfortably longer than {@link HITL_REQUEST_TTL_SECONDS}: a prompt
- * parked for the full 7 days must still find its task on the other side.
+ * parked for the full 7 days must still find its row.
  */
 export const TASK_RETENTION_SECONDS = 30 * 24 * 60 * 60;

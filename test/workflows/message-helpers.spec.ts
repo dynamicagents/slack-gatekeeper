@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { introspectWorkflow } from "cloudflare:test";
 import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
+import { setPublicUrl } from "@/db/models/workspace-configs";
 import { STOP_REACTION } from "@/workflows/reaction";
 import {
   dispatchMessage,
@@ -13,8 +14,7 @@ import {
 import { registerAgent } from "@/db/models/agents";
 import { createAgentTask, completeAgentTask } from "@/db/models/agent-tasks";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { stubSlack } from "../wrappers/slack-stub";
-import { stubAgentAi } from "../helpers/agents";
+import { stubOutbound } from "../helpers/agents";
 import {
   trigger,
   makeAppMentionRequest,
@@ -34,10 +34,10 @@ useStorageReset();
 //   handleUnreachable — covered indirectly via message.spec
 
 beforeEach(async () => {
-  // A mention in the admin channel wakes the real admin agent; stub its model so
-  // the turn finishes offline instead of rejecting on the DO's detached promise.
-  stubAgentAi();
   await setWorkspaceAdminChannel(0, "C_ORGADMIN");
+  // `trigger` pins its origin once per isolate, and the storage reset clears the
+  // row; every dispatch signs against it, so restate it per test.
+  await setPublicUrl("https://example.com");
 });
 
 afterEach(() => {
@@ -51,7 +51,9 @@ function captureSlackWithReactions(): {
 } {
   const post: PostCall[] = [];
   const reactions: ReactionCall[] = [];
-  stubSlack((method, body) => {
+  // A mention in the admin channel wakes the admin, whose reply comes back
+  // through `/a2a/notifications` on `trigger`'s origin.
+  stubOutbound("https://example.com", (method, body) => {
     if (method === "chat.postMessage") {
       post.push({
         channel: body.get("channel") ?? "",
@@ -238,7 +240,7 @@ describe("resolveMessage (via webhook handler)", () => {
 // ---------------------------------------------------------------------------
 
 describe("signalReactionCollect (via MessageWorkflow)", () => {
-  it("sends reply_posted to ReactionWorkflow once the local reply is done, removing 🛑", async () => {
+  it("sends reply_posted to ReactionWorkflow once the admin's reply is done, removing 🛑", async () => {
     const { reactions } = captureSlackWithReactions();
     const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     const reactionIntrospector = await introspectWorkflow(
@@ -269,7 +271,7 @@ describe("signalReactionCollect (via MessageWorkflow)", () => {
       await reactionIntrospector.dispose();
       await msgIntrospector.dispose();
     }
-  });
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

@@ -7,37 +7,25 @@ import {
   readIdentityClaim,
   readTenantClaim
 } from "@dynamicagents/g2a-protocol";
-import gatekeeperPkg from "../../package.json";
 import protocolPkg from "@dynamicagents/g2a-protocol/package.json";
 import { signGatekeeperToken } from "@/auth/agent-outbound";
 import { audienceFor } from "@/a2a/endpoint";
 
 /**
- * The wire contract with a remote agent — now a **conformance test**.
+ * The wire contract with an agent — a **conformance test**.
  *
- * ## What changed, and why this file still exists
- *
- * These values used to be asserted here as literals, because the other half of
- * the contract lived in `@dynamicagents/core` and the gatekeeper must not import it.
- * That made this file the only mechanism holding the two repos together, and a
- * weak one: it could prove the gatekeeper was self-consistent, never that the
- * remote agreed.
- *
- * Both sides now derive the contract from `@dynamicagents/g2a-protocol`, so drift
- * is no longer possible by construction and pinning the strings again here
- * would test nothing — the package's own specs pin them, once, at the source.
- *
- * What is left is the part that is still genuinely two-sided: **that the
+ * Both sides derive the contract from `@dynamicagents/g2a-protocol`, so the
+ * strings themselves are pinned once, at the source, by the package's own specs.
+ * What is left here is the part that is genuinely two-sided: **that the
  * gatekeeper actually uses the shared package everywhere it mints.** A token can
  * be built with a hand-written claim key, a hardcoded `jku`, or a hand-rolled
  * audience and still look perfectly correct in isolation. So every assertion
  * below reads the minted artifact and checks it against the package, rather
  * than against a copy of what the package says.
  *
- * The rule that produced all of this is unchanged and still absolute: **the
- * gatekeeper never imports `@dynamicagents/core`.** The protocol package is a
- * zero-dependency leaf holding names and pure string rules — no crypto, no
- * verification logic, no agent runtime.
+ * The gatekeeper hosts its built-in agents on `@dynamicagents/core`, and still
+ * reaches them through core's A2A edge with these same tokens — so the protocol
+ * package stays the only coupling on the wire, built-in or remote.
  */
 
 const AGENT_ORIGIN = "https://agent.example.com";
@@ -130,17 +118,13 @@ describe("the audience rule, on both sides of it", () => {
   });
 });
 
-describe("the boundary that made a shared package possible", () => {
-  /** Everything a manifest can pull into a tree, including at dev time. */
-  const EVERY_FIELD = [
+describe("the protocol package", () => {
+  /** The manifest fields that reach a *consumer's* tree. */
+  const INSTALLED_FIELDS = [
     "dependencies",
     "peerDependencies",
-    "optionalDependencies",
-    "devDependencies"
+    "optionalDependencies"
   ] as const;
-
-  /** …and the subset that reaches a *consumer's* tree. */
-  const INSTALLED_FIELDS = EVERY_FIELD.slice(0, 3);
 
   const namesIn = (pkg: object, fields: readonly string[]) =>
     fields.flatMap((f) =>
@@ -148,20 +132,6 @@ describe("the boundary that made a shared package possible", () => {
         ((pkg as Record<string, unknown>)[f] as Record<string, string>) ?? {}
       )
     );
-
-  it("never depends on the agent runtime", () => {
-    // The rule everything here rests on: `@dynamicagents/core` is the agent
-    // runtime, a gatekeeper is not an agent, and it must never import core. It was
-    // a review convention; the shared package makes it tempting to relax
-    // ("we already share one thing"), so it is a test now — dev dependencies
-    // included, since a test importing the runtime reaches it just as surely.
-    expect(namesIn(gatekeeperPkg, EVERY_FIELD)).not.toContain(
-      "@dynamicagents/core"
-    );
-    expect(namesIn(gatekeeperPkg, EVERY_FIELD)).toContain(
-      "@dynamicagents/g2a-protocol"
-    );
-  });
 
   it("shares only a package that installs nothing", () => {
     // Sharing the contract is acceptable *because* what is shared costs

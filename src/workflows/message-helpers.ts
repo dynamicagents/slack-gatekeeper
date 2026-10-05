@@ -10,7 +10,7 @@ import {
   type DispatchAgentRef,
   type DispatchMetadata,
   type DispatchResult
-} from "@/agents/dispatch";
+} from "@/a2a/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import {
   getPendingAgentTasksByEventId,
@@ -123,10 +123,9 @@ export async function resolveMessage(
 }
 
 /**
- * Dispatch one resolved plan to its agent over A2A. Every agent accepts a Task
- * (`{ kind: "accepted" }`) and delivers status snapshots later: remote agents
- * through the authenticated callback and built-ins through the trusted local
- * sender.
+ * Dispatch one resolved plan to its agent over A2A. Every agent — remote or
+ * built-in — accepts a Task (`{ kind: "accepted" }`) and delivers status
+ * snapshots later through the authenticated callback.
  *
  * Retry policy. Two kinds of verdict are deterministic and must NOT be retried:
  * a rejected endpoint (`InvalidEndpointError`, caught here) and a permanent A2A
@@ -144,21 +143,15 @@ export async function dispatchMessage(
   p: MessageWorkflowParams,
   plan: AgentPlan
 ): Promise<DispatchResult> {
-  // Per-agent extras only. *Which* agent this is comes from `tenantId`, the same
-  // field the dispatcher routes on; `kind` only says whether it runs in-process.
+  // *Which* agent this is comes from `tenantId`, the same field the dispatcher
+  // routes on; `kind` only says whether it is one of this Worker's own tenants.
   let metadata: DispatchMetadata;
   const local = plan.agent.kind === "local";
-  if (local && plan.agent.tenantId === "admin") {
-    if (plan.workspaceId == null) {
-      throw new Error("BUG: admin agent resolved without a workspaceId");
-    }
-    metadata = {
-      agentKind: "local",
-      tenant: "admin",
-      adminWorkspaceId: plan.workspaceId
-    };
-  } else if (local && plan.agent.tenantId === "onboarding") {
-    metadata = { agentKind: "local", tenant: "onboarding" };
+  if (
+    local &&
+    (plan.agent.tenantId === "admin" || plan.agent.tenantId === "onboarding")
+  ) {
+    metadata = { agentKind: "local", tenant: plan.agent.tenantId };
   } else {
     const { workspaceId } = plan;
     if (workspaceId == null) {
@@ -256,9 +249,10 @@ export type CancelRowKind = "stopped" | "unsupported" | "error";
 export async function cancelAndReconcile(
   agent: DispatchAgentRef,
   taskId: string,
-  token: string
+  token: string,
+  channelId: string
 ): Promise<CancelRowKind> {
-  const outcome = await cancelAgentTask(agent, taskId);
+  const outcome = await cancelAgentTask(agent, taskId, channelId);
   await markAgentTaskCanceled(token);
   switch (outcome.kind) {
     case "canceled":
@@ -353,7 +347,7 @@ export async function cancelTaskRow(
     taskId = mark.taskId; // accept raced in — cancel directly now
   }
 
-  const kind = await cancelAndReconcile(ref, taskId, row.token);
+  const kind = await cancelAndReconcile(ref, taskId, row.token, row.channelId);
 
   // Close any human-in-the-loop prompt the task had open (the stop supersedes it),
   // and strip its now-dead buttons in Slack. Independent of the cancel outcome:

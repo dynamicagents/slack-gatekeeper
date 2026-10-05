@@ -34,9 +34,10 @@ export {
  * explicitly rejected. Derived from when the last retry is expected, not chosen:
  * a remote's push callback is a Workflow step inheriting Cloudflare's default
  * retry policy (`limit: 5, delay: 10s, backoff: exponential`), so its ladder is
- * 10+20+40+80+160 = 310s ≈ 5m10s; a built-in's in-process sender exhausts in
- * ~1.3s. Six minutes clears both with margin, so a misconfigured agent is
- * surfaced just as fast as it was before the stop window grew to an hour.
+ * 10+20+40+80+160 = 310s ≈ 5m10s. Six minutes clears that with margin, so a
+ * misconfigured agent is surfaced just as fast as it was before the stop window
+ * grew to an hour. A built-in's callbacks are signed with this Worker's own key,
+ * so a rejection there is a misconfigured `A2A_SIGNING_KEY`, surfaced the same.
  */
 export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
 

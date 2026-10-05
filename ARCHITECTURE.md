@@ -18,15 +18,16 @@ a model call is not.
 ## Request entry points
 
 `src/server.ts` is the Worker entry module. It exports the Workflow and Durable Object
-classes Cloudflare resolves `class_name` against, and routes five paths:
+classes Cloudflare resolves `class_name` against, and routes these paths:
 
-| Method + path                          | Handler                                                                                            |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `GET /.well-known/jwks.json`           | The gatekeeper's Ed25519 **public** JWKS, for remote agents verifying its tokens                   |
-| `POST /slack/events`                   | Slack Events ingest — verify signature, classify, start a Workflow, ack                            |
-| `POST /slack/interactivity`            | Slack Interactivity — button clicks, selects, and modal submissions from human-in-the-loop prompts |
-| `POST /a2a/notifications`              | A remote agent's push callback, delivering its terminal A2A Task                                   |
-| `GET /icons/{wsId}/{name}/{key}.{ext}` | Agent avatars, forwarded to the owning `admin:{wsId}` Durable Object                               |
+| Method + path                                                      | Handler                                                                                            |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `GET /.well-known/jwks.json`                                       | The gatekeeper's Ed25519 **public** JWKS, for remote agents verifying its tokens                   |
+| `POST /slack/events`                                               | Slack Events ingest — verify signature, classify, start a Workflow, ack                            |
+| `POST /slack/interactivity`                                        | Slack Interactivity — button clicks, selects, and modal submissions from human-in-the-loop prompts |
+| `POST /a2a/notifications`                                          | Every agent's push callback — remote and built-in — delivering its A2A Task                        |
+| `GET /icons/{wsId}/{name}/{key}.{ext}`                             | Agent avatars, forwarded to that workspace's `AvatarStore` Durable Object                          |
+| `/agents/a2a`, `/agents/jwks.json`, `/.well-known/agent-card.json` | The built-in agents' core A2A edge: JSON-RPC, card-signing JWKS, stub card                         |
 
 The JWKS path and the notifications path are both imported from
 `@dynamicagents/g2a-protocol`, so the agent side and this side spell them identically.
@@ -38,22 +39,32 @@ maintenance Workflows.
 
 ## Components
 
-### In-repo agents (Durable Objects)
+### Built-in agents (`@dynamicagents/core` tenants)
 
-Two agent classes ship in this repo, each a Durable Object extending the Agents SDK
-`Agent` (`src/agents/base.ts`). Each DO **is its own A2A server**: it answers card
-discovery and JSON-RPC through the SDK's `DefaultRequestHandler`, and the gatekeeper
-reaches it in-process via `stub.fetch` rather than over the network, so neither needs a
-public HTTP route.
+Two agents ship in this repo, built on [`@dynamicagents/core`](https://github.com/dynamicagents/core)
+and its Think-based runtime — the same foundation a remote agent from
+`dynamicagents/starter` stands on. Each is a core **tenant**: a task host that owns its
+A2A tasks, a task workflow that runs each one, and a step agent the turn runs on
+(`src/agents/<tenant>/`). What is the gatekeeper's own is the soul, the memory block
+and the tools; the turn, `ask_user`, cancellation, retries, compaction and delivery are
+core's.
 
-| Class             | Instance key               | Scope                                                                                                                   |
-| ----------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `AdminAgent`      | `admin:{wsId}`             | One per workspace. Registry and workspace CRUD through admin tools; owns the workspace's admin avatar and display name. |
-| `OnboardingAgent` | `onboarding:{slackUserId}` | One per user. Read-only DM concierge — it routes people with words rather than acting for them.                         |
+| Tenant       | Instance key             | Scope                                                                                                           |
+| ------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `admin`      | `admin:{wsId}`           | One per workspace. Registry and workspace CRUD through admin tools; anyone in the admin channel may use them.   |
+| `onboarding` | `onboarding:{dmChannel}` | One per direct-message channel. A DM concierge — it routes people with words, and can ask for a directory sync. |
 
-A DO gives each instance durable conversation history (`sessions`), a writable memory
-block (`this.sql`), and a durable A2A task store — a turn parked on a human-in-the-loop
-prompt has to survive eviction, because the human may answer days later.
+They are reached **the way a remote agent is**: dispatch mints the same gatekeeper
+JWT and sends the same accept-first `SendMessage`, and the reply comes back as a
+signed push to `/a2a/notifications`. Only two things differ. The endpoint is derived
+from the public URL (`/agents/a2a`) rather than registered, and dispatch hands the
+request to the mounted core edge (`src/agents/worker.ts`) in-process instead of
+dialing it. The callback is verified against the built-ins' own `A2A_SIGNING_KEY`.
+The mounted tenants accept only an identity the gatekeeper minted for a built-in, so a
+remote agent registered against this origin cannot reach the admin's tools.
+
+Avatars the admin generates live in a separate `AvatarStore` Durable Object, one per
+workspace, served at `/icons/…`.
 
 ### Remote (custom) agents
 
@@ -72,7 +83,7 @@ a per-task token.
 
 ## Workflows
 
-Six Workflows are bound in `wrangler.jsonc`; all live in `src/workflows/`.
+The gatekeeper's own Workflows are bound in `wrangler.jsonc` and live in `src/workflows/`:
 
 | Workflow              | Started by                               | Does                                                                                                    |
 | --------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -82,6 +93,9 @@ Six Workflows are bound in `wrangler.jsonc`; all live in `src/workflows/`.
 | `CancelWorkflow`      | a 🛑 stop reaction                       | Cancels every non-terminal task that trigger message woke, then confirms                                |
 | `ReconcileWorkflow`   | nightly cron                             | Convergence backstop — repairs registry drift against Slack reality                                     |
 | `MaintenanceWorkflow` | nightly cron                             | Expires human-in-the-loop prompts past their TTL and sweeps resolved rows                               |
+
+Each built-in tenant also runs its tasks as a core task workflow — `AdminWorkflow` and
+`OnboardingWorkflow`, in `src/agents/` — started by its task host, not by the gatekeeper.
 
 ---
 
@@ -129,9 +143,9 @@ and migrations in `migrations/` (drizzle-generated; `npm run db:generate`). Nine
 | `hitl_requests`     | Open human-in-the-loop prompts and their TTL                                                                                                                       |
 | `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                                                                                     |
 
-Per-agent conversation history and memory are **not** in D1 — they live in each agent
-DO's own SQLite storage. History past the compaction threshold is folded into a summary
-there; the raw messages it displaces are not kept.
+Per-agent conversation history and memory are **not** in D1 — a built-in's live in
+its step agent's own SQLite storage, where core compacts history past a threshold
+into a summary and keeps it searchable.
 
 ---
 
@@ -146,7 +160,7 @@ Cloudflare Worker  (src/server.ts — stateless fetch handler)
      ▼
 Workflow  (durable, retries per step)
      │  dispatchToAgent
-     ├──────────────▶ AdminAgent / OnboardingAgent DO   (in-process stub.fetch)
+     ├──────────────▶ admin / onboarding core tenant   (in-process, same JWT; replies to /a2a/notifications)
      └──────────────▶ remote agent over HTTPS           (signed JWT; replies to /a2a/notifications)
      │
      ▼

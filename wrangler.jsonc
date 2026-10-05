@@ -17,18 +17,24 @@
     "binding": "AI",
     "remote": true
   },
+  // The built-in agents are `@dynamicagents/core` tenants: per tenant, a task
+  // host (the A2A task) and a step agent (the Think turn), each binding named
+  // after its class because core reaches them by name — `hostBinding` and the
+  // pipeline's `step.agent({ agent })` say which. `ARTIFACTS` is core's, and
+  // required: every task host asserts it at start.
   "durable_objects": {
     "bindings": [
-      {
-        "class_name": "AdminAgent",
-        "name": "AdminAgent"
-      },
-      {
-        "class_name": "OnboardingAgent",
-        "name": "OnboardingAgent"
-      }
+      { "class_name": "AdminHost", "name": "AdminHost" },
+      { "class_name": "AdminStepAgent", "name": "AdminStepAgent" },
+      { "class_name": "OnboardingHost", "name": "OnboardingHost" },
+      { "class_name": "OnboardingStepAgent", "name": "OnboardingStepAgent" },
+      { "class_name": "AvatarStore", "name": "AvatarStore" },
+      { "class_name": "Artifacts", "name": "ARTIFACTS" }
     ]
   },
+  // One directive per tag. A class name is not free again right after a rename
+  // or a delete, which is why the core step agents are `*StepAgent` rather than
+  // the `AdminAgent` / `OnboardingAgent` names those tombstones keep.
   "migrations": [
     {
       "new_sqlite_classes": ["SlackAgent"],
@@ -38,6 +44,28 @@
       "tag": "v2",
       "new_sqlite_classes": ["AdminAgent", "OnboardingAgent"],
       "deleted_classes": ["SlackAgent"]
+    },
+    {
+      // The old admin agent's storage holds every generated avatar under
+      // `admin:{wsId}`; renaming keeps those bytes behind the `iconUrl`s
+      // already stored in D1.
+      "tag": "v3",
+      "renamed_classes": [{ "from": "AdminAgent", "to": "AvatarStore" }]
+    },
+    {
+      // Onboarding history and memory restart on core.
+      "tag": "v4",
+      "deleted_classes": ["OnboardingAgent"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": [
+        "AdminHost",
+        "AdminStepAgent",
+        "OnboardingHost",
+        "OnboardingStepAgent",
+        "Artifacts"
+      ]
     }
   ],
   "d1_databases": [
@@ -82,13 +110,34 @@
       "name": "maintenance-workflow",
       "binding": "MAINTENANCE_WORKFLOW",
       "class_name": "MaintenanceWorkflow"
+    },
+    // Each built-in tenant runs its tasks as a core task workflow.
+    {
+      "name": "admin-workflow",
+      "binding": "ADMIN_WORKFLOW",
+      "class_name": "AdminWorkflow"
+    },
+    {
+      "name": "onboarding-workflow",
+      "binding": "ONBOARDING_WORKFLOW",
+      "class_name": "OnboardingWorkflow"
     }
   ],
+  "vars": {
+    // Core's gatekeeper allowlist for the built-in tenants: they accept tokens
+    // from this gatekeeper and no other. Must equal the origin of `routes`
+    // above, which is what `public_url` pins as the JWT issuer.
+    "GATEKEEPER_ORIGINS": "https://slack.loopingai.org"
+  },
   "secrets": {
     "required": [
       "SLACK_BOT_TOKEN",
       "SLACK_SIGNING_SECRET",
-      "GATEKEEPER_JWT_PRIVATE_KEY"
+      "GATEKEEPER_JWT_PRIVATE_KEY",
+      // The built-in tenants' own Ed25519 key (`npx da-keys`): signs their
+      // card and every push callback. Separate from the gatekeeper's token
+      // key so no one key signs two kinds of token.
+      "A2A_SIGNING_KEY"
     ]
   },
   "observability": {
@@ -100,13 +149,6 @@
    * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
    */
   "placement": { "mode": "smart" }
-  /**
-   * Environment Variables
-   * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-   * Note: Use secrets to store sensitive data.
-   * https://developers.cloudflare.com/workers/configuration/secrets/
-   */
-  // "vars": { "MY_VARIABLE": "production_value" }
   /**
    * Service Bindings (communicate between multiple Workers)
    * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings

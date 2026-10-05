@@ -1,11 +1,9 @@
 import { A2A_PROTOCOL_VERSION, type AgentCard } from "@a2a-js/sdk";
 
 /**
- * Placeholder JSON-RPC endpoint path baked into locally-built agent cards. When
- * an agent is reached in-process via a Durable Object `stub.fetch`, the host is
- * irrelevant — the DO answers every POST as JSON-RPC regardless of path — so any
- * absolute URL parses fine and routes correctly. Remote agents supply their own
- * real card via discovery instead.
+ * Placeholder endpoint for a card built without a `url`. Dispatch always passes
+ * the agent's real endpoint; the default only has to parse, for a card that is
+ * never dialed.
  */
 const PLACEHOLDER_BASE_URL = "https://agent.local";
 const A2A_ENDPOINT_PATH = "/a2a";
@@ -13,7 +11,7 @@ const A2A_ENDPOINT_PATH = "/a2a";
 export interface AgentCardInput {
   name: string;
   description: string;
-  /** Override the endpoint URL (remote agents). Defaults to the local placeholder. */
+  /** The endpoint URL. Defaults to a placeholder that is never dialed. */
   url?: string;
   /**
    * Which agent at `url`, when the host serves several behind one endpoint.
@@ -28,10 +26,9 @@ export interface AgentCardInput {
 }
 
 /**
- * Build a minimal A2A v1.0 AgentCard. Used for a local in-repo agent, and for a
- * remote one at its already-resolved endpoint — in both cases so a client can be
- * built without a discovery round trip. JSON-RPC is the only transport.
- * Streaming is off; built-ins opt into push notifications.
+ * Build a minimal A2A v1.0 AgentCard for an agent at its already-resolved
+ * endpoint, so a client can be built without a discovery round trip. JSON-RPC
+ * is the only transport, and streaming is off.
  *
  * v1.0 replaced the card's flat `url` / `preferredTransport` pair with an
  * ordered `supportedInterfaces` list, where each entry pins its own protocol

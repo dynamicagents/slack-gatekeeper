@@ -6,7 +6,6 @@ import {
 } from "@a2a-js/sdk/client";
 import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import type {
-  AgentCard,
   Message,
   SendMessageRequest,
   Task,
@@ -18,27 +17,12 @@ import { classifyA2AError, isPermanentProtocolError } from "@/a2a/errors";
 import { sanitizeSlackText } from "@/util/slack-text";
 
 /**
- * Where to send an A2A message:
- * - `local`  — a known card + a `fetchImpl` bound to a Durable Object `stub.fetch`,
- *   so card discovery is skipped and the call runs in-process (no network hop).
- *   Local agents return a Task acceptance and deliver replies through a trusted
- *   in-process push sender.
- * - `remote` — a base URL; the card is discovered over real HTTP, every request
- *   carries the gatekeeper identity JWT (`authToken`). Remote agents reply
- *   *asynchronously* via push notification — {@link sendA2ARemote} only waits
- *   for the accept (a Task ack), never for generation.
+ * Where to send an A2A message: a base URL whose card is already known from
+ * registration, with every request carrying the gatekeeper identity JWT
+ * (`authToken`). Agents reply *asynchronously* via push notification —
+ * {@link sendA2ARemote} only waits for the accept (a Task ack), never for
+ * generation.
  */
-export interface A2ALocalTarget {
-  card: AgentCard;
-  fetchImpl: typeof fetch;
-  /**
-   * Which agent this is. Local dispatch resolves the Durable Object namespace
-   * before getting here, so nothing routes on it — it travels so the request on
-   * the wire is the same shape either path builds, and so a built-in that
-   * later moves out of process needs no change at the call site.
-   */
-  tenant: string;
-}
 export interface A2ARemoteTarget {
   endpoint: string;
   authToken?: string;
@@ -54,6 +38,13 @@ export interface A2ARemoteTarget {
    * own so a hung agent cannot outlive the time it has left.
    */
   acceptTimeoutMs?: number;
+  /**
+   * What carries the request instead of the network. A built-in agent is a core
+   * tenant on this same Worker, so dispatch hands its mounted A2A handler here
+   * and the call never leaves the isolate — the token, tenant and push config
+   * are exactly what a remote agent receives.
+   */
+  transport?: typeof fetch;
 }
 
 /**
@@ -68,13 +59,14 @@ const ACCEPT_TIMEOUT_MS = 30_000;
 const MAX_REPLY_CHARS = 16_000;
 
 /**
- * Build a `fetchImpl` for a remote target: injects the gatekeeper JWT as a Bearer
- * token on every request and enforces the short accept timeout. Reuses the same
- * `fetchImpl` override seam the local (DO stub) path uses.
+ * Build a `fetchImpl` for a target: injects the gatekeeper JWT as a Bearer token
+ * on every request and enforces the short accept timeout, over `transport` when
+ * the target has one.
  */
 function remoteFetchImpl(
   authToken?: string,
-  timeoutMs = ACCEPT_TIMEOUT_MS
+  timeoutMs = ACCEPT_TIMEOUT_MS,
+  transport: typeof fetch = fetch
 ): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -82,7 +74,7 @@ function remoteFetchImpl(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(input as RequestInfo, {
+      return await transport(input as RequestInfo, {
         ...init,
         headers,
         signal: controller.signal
@@ -97,9 +89,8 @@ function remoteFetchImpl(
  * Sanitize an agent reply before it reaches Slack: {@link sanitizeSlackText}
  * (strip control characters, neutralize channel-wide mentions in both spellings so
  * a hostile agent can't notify everyone) plus a length cap so it can't flood Slack.
- * Applied at every delivery boundary — the remote push-notification callback and
- * the local in-process sender alike — because even a built-in agent relays
- * untrusted model output.
+ * Applied at the delivery boundary for every agent, built-ins included, because
+ * even a built-in agent relays untrusted model output.
  */
 export function sanitizeAgentReply(text: string): string {
   const safe = sanitizeSlackText(text);
@@ -108,23 +99,11 @@ export function sanitizeAgentReply(text: string): string {
     : safe;
 }
 
-/** Build a local A2A client using an in-process Durable Object fetch impl. */
-async function buildLocalClient(target: A2ALocalTarget): Promise<Client> {
-  const options = ClientFactoryOptions.createFrom(
-    ClientFactoryOptions.default,
-    {
-      transports: [new JsonRpcTransportFactory({ fetchImpl: target.fetchImpl })]
-    }
-  );
-  const factory = new ClientFactory(options);
-  return factory.createFromAgentCard(target.card);
-}
-
 /**
  * Build a remote A2A client that talks to the endpoint we already resolved.
  *
- * Built `createFromAgentCard` over a locally-synthesized card — the same shape
- * {@link buildLocalClient} uses — rather than `createFromUrl`, which would
+ * Built `createFromAgentCard` over a locally-synthesized card rather than
+ * `createFromUrl`, which would
  * re-download the agent's card on **every send** and POST to whatever that live
  * document happens to advertise. Three things were wrong with that:
  *
@@ -148,7 +127,11 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
     {
       transports: [
         new JsonRpcTransportFactory({
-          fetchImpl: remoteFetchImpl(target.authToken, target.acceptTimeoutMs)
+          fetchImpl: remoteFetchImpl(
+            target.authToken,
+            target.acceptTimeoutMs,
+            target.transport
+          )
         })
       ]
     }
@@ -166,31 +149,7 @@ async function buildRemoteClient(target: A2ARemoteTarget): Promise<Client> {
 }
 
 /**
- * Send one A2A message to a **local** (in-process) agent. The request asks to
- * return immediately, so the SDK answers as soon as the agent accepts the turn
- * rather than awaiting generation — the same accept-only shape
- * {@link sendA2ARemote} has, just in-process without the HTTP/JWT hop. Generation and the Slack delivery run
- * asynchronously inside the agent DO, which keeps itself alive until the terminal
- * delivery settles via a `ctx.waitUntil` liveness barrier. The caller only forwards
- * the task id for correlation and never handles model text directly.
- */
-export async function sendA2ALocal(
-  target: A2ALocalTarget,
-  message: Message,
-  taskPushNotificationConfig: TaskPushNotificationConfig
-): Promise<A2AAccept> {
-  const client = await buildLocalClient(target);
-  return acceptOrProtocolError(
-    () =>
-      client.sendMessage(
-        sendRequest(message, taskPushNotificationConfig, target.tenant)
-      ),
-    message
-  );
-}
-
-/**
- * Build the v1.0 `SendMessageRequest` both dispatch paths share.
+ * Build the v1.0 `SendMessageRequest` for a dispatch or a continuation.
  *
  * `returnImmediately: true` is v1.0's replacement for v0.3's `blocking: false`
  * (the semantics are inverted): the agent must answer as soon as it has

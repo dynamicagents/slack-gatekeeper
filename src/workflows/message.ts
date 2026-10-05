@@ -1,7 +1,7 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { buildDispatchId } from "@/agents/dispatch";
+import { buildDispatchId } from "@/a2a/dispatch";
 import { postReply } from "@/wrappers/slack";
 import {
   createAgentTask,
@@ -82,7 +82,7 @@ async function runAgentTask(
     );
     if (cancelRequested) {
       const stop = await step.do(`honor-cancel:${plan.agent.name}`, () =>
-        cancelAndReconcile(plan.agent, result.taskId, token)
+        cancelAndReconcile(plan.agent, result.taskId, token, p.channelId)
       );
       if (stop === "stopped") return { kind: "done" };
 

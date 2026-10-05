@@ -31,7 +31,7 @@ import {
   markHitlPromptResolved,
   TASK_ENDED_NOTE
 } from "@/a2a/notifications/hitl";
-import { resumeAgentTask, type ResumeOutcome } from "@/agents/dispatch";
+import { resumeAgentTask, type ResumeOutcome } from "@/a2a/dispatch";
 import { postEphemeral, updateBlocks, openView } from "@/wrappers/slack";
 import { isRecord } from "@/util/json";
 
