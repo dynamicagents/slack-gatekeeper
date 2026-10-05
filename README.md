@@ -186,7 +186,7 @@ There is no in-place migration path. The only safe approach is:
 1. **Export your current config** — ask the admin agent to list all workspace and agent configurations (channels, roles, agent IDs, etc.).
 2. **Deploy a brand-new Worker** for the new workspace (`npx wrangler deploy` on a fresh clone, with new secrets).
 3. **Re-create your configuration** on the new Worker — paste the exported config into the admin agent on the new workspace and let it recreate the entries.
-4. **Delete the old Worker** if no longer needed. Note that some bindings are independent global primitives and must be deleted separately: **D1 databases**, **Vectorize indexes**, and **KV namespaces**. Secrets and Durable Objects are deleted automatically with the Worker. Vectorize is on that list for the Worker you are deleting, not the one you just deployed: a gatekeeper deployed before recall was removed binds an `agent-recall` index, and deleting its Worker leaves the index — and the history in it — behind.
+4. **Delete the old Worker** if no longer needed. Note that some bindings are independent global primitives and must be deleted separately: **D1 databases** and **KV namespaces**. Secrets and Durable Objects are deleted automatically with the Worker.
 
 ---
 
