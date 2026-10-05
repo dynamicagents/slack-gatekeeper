@@ -8,10 +8,20 @@ import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
  * tool loop and the Sessions compaction summarizer are two call sites of the same
  * model, and a setting applied to only one of them fails silently.
  *
- * Reasoning is **not** here. The unified `reasoning` call option cannot express
- * what this model wants — its enum stops at `xhigh`, which the provider clamps to
- * `high` — and the depth is a property of the model rather than of the call, so it
- * is set where the model is built, against the enum that model declares.
+ * **Reasoning is here, under the provider's own key, and not by preference.** The
+ * depth is a property of the model, so the model settings in {@link chatModel}
+ * are its natural home — but `workers-ai-provider` types that setting
+ * `low | medium | high` while the runtime declares `low | high | max` for
+ * `@cf/zai-org/glm-5.3-flash`, so {@link CHAT_MODEL}'s `max` does not compile
+ * there. The unified `reasoning` call option is no route either: its enum stops at
+ * `xhigh`, which the provider clamps to `high`. That leaves
+ * `providerOptions["workers-ai"]`, which the provider reads *ahead of* both the
+ * unified option and the model setting and forwards verbatim onto the binding's
+ * `inputs`.
+ *
+ * Being a call option is why every call site spreads this: a `generateText` that
+ * forgot it would fall back to the model's own default depth, which no longer has
+ * anything in this repo pinning it.
  *
  * Telemetry is off because on workerd its tracing span leaves a
  * duplicate of every rejection unhandled — `isNodeRuntime()` is
@@ -24,7 +34,10 @@ import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
  * call options and run whatever telemetry is set to. See `shared/turn-log.ts`.
  */
 export const CHAT_CALL_OPTIONS = {
-  telemetry: { isEnabled: false }
+  telemetry: { isEnabled: false },
+  providerOptions: {
+    "workers-ai": { reasoning_effort: CHAT_MODEL.reasoningEffort }
+  }
 } as const;
 
 /** Which agent a model call was made on behalf of. */
@@ -215,9 +228,11 @@ export function chatModel(
   // `x-session-affinity` header, and an empty one would pin every unkeyed call in
   // the account to a single instance.
   const affinity = overrides.sessionAffinity;
+  // No `reasoning_effort` here: the level this model wants is past what the
+  // provider types as a model setting, so it rides on the call instead — see
+  // {@link CHAT_CALL_OPTIONS}.
   return agentProvider()(CHAT_MODEL.id, {
     gateway: gatewayFor(call),
-    reasoning_effort: CHAT_MODEL.reasoningEffort,
     ...(affinity ? { sessionAffinity: affinity } : {})
   });
 }

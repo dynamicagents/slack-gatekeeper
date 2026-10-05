@@ -69,9 +69,9 @@ export interface AgentSessionOptions {
  * The summarizer compaction runs: one plain `generateText` over the agent's own
  * model, carrying the same call options as the turn. A summary written at a
  * different reasoning depth than the conversation it compresses would be a drift
- * nothing reports — and the depth now travels with the *model* rather than in the
- * shared call options, so what keeps the two honest is that the executor builds
- * this one through the same `chatModel()` the turn uses.
+ * nothing reports, and the depth is one of the shared call options — so what keeps
+ * the two honest is spreading the same `CHAT_CALL_OPTIONS` the turn does, over a
+ * model the executor builds through the same `chatModel()`.
  */
 export function compactionSummarizer(
   model: LanguageModel

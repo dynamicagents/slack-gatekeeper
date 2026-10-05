@@ -84,14 +84,24 @@ afterEach(() => {
 });
 
 describe("the chat model", () => {
-  // The model's own reasoning ceiling is typechecked where the model is built: a
-  // level `workers-ai-provider` does not declare for it fails at the model
-  // settings. That it is set at all is the part types cannot see — left unset,
-  // the provider picks its own depth and GLM answers registry questions from the
+  // That the ceiling is a level the model declares is typechecked in `config.ts`,
+  // against the generated `AiModels` input type — the provider cannot do it, since
+  // the level travels as `providerOptions`, which is plain JSON to the compiler.
+  // That it is set *at all* is the part no type can see: left unset, the model
+  // picks its own depth and GLM has answered registry questions from the
   // conversation instead of calling the tool that would have checked.
 
-  it("gives the model a reasoning budget rather than the provider's default", () => {
+  it("gives the model a reasoning budget rather than the model's default", () => {
     expect(CHAT_MODEL.reasoningEffort.length).toBeGreaterThan(0);
+  });
+
+  it("carries that budget on every shared call option, not on the model", () => {
+    // The one object both call sites spread. A depth that lived only on the model
+    // settings would be dropped by the provider's own type; a depth that lived
+    // only in `loop.ts` would leave the compaction summarizer on the default.
+    expect(CHAT_CALL_OPTIONS.providerOptions["workers-ai"]).toEqual({
+      reasoning_effort: CHAT_MODEL.reasoningEffort
+    });
   });
 });
 
@@ -245,10 +255,12 @@ describe("the gateway identity a model call carries", () => {
 
   it("asks the model for the deepest reasoning that model offers", async () => {
     // The depth has to reach the binding as `reasoning_effort` on the model's own
-    // inputs. Workers AI coerces a level it does not recognize instead of
-    // rejecting it — a shared `medium` once went to a model with no `medium` and
-    // arrived as `high` — so the enum is the model's, and this is the only place
-    // what was actually sent can be seen.
+    // inputs, and reach it unaltered. Two layers would quietly change it on the
+    // way: Workers AI coerces a level it does not recognize instead of rejecting
+    // it — a shared `medium` once went to a model with no `medium` and arrived as
+    // `high` — and the provider clamps the unified `reasoning` option's ceiling
+    // down to `high`, which is why the level goes through `providerOptions`
+    // instead. This is the only place what was actually sent can be seen.
     const run = stubRun();
 
     await generateText({

@@ -6,29 +6,40 @@ export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
  * belongs to that model. Must support function calling.
  *
  * `reasoningEffort` is paired with its `id` rather than standing alone because it
- * is a property of that model, not a global preference: Cloudflare documents a
+ * is a property of that model, not a global preference: Cloudflare declares a
  * different `reasoning_effort` enum per model and they do not overlap above
  * `high`.
  *
  * **Nothing will tell you when it is wrong.** Workers AI coerces an unknown
  * effort instead of rejecting it: a shared `"medium"` was once aimed at GLM-5.2,
  * whose enum has no `medium` at all, and every AI Gateway request body showed it
- * arriving as `high`. So when you change the model here, check its page for its
- * `reasoning_effort` enum, record it in the comment below, and set
- * `reasoningEffort` to the highest that model offers — left to the provider's
- * default depth, GLM has answered registry questions from the conversation
- * instead of calling the tool that would have checked.
+ * arriving as `high`. So when you change the model here, read that model's enum
+ * off `worker-configuration.d.ts` — `wrangler types` writes one input type per
+ * catalog model, and it is the copy that moves when the catalog does — record it
+ * in the comment below, and set `reasoningEffort` to the highest that model
+ * offers. Left to the default depth, GLM has answered registry questions from the
+ * conversation instead of calling the tool that would have checked.
  *
  * `as const` keeps both as literals, which is what lets the provider accept the
- * id and typecheck the effort against the enum it declares for *this* model — so
- * a ceiling the provider does not know about is a compile error at the model
- * settings rather than a silent coercion on every call.
+ * id; `satisfies` is what still rejects a level this model does not declare, now
+ * that the provider cannot. `workers-ai-provider` types its `reasoning_effort`
+ * model setting `low | medium | high`, a generation behind the runtime, so `max`
+ * does not compile as a model setting at all and travels as a per-call
+ * `providerOptions["workers-ai"]` entry instead — see `CHAT_CALL_OPTIONS` in
+ * `agents/model.ts`. That route is plain JSON to the compiler, which is why the
+ * ceiling is checked here against the generated types rather than there against
+ * the provider's.
  */
 export const CHAT_MODEL = {
-  // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | medium | high
+  // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | high | max
   id: "@cf/zai-org/glm-5.3-flash",
-  reasoningEffort: "high"
-} as const;
+  reasoningEffort: "max"
+} as const satisfies {
+  id: keyof AiModels;
+  reasoningEffort: NonNullable<
+    AiModels["@cf/zai-org/glm-5.3-flash"]["inputs"]["reasoning_effort"]
+  >;
+};
 
 /**
  * Workers AI text-to-image model for admin avatar generation. FLUX.2 [klein] 9B —

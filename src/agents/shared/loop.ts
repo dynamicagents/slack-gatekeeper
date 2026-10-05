@@ -769,10 +769,10 @@ export async function executeAgentTurn(
         onStepEnd,
         onToolExecutionEnd,
         onLanguageModelCallEnd,
-        // The telemetry opt-out, shared with the compaction summarizer so the two
-        // call sites cannot drift. Reasoning depth is not here either: it is a
-        // property of the model, set where the model is built — see
-        // {@link file://../model.ts model.ts}.
+        // The telemetry opt-out and the model's reasoning depth, shared with the
+        // compaction summarizer so the two call sites cannot drift — see
+        // {@link file://../model.ts model.ts} for why the depth travels on the
+        // call rather than on the model.
         ...CHAT_CALL_OPTIONS
       });
 
