@@ -99,8 +99,8 @@ complete, and never invent an outcome for work that did not run.`;
  * route around; "you have used this turn's steps" reads as a fact, and the only
  * sensible response to it is the answer.
  *
- * Two places reach it, both in {@link file://./loop.ts loop.ts}: the loop's last
- * step, and the one salvage call for a turn that came back with no ending at all.
+ * One place reaches it: the loop's last step, in
+ * {@link file://./loop.ts loop.ts}.
  */
 export const FINAL_ROUND_CONTRACT = `
 

@@ -13,8 +13,6 @@ import {
 import { executeAgentTurn, turnGatewayCall } from "@/agents/shared/loop";
 import type { OpenCallStore } from "@/agents/shared/open-call";
 import { isCancelRequested } from "@/db/models/agent-tasks";
-import { archiveMessages } from "@/agents/shared/recall";
-import { recallTools } from "@/agents/shared/recall-tool";
 import { verifyRemoteAgentEndpoint } from "@/a2a/card-verify";
 import { signGatekeeperToken } from "@/auth/agent-outbound";
 import {
@@ -72,8 +70,6 @@ export class AdminAgentExecutor implements AgentExecutor {
   /** Lazily build the one session for this DO; `wsId` is fixed per instance. */
   private getSession(wsId: number): AgentSession {
     if (!this.built) {
-      // Must match `instanceNameFor` in dispatch.ts (the DO instance key).
-      const namespace = `admin:${wsId}`;
       // The summarizer's own gateway identity. It is a real cost against the same
       // gateway as the turn, and one that no Slack thread asked for — so it is
       // labelled `compaction` rather than left indistinguishable from a round. Its
@@ -92,8 +88,7 @@ export class AdminAgentExecutor implements AgentExecutor {
               "Durable facts about this workspace — who the admins are, conventions, and decisions. Keep it concise.",
             memoryMaxTokens: 1200,
             compactAfterTokens: COMPACT_AFTER_TOKENS,
-            compactTailTokens: COMPACT_TAIL_TOKENS,
-            onArchive: (msgs) => archiveMessages(namespace, msgs)
+            compactTailTokens: COMPACT_TAIL_TOKENS
           });
     }
     return this.built;
@@ -104,13 +99,9 @@ export class AdminAgentExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     await executeAgentTurn(requestContext, eventBus, {
-      // Per round, not per instance: the model carries this round's identity into
+      // Per turn, not per instance: the model carries this turn's identity into
       // the AI Gateway log, and that is the only channel the gateway has for it.
-      model: (round) =>
-        chatModel(
-          turnGatewayCall("admin", requestContext, round),
-          this.options
-        ),
+      model: chatModel(turnGatewayCall("admin", requestContext), this.options),
       // The dispatch token is the A2A messageId, and the gatekeeper records a 🛑
       // against that same token — so the running turn can read its own stop flag.
       isCanceled: isCancelRequested,
@@ -142,8 +133,6 @@ export class AdminAgentExecutor implements AgentExecutor {
         const wsId = metadata.adminWorkspaceId;
         const ctx = metadata.user;
         const { session, context } = this.getSession(wsId);
-        const namespace = `admin:${wsId}`;
-        const hasArchive = (await session.getCompactions()).length > 0;
         // One `deps` for both the tools and the policy that gates them. On a turn
         // resuming an approval, `ctx` is the *approver*, so the SDK re-running the
         // policy re-checks their permissions rather than the requester's — which is
@@ -160,10 +149,7 @@ export class AdminAgentExecutor implements AgentExecutor {
           context,
           systemSuffix: callerContext(ctx, { workspaceId: wsId }),
           toolApproval: adminToolApproval(deps),
-          tools: {
-            ...buildAdminTools(deps),
-            ...recallTools(namespace, hasArchive)
-          }
+          tools: buildAdminTools(deps)
         };
       }
     });

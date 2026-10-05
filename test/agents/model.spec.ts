@@ -1,22 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { env } from "cloudflare:workers";
-import { embedMany, generateText } from "ai";
+import { generateText } from "ai";
 import {
   chatModel,
-  embeddingModel,
   gatewayLogFields,
   CHAT_CALL_OPTIONS,
   GATEWAY_METADATA_MAX,
   type GatewayCall,
   type GatewayCallFields
 } from "@/agents/model";
-import {
-  AI_GATEWAY_ID,
-  CHAT_FALLBACK,
-  CHAT_MODELS,
-  CHAT_PRIMARY,
-  EMBED_MODEL_ID
-} from "@/config";
+import { AI_GATEWAY_ID, CHAT_MODEL } from "@/config";
 
 /**
  * What reaches `env.AI.run`, which is the only thing AI Gateway ever sees.
@@ -66,98 +59,93 @@ function extraHeadersOf(
   return (run.mock.calls[n]?.[2] as RunOptions | undefined)?.extraHeaders;
 }
 
-/** A round with every one of the five answered, plus its correlation id. */
+/** A round with every declared field answered, plus its correlation id. */
 const fullRound: GatewayCall = {
   agent: "admin",
   phase: "round",
-  round: 1,
   channel: "C123:1700000000.0001",
   workspaceId: 7,
-  eventId: "task-1:r1"
+  eventId: "task-1"
 };
 
-/** The five, as the gateway will store them — `eventId` is not among them. */
+/** Those fields, as the gateway will store them — `eventId` is not among them. */
 const fullRoundMetadata = {
   agent: "admin",
   phase: "round",
-  round: 1,
   channel: "C123:1700000000.0001",
   workspaceId: 7
 };
 
-/** The five keys, in the order {@link gatewayLogFields} spends them. */
-const PRIORITY = ["agent", "phase", "round", "channel", "workspaceId"];
+/** The declared keys, in the order {@link gatewayLogFields} spends them. */
+const PRIORITY = ["agent", "phase", "channel", "workspaceId"];
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("the chat model list", () => {
-  // The pairing of a model with its own reasoning ceiling is enforced by the
-  // compiler: an entry missing `reasoningEffort` fails `satisfies ChatModel[]`,
-  // and a primary given a level `workers-ai-provider` does not declare fails at
-  // the model settings. These two are the parts types cannot see.
+describe("the chat model", () => {
+  // That the ceiling is a level the model declares is typechecked in `config.ts`,
+  // against the generated `AiModels` input type — the provider cannot do it, since
+  // the level travels as `providerOptions`, which is plain JSON to the compiler.
+  // That it is set *at all* is the part no type can see: left unset, the model
+  // picks its own depth and GLM has answered registry questions from the
+  // conversation instead of calling the tool that would have checked.
 
-  it("declares exactly the primary and the one fallback the middleware takes", () => {
-    // `fallbackMiddleware` accepts a single fallback model. A third entry here
-    // would read as a chain and be silently ignored, which is the worst shape a
-    // config mistake can take.
-    expect(CHAT_MODELS).toHaveLength(2);
-    expect(CHAT_MODELS[0]).toBe(CHAT_PRIMARY);
-    expect(CHAT_MODELS[1]).toBe(CHAT_FALLBACK);
+  it("gives the model a reasoning budget rather than the model's default", () => {
+    expect(CHAT_MODEL.reasoningEffort.length).toBeGreaterThan(0);
   });
 
-  it("falls back to a different model than it started on", () => {
-    // The fallback exists for a model being unreachable or refusing to call a
-    // tool. Pointing it at the primary would spend a second call reproducing the
-    // first failure, and nothing else would notice.
-    expect(CHAT_FALLBACK.id).not.toBe(CHAT_PRIMARY.id);
-  });
-
-  it("gives every model a reasoning budget of its own", () => {
-    for (const model of CHAT_MODELS) {
-      expect(model.reasoningEffort.length).toBeGreaterThan(0);
-    }
+  it("carries that budget on every shared call option, not on the model", () => {
+    // The one object both call sites spread. A depth that lived only on the model
+    // settings would be dropped by the provider's own type; a depth that lived
+    // only in `loop.ts` would leave the compaction summarizer on the default.
+    expect(CHAT_CALL_OPTIONS.providerOptions["workers-ai"]).toEqual({
+      reasoning_effort: CHAT_MODEL.reasoningEffort
+    });
   });
 });
 
 describe("gatewayLogFields", () => {
-  it("spends the five in priority order and stops there", () => {
+  it("spends its fields in priority order, within the gateway's cap", () => {
     // The cap is the gateway's, not ours, and it enforces it by silent
-    // truncation: the first five entries are saved and the rest ignored, with no
-    // error to debug from. So the order these are spent in is the order they would
-    // be given up in, and `workspaceId` is the one with nothing behind it.
+    // truncation: the first `GATEWAY_METADATA_MAX` entries are saved and the rest
+    // ignored, with no error to debug from. So the order these are spent in is the
+    // order they would be given up in, and `workspaceId` is the one with nothing
+    // behind it.
     const metadata = gatewayLogFields({
       agent: "admin",
       phase: "round",
-      round: 2,
       channel: "C123:1700000000.0001",
       workspaceId: 7
     });
 
     expect(Object.keys(metadata)).toEqual(PRIORITY);
-    expect(Object.keys(metadata)).toHaveLength(GATEWAY_METADATA_MAX);
+    // Growing the declared set past the cap would drop whichever field is last in
+    // priority order from every call in production, with nothing to notice it by.
+    expect(Object.keys(metadata).length).toBeLessThanOrEqual(
+      GATEWAY_METADATA_MAX
+    );
   });
 
-  it("will not take a sixth dimension at the type level", () => {
+  it("will not take an undeclared dimension at the type level", () => {
     gatewayLogFields({
       agent: "admin",
       phase: "round",
-      // @ts-expect-error — the five are a hard cap, so a sixth has to displace one
-      // of them in a diff someone reviews, not arrive beside them. Deleting this
-      // directive is what fails the build when the type stops saying so.
+      // @ts-expect-error — the gateway's cap is close enough that a new dimension
+      // has to displace one of these in a diff someone reviews, not arrive beside
+      // them. Deleting this directive is what fails the build when the type stops
+      // saying so.
       taskId: "task-1"
     });
   });
 
-  it("ignores a sixth that arrives past the type", () => {
+  it("ignores an undeclared key that arrives past the type", () => {
     // A cast, or plain JavaScript calling in. The type is the first line of the
-    // cap and this is the second: the builder reads its own five and nothing else,
-    // so an extra key is not spent, not truncated — never a candidate at all.
+    // guard and this is the second: the builder reads its own declared fields and
+    // nothing else, so an extra key is never a candidate at all.
     const smuggled = {
       agent: "admin",
       phase: "round",
-      round: 1,
       channel: "C123:1700000000.0001",
       workspaceId: 7,
       taskId: "task-1"
@@ -180,7 +168,6 @@ describe("gatewayLogFields", () => {
     const leaky = {
       agent: "onboarding",
       phase: "round",
-      round: 1,
       channel: "C123:1700000000.0001",
       userId: "U123",
       slackUserId: "U123",
@@ -189,12 +176,7 @@ describe("gatewayLogFields", () => {
 
     const metadata = gatewayLogFields(leaky);
 
-    expect(Object.keys(metadata)).toEqual([
-      "agent",
-      "phase",
-      "round",
-      "channel"
-    ]);
+    expect(Object.keys(metadata)).toEqual(["agent", "phase", "channel"]);
     const serialized = JSON.stringify(metadata);
     expect(serialized).not.toContain("U123");
     expect(serialized).not.toContain("grace@example.com");
@@ -223,17 +205,17 @@ describe("the gateway identity a model call carries", () => {
       ...CHAT_CALL_OPTIONS
     });
 
-    expect(run.mock.calls[0]?.[0]).toBe(CHAT_PRIMARY.id);
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL.id);
     expect(gatewayOf(run)).toEqual({
       id: AI_GATEWAY_ID,
       metadata: fullRoundMetadata,
-      eventId: "task-1:r1"
+      eventId: "task-1"
     });
   });
 
-  it("carries the task correlation beside the five rather than inside them", async () => {
+  it("carries the task correlation beside the metadata rather than inside it", async () => {
     // `GatewayOptions.eventId` is its own field on the request, so the join from a
-    // gateway row back to the task that paid for it costs none of the five. Spent
+    // gateway row back to the task that paid for it costs no metadata entry. Spent
     // as metadata it would displace `workspaceId`, which is the whole reason
     // `taskId` was left off this side in the first place.
     const run = stubRun();
@@ -245,7 +227,7 @@ describe("the gateway identity a model call carries", () => {
     });
 
     const gateway = gatewayOf(run);
-    expect(gateway?.eventId).toBe("task-1:r1");
+    expect(gateway?.eventId).toBe("task-1");
     expect(Object.keys(gateway?.metadata ?? {})).toEqual(PRIORITY);
     expect(gateway?.metadata).not.toHaveProperty("eventId");
   });
@@ -271,86 +253,24 @@ describe("the gateway identity a model call carries", () => {
     expect(gatewayOf(run)?.eventId).toBeUndefined();
   });
 
-  it("carries the same identity when the fallback model serves the call", async () => {
-    // A call that failed over is still the same turn's cost. If only the primary
-    // were labelled, every fallback would land in the gateway log unattributed —
-    // and those are the rows most worth finding.
-    const run = stubRun((model) => {
-      if (model === CHAT_PRIMARY.id)
-        throw new Error("primary is out of capacity");
-      return { response: "from the fallback" };
-    });
+  it("asks the model for the deepest reasoning that model offers", async () => {
+    // The depth has to reach the binding as `reasoning_effort` on the model's own
+    // inputs, and reach it unaltered. Two layers would quietly change it on the
+    // way: Workers AI coerces a level it does not recognize instead of rejecting
+    // it — a shared `medium` once went to a model with no `medium` and arrived as
+    // `high` — and the provider clamps the unified `reasoning` option's ceiling
+    // down to `high`, which is why the level goes through `providerOptions`
+    // instead. This is the only place what was actually sent can be seen.
+    const run = stubRun();
 
     await generateText({
       model: chatModel(fullRound),
       prompt: "hi",
-      ...CHAT_CALL_OPTIONS,
-      maxRetries: 0
+      ...CHAT_CALL_OPTIONS
     });
 
-    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
-    expect(gatewayOf(run, 1)).toEqual({
-      id: AI_GATEWAY_ID,
-      metadata: fullRoundMetadata,
-      eventId: "task-1:r1"
-    });
-  });
-
-  it("still routes recall's embeddings through the gateway", async () => {
-    // The regression this exists for. Dropping the top-level `gateway` from
-    // `createWorkersAI` is what made per-call metadata reachable, and it also
-    // silently unhooks any model that does not carry one of its own. Embeddings
-    // would simply stop appearing in the gateway log, with nothing failing.
-    const run = stubRun(() => ({ data: [Array<number>(1024).fill(0.1)] }));
-
-    await embedMany({
-      model: embeddingModel(),
-      values: ["a message worth remembering"],
-      telemetry: { isEnabled: false }
-    });
-
-    expect(run.mock.calls[0]?.[0]).toBe(EMBED_MODEL_ID);
-    // No `agent`: one memoised model serves both agents' recall, so either name on
-    // it would be wrong half the time. No `eventId` either — an embedding belongs
-    // to a compaction's archive, not to the task that triggered it.
-    expect(gatewayOf(run)).toEqual({
-      id: AI_GATEWAY_ID,
-      metadata: { phase: "embed" }
-    });
-  });
-
-  it("asks each model for the deepest reasoning that model offers", async () => {
-    // The two do not share an enum — Cloudflare documents `low|medium|high` for
-    // the primary and `none|high|max` for the fallback — so one shared value
-    // cannot be right for both. It used to be: `medium` went to a model with no
-    // `medium`, and Workers AI quietly coerced it.
-    //
-    // The fallback's ceiling cannot travel as a model setting at all, because
-    // `workers-ai-provider` types `reasoning_effort` by the flash models' enum.
-    // It goes through `providerOptions["workers-ai"]`, which the provider reads
-    // ahead of any setting.
-    const run = stubRun((model) => {
-      if (model === CHAT_PRIMARY.id)
-        throw new Error("primary is out of capacity");
-      return { response: "from the fallback" };
-    });
-
-    await generateText({
-      model: chatModel(fullRound),
-      prompt: "hi",
-      ...CHAT_CALL_OPTIONS,
-      maxRetries: 0
-    });
-
-    expect(run.mock.calls[0]?.[0]).toBe(CHAT_PRIMARY.id);
-    expect(effortOf(run, 0)).toBe(CHAT_PRIMARY.reasoningEffort);
-    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
-    expect(effortOf(run, 1)).toBe(CHAT_FALLBACK.reasoningEffort);
-    // The two really are different words, which is the whole reason each model
-    // carries its own rather than sharing one constant.
-    expect(CHAT_PRIMARY.reasoningEffort).not.toBe(
-      CHAT_FALLBACK.reasoningEffort
-    );
+    expect(run.mock.calls[0]?.[0]).toBe(CHAT_MODEL.id);
+    expect(effortOf(run, 0)).toBe(CHAT_MODEL.reasoningEffort);
   });
 
   it("lets a test seam replace the model without reaching the binding at all", async () => {
@@ -383,33 +303,12 @@ describe("the session affinity a model call is steered by", () => {
     // And it neither displaced a gateway field nor rode inside one. The two
     // travel together on the same `run` options, which is exactly why this is
     // worth asserting: a key that ended up in `metadata` would spend one of the
-    // five and still look like it worked.
+    // capped entries and still look like it worked.
     expect(gatewayOf(run)).toEqual({
       id: AI_GATEWAY_ID,
       metadata: fullRoundMetadata,
-      eventId: "task-1:r1"
+      eventId: "task-1"
     });
-  });
-
-  it("carries the same key when the fallback model serves the call", async () => {
-    // A failover is the same conversation, and the fallback has a prefix cache
-    // of its own. Steering only the primary would make every fallback call pay
-    // full price for a prefix it could have hit.
-    const run = stubRun((model) => {
-      if (model === CHAT_PRIMARY.id)
-        throw new Error("primary is out of capacity");
-      return { response: "from the fallback" };
-    });
-
-    await generateText({
-      model: chatModel(fullRound, { sessionAffinity: "admin:7" }),
-      prompt: "hi",
-      ...CHAT_CALL_OPTIONS,
-      maxRetries: 0
-    });
-
-    expect(run.mock.calls[1]?.[0]).toBe(CHAT_FALLBACK.id);
-    expect(extraHeadersOf(run, 1)).toEqual({ "x-session-affinity": "admin:7" });
   });
 
   it("sends no affinity header when there is no key", async () => {

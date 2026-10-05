@@ -16,11 +16,9 @@ import {
   FakeSession,
   MemoryOpenCalls,
   fakeAgentSession,
-  fakeRecallEnv,
   fakeSessionHost,
   finalReplyResult,
   okResult,
-  toolCallResult,
   makeRequest,
   terminalTaskText
 } from "../../helpers/agents";
@@ -96,55 +94,6 @@ describe("AdminAgentExecutor", () => {
     expect(t.isFinished()).toBe(true);
     expect(t.published).toHaveLength(2);
     expect(terminalTaskText(t.published)?.toLowerCase()).toContain("error");
-  });
-
-  it("withholds the recall tool before the first compaction", async () => {
-    const session = new FakeSession([]); // no compactions → hasArchive=false
-    let capturedToolNames: string[] = [];
-    const model = new MockLanguageModelV4({
-      doGenerate: async (options) => {
-        capturedToolNames = (options.tools ?? []).map((t) => t.name);
-        return finalReplyResult("done") as never;
-      }
-    });
-    const exec = new AdminAgentExecutor(sqlHost, {
-      model,
-      createSession: () => fakeAgentSession(session)
-    });
-
-    const t = adminRequest();
-    await exec.execute(t.requestContext, t.eventBus);
-
-    expect(t.isFinished()).toBe(true);
-    expect(capturedToolNames).not.toContain("recall");
-  });
-
-  it("offers recall and routes it through the workspace namespace", async () => {
-    const session = new FakeSession([{ id: "c1" }]); // hasArchive=true
-    const { query } = fakeRecallEnv();
-    let call = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        (call++ === 0
-          ? toolCallResult("recall", {
-              query: "what did we decide last month?"
-            })
-          : finalReplyResult("Found it in past context.")) as never
-    });
-    const exec = new AdminAgentExecutor(sqlHost, {
-      model,
-      createSession: () => fakeAgentSession(session)
-    });
-
-    const t = adminRequest();
-    await exec.execute(t.requestContext, t.eventBus);
-
-    expect(t.isFinished()).toBe(true);
-    expect(t.published).toHaveLength(2);
-    // The recall tool must have been executed against the workspace namespace.
-    expect(query).toHaveBeenCalledTimes(1);
-    const opts = query.mock.calls[0][1] as { namespace: string };
-    expect(opts.namespace).toBe("admin:0");
   });
 });
 

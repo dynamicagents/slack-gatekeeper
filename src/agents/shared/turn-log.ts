@@ -1,5 +1,4 @@
-import type { LanguageModelUsage, ProviderMetadata } from "ai";
-import { servedByFallback } from "@/agents/model-fallback-middleware";
+import type { LanguageModelUsage } from "ai";
 
 /**
  * One structured line per turn, so what a turn cost is a thing you can read.
@@ -54,7 +53,7 @@ export interface TurnIdentity {
   workspaceId?: number;
   /** The Slack user whose message opened the turn. */
   user?: string;
-  /** The primary model id, which is what was *asked for* — see `fallbacks`. */
+  /** The model the turn ran on. */
   model: string;
 }
 
@@ -64,8 +63,6 @@ export interface TurnLog {
   modelCall(event: ModelCallLike): void;
   /** Fold in one finished tool execution. */
   toolRan(ms: number): void;
-  /** Note that the turn had to ask a second time for an ending. */
-  salvaged(): void;
   /** Name the approved call this turn carried out, decided by an earlier one. */
   replayed(toolName: string): void;
   /** Record how the turn ended. Unset means it threw. */
@@ -83,7 +80,7 @@ export interface TurnLog {
  * resolves, so there is no result to read usage off. That throw happens at
  * `generate-text.ts:1150`, *after* this callback fires at `:1128` and *before*
  * `onStepEnd` at `:1471` — so this is the only seam that sees a call the turn was
- * billed for but never got to use. The same applies to a failed salvage.
+ * billed for but never got to use.
  *
  * Structural rather than `LanguageModelCallEndEvent<TOOLS>`, which is generic over
  * a tool set this turn only assembles at runtime. A real event still has to satisfy
@@ -92,7 +89,6 @@ export interface TurnLog {
 export interface ModelCallLike {
   readonly usage: LanguageModelUsage;
   readonly finishReason: string;
-  readonly providerMetadata?: ProviderMetadata;
   readonly performance: { readonly responseTimeMs: number };
   readonly content: readonly { readonly type: string }[];
 }
@@ -125,14 +121,12 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
   const startedAt = Date.now();
   const tools: Record<string, number> = {};
   let modelCalls = 0;
-  let fallbacks = 0;
   let modelMs = 0;
   let toolMs = 0;
   let inputTokens: number | undefined;
   let cachedInputTokens: number | undefined;
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
-  let salvaged = false;
   let replayed: string | undefined;
   let ending: TurnEnding | undefined;
   let flushed = false;
@@ -143,7 +137,6 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
       // The last call's reason is the turn's: whatever came before it was, by
       // definition, not the end.
       finishReason = event.finishReason;
-      if (servedByFallback(event.providerMetadata)) fallbacks += 1;
       modelMs += event.performance.responseTimeMs;
       inputTokens = addTokens(inputTokens, event.usage.inputTokens);
       cachedInputTokens = addTokens(
@@ -158,10 +151,6 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
 
     toolRan(ms) {
       toolMs += ms;
-    },
-
-    salvaged() {
-      salvaged = true;
     },
 
     replayed(toolName) {
@@ -184,8 +173,6 @@ export function startTurnLog(identity: TurnIdentity): TurnLog {
         // turn got to use: a model that narrates under an enforced tool choice
         // is billed and then discarded.
         modelCalls,
-        fallbacks,
-        salvaged,
         // Absent on an ordinary turn. `tools` below counts only what this turn's
         // model asked for, and a replayed call was asked for by an earlier one —
         // its execution time is in `toolMs` either way.

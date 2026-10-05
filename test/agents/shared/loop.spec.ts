@@ -129,9 +129,7 @@ function makeCfg(
   overrides: Partial<AgentTurnConfig> = {}
 ): AgentTurnConfig {
   return {
-    // One model whatever the round: these tests are about the loop, not about what
-    // the gateway log says. `executeAgentTurn` calls this once per round of asking.
-    model: () => model,
+    model,
     prepare: async () => ({
       ...fakeAgentSession(session),
       systemSuffix: "",
@@ -217,37 +215,29 @@ describe("turnGatewayCall", () => {
       fakeRequestContext("hi", {
         contextId: "C123:1700000000.0001",
         metadata: adminMetadata
-      }),
-      1
+      })
     );
 
     expect(call).toEqual({
       agent: "admin",
       phase: "round",
-      round: 1,
       channel: "C123:1700000000.0001",
       workspaceId: 7,
-      eventId: "task-1:r1"
+      eventId: "task-1"
     });
   });
 
-  it("names the task and the round in the event id, and only there", () => {
-    // `${taskId}:r${round}` rides on `GatewayOptions.eventId`, which is its own
-    // field on the request — so the join from a gateway row back to the task that
-    // paid for it spends none of the five, and `taskId` stays off this side.
-    const round = (n: number) =>
-      turnGatewayCall(
-        "admin",
-        fakeRequestContext("hi", { metadata: adminMetadata }),
-        n
-      );
+  it("names the task in the event id, and only there", () => {
+    // The task id rides on `GatewayOptions.eventId`, which is its own field on the
+    // request — so the join from a gateway row back to the task that paid for it
+    // spends no metadata entry, and `taskId` stays off that side.
+    const call = turnGatewayCall(
+      "admin",
+      fakeRequestContext("hi", { metadata: adminMetadata })
+    );
 
-    expect(round(1).eventId).toBe("task-1:r1");
-    // The salvage is a second charge for the same turn. Same task, different round:
-    // the two are only distinguishable because the number is in both.
-    expect(round(2).eventId).toBe("task-1:r2");
-    expect(round(2).round).toBe(2);
-    expect(round(1)).not.toHaveProperty("taskId");
+    expect(call.eventId).toBe("task-1");
+    expect(call).not.toHaveProperty("taskId");
   });
 
   it("takes the agent from the executor, not from the wire", () => {
@@ -258,8 +248,7 @@ describe("turnGatewayCall", () => {
       "onboarding",
       fakeRequestContext("hi", {
         metadata: { agentKind: "local", tenant: "anything-at-all" }
-      }),
-      1
+      })
     );
 
     expect(call.agent).toBe("onboarding");
@@ -273,8 +262,7 @@ describe("turnGatewayCall", () => {
     // exactly this reason — see `gatewayLogFields` in model.spec.ts.
     const call = turnGatewayCall(
       "admin",
-      fakeRequestContext("hi", { metadata: adminMetadata }),
-      1
+      fakeRequestContext("hi", { metadata: adminMetadata })
     );
 
     expect(JSON.stringify(call)).not.toContain("U123");
@@ -288,57 +276,6 @@ describe("turnGatewayCall", () => {
 // ---------------------------------------------------------------------------
 
 describe("executeAgentTurn", () => {
-  it("asks for a model per round, numbering the salvage apart from the round", async () => {
-    // The turn and the salvage are two charges against the gateway, and a model
-    // freezes its metadata at construction — so one model for both would put them in
-    // the log as the same call made twice.
-    const session = new FakeSession();
-    let n = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () =>
-        (n++ === 0
-          ? okResult("Done! ✅")
-          : finalReplyResult("Here is what happened.")) as never
-    });
-    const rounds: number[] = [];
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("update the endpoint"),
-      bus.eventBus,
-      forcedCfg(session, model, {
-        model: (round) => {
-          rounds.push(round);
-          return model;
-        }
-      })
-    );
-
-    expect(rounds).toEqual([1, 2]);
-  });
-
-  it("builds only the round's model when no salvage is needed", async () => {
-    const session = new FakeSession();
-    const model = new MockLanguageModelV4({
-      doGenerate: async () => okResult("Hello!") as never
-    });
-    const rounds: number[] = [];
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("hi"),
-      bus.eventBus,
-      makeCfg(session, model, {
-        model: (round) => {
-          rounds.push(round);
-          return model;
-        }
-      })
-    );
-
-    expect(rounds).toEqual([1]);
-  });
-
   it("happy path: appends user + assistant messages and completes a task", async () => {
     const session = new FakeSession();
     const model = new MockLanguageModelV4({
@@ -395,7 +332,7 @@ describe("executeAgentTurn", () => {
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      model: () => model,
+      model,
       prepare: async () => {
         throw bindingError(429);
       },
@@ -418,7 +355,7 @@ describe("executeAgentTurn", () => {
     });
 
     await executeAgentTurn(fakeRequestContext("hi"), bus.eventBus, {
-      model: () => model,
+      model,
       prepare: async () => {
         throw new Error("some unexpected failure");
       },
@@ -483,7 +420,7 @@ describe("executeAgentTurn", () => {
     const bus = fakeEventBus();
 
     await executeAgentTurn(fakeRequestContext(), bus.eventBus, {
-      model: () => model,
+      model,
       prepare: async () => {
         throw new Error("missing metadata");
       },
@@ -948,9 +885,9 @@ describe("executeAgentTurn — forced final_reply", () => {
 
   it("never ships narration as an answer: it apologizes instead", async () => {
     // The regression. Under the old loop this exact generation — text, no call —
-    // completed the task successfully and told the user the work was done. Reaching
-    // for a second model is a layer below this one now: by the time the SDK reports
-    // the violation, the model's own fallback has already answered in prose too.
+    // completed the task successfully and told the user the work was done. Now the
+    // SDK raises the violation, the turn catches it as an ending it has no reply
+    // for, and the user is told so instead of being told the work is done.
     const session = new FakeSession();
     const declared: string[][] = [];
     const model = new MockLanguageModelV4({
@@ -967,10 +904,9 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
-    // Narrated under `required`, then again under the enforced salvage — and no
-    // further: the salvage is asked once.
-    expect(declared).toHaveLength(2);
-    expect(declared[1]).toEqual(["final_reply"]);
+    // Asked once. The violation ends the turn; nothing asks the same model the
+    // same question a second time.
+    expect(declared).toHaveLength(1);
     // The claim never reaches the user, and is never persisted as history.
     expect(publishedText(bus)).not.toContain("Feito!");
     expect(partsText(expectTerminalReply(bus)?.parts)).toMatch(
@@ -1004,9 +940,8 @@ describe("executeAgentTurn — forced final_reply", () => {
     // Two steps of one call, not two calls: the SDK rejects the input against the
     // tool's own schema and feeds the model its error on the next step.
     expect(prompts).toHaveLength(2);
-    // Still a working step, work tools and all — not the ending-only salvage call,
-    // which would also have fixed the reply and hidden a loop that stopped on the
-    // rejected call instead of handing it back.
+    // Still a working step, work tools and all — a loop that stopped on the
+    // rejected call instead of handing it back would leave the reply unrepaired.
     expect(declared[1]).toContain("work");
     expect(prompts[1]).toContain("final_reply");
     expect(prompts[1]).toContain("Invalid input for tool");
@@ -1043,7 +978,7 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
-    // The ending is the last step of the one call, not an eleventh call after it.
+    // The ending is the last step of the one call, not a round after it.
     expect(declared).toHaveLength(10);
     expect(declared.at(-1)).toEqual(["final_reply"]);
     // Named, not merely `required`. With one tool on the table the two would pick
@@ -1082,87 +1017,16 @@ describe("executeAgentTurn — forced final_reply", () => {
       forcedCfg(session, model)
     );
 
-    // The tenth call is the loop's own ending step. An eleventh would be the salvage,
-    // which also reads the run — and would pass this for the wrong reason.
+    // The tenth call is the loop's own ending step, and the last one there is.
     expect(prompts).toHaveLength(10);
     const ending = prompts.at(-1) ?? "";
     expect(ending).toContain('"toolName":"work"');
     expect(ending).toContain('"ok":true');
   });
 
-  it("salvages a reply when the model narrates instead of ending", async () => {
-    // `toolChoice: "required"` is advisory on Workers AI — it fails open into prose.
-    // One more call with the ending *named* is the enforced form, and the work the
-    // turn did comes back instead of being buried under an apology.
-    const session = new FakeSession();
-    const declared: string[][] = [];
-    const choices: unknown[] = [];
-    let n = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async (options) => {
-        declared.push((options.tools ?? []).map((t) => t.name));
-        choices.push(options.toolChoice);
-        return (
-          n++ === 0
-            ? okResult("Feito! ✅ I updated the endpoint.")
-            : finalReplyResult("I could not do that, and here is why.")
-        ) as never;
-      }
-    });
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("update the endpoint"),
-      bus.eventBus,
-      forcedCfg(session, model)
-    );
-
-    expect(declared).toHaveLength(2);
-    expect(declared[1]).toEqual(["final_reply"]);
-    // The salvage's whole reason to exist is the stronger form. Asking again with the
-    // advisory `required` that just failed open would be the same ask, repeated.
-    expect(choices[0]).toEqual({ type: "required" });
-    expect(choices[1]).toEqual({ type: "tool", toolName: "final_reply" });
-    expect(partsText(expectTerminalReply(bus)?.parts)).toBe(
-      "I could not do that, and here is why."
-    );
-    // A turn that answered is completed, not failed — nothing went down.
-    expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
-    // The narrated claim still never reaches the user or history.
-    expect(publishedText(bus)).not.toContain("Feito!");
-  });
-
-  it("salvages an ending the last step got wrong, with no budget left to repair it", async () => {
-    const session = new FakeSession();
-    let endings = 0;
-    const model = new MockLanguageModelV4({
-      doGenerate: async (options) => {
-        if ((options.tools ?? []).some((t) => t.name === "work")) {
-          return narratedToolCall("still going", "work", {}) as never;
-        }
-        // The first ending-only call is step 10: a blank reply there is rejected
-        // with no step left to fix it. The second is the salvage.
-        return (
-          endings++ === 0
-            ? finalReplyResult("   ")
-            : finalReplyResult("Salvaged answer.")
-        ) as never;
-      }
-    });
-    const bus = fakeEventBus();
-
-    await executeAgentTurn(
-      fakeRequestContext("do a lot"),
-      bus.eventBus,
-      forcedCfg(session, model)
-    );
-
-    expect(endings).toBe(2);
-    expect(partsText(expectTerminalReply(bus)?.parts)).toBe("Salvaged answer.");
-    expect(sessionText(session.messages[1])).toBe("Salvaged answer.");
-  });
-
-  it("lets a 🛑 out-rank the salvage: a stopped turn spends no more calls", async () => {
+  it("lets a 🛑 out-rank a turn that reached no ending", async () => {
+    // The stop wins over the apology: a turn that narrated instead of ending has
+    // nothing to deliver either way, and the user was already told "🛑 Stopped."
     const session = new FakeSession();
     let calls = 0;
     const model = new MockLanguageModelV4({
@@ -1181,6 +1045,7 @@ describe("executeAgentTurn — forced final_reply", () => {
 
     expect(calls).toBe(1);
     expect(publishedStates(bus).at(-1)).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(publishedText(bus)).not.toMatch(/temporarily unavailable/i);
   });
 
   it("publishes intermediate narration but not the final_reply step's text", async () => {
@@ -1211,7 +1076,7 @@ describe("executeAgentTurn — forced final_reply", () => {
     );
   });
 
-  it("lets a 🛑 out-rank everything, with no fallback or final round after it", async () => {
+  it("lets a 🛑 out-rank everything, with no further round after it", async () => {
     const session = new FakeSession();
     let calls = 0;
     const model = new MockLanguageModelV4({
@@ -2296,25 +2161,21 @@ describe("executeAgentTurn — approvals", () => {
     expect(gate.ran).toEqual([{ name: long }]);
   });
 
-  it("hands the salvage the approved call's result, not the decision again", async () => {
-    // By the time an ending has to be salvaged, the approved call has already run.
-    // Seeding that from `messages` would hand the SDK the same decision a second
-    // time with no result against it, so the settled record goes in instead.
+  it("shows the turn's own model the approved call's result, not the decision again", async () => {
+    // The approved call runs ahead of the first model call, from a decision an
+    // earlier turn made. The model that then has to report it must be shown what
+    // the call produced — handed the decision again with no result against it, it
+    // would collect the same approval and send the call on unresolved.
     const session = new FakeSession();
     session.messages.push(assistantSessionMessage(reason));
     const openCalls = new MemoryOpenCalls();
     await openCalls.put(heldApproval());
     const gate = gatedTool();
     const prompts: string[] = [];
-    let n = 0;
     const model = new MockLanguageModelV4({
       doGenerate: async (options) => {
         prompts.push(JSON.stringify(options.prompt));
-        return (
-          n++ === 0
-            ? okResult("Deleted it! ✅")
-            : finalReplyResult("Deleted arc-player.")
-        ) as never;
+        return finalReplyResult("Deleted arc-player.") as never;
       }
     });
     const bus = fakeEventBus();
@@ -2325,12 +2186,11 @@ describe("executeAgentTurn — approvals", () => {
       gatedCfg(session, model, gate, asksAHuman, { openCalls })
     );
 
-    // It ran once, ahead of the first call, and the salvage does not run it again.
+    // It ran once, ahead of the first call, and nothing runs it again.
     expect(gate.ran).toEqual([input]);
-    expect(prompts).toHaveLength(2);
-    // The salvage is shown what the call produced — which is the evidence that the
-    // decision was settled before it was replayed.
-    expect(prompts[1]).toContain("deleted");
+    expect(prompts).toHaveLength(1);
+    // The evidence that the decision was settled before it was replayed.
+    expect(prompts[0]).toContain("deleted");
     expect(publishedText(bus)).toContain("Deleted arc-player.");
   });
 });
@@ -2368,7 +2228,7 @@ describe("executeAgentTurn — recorded tool calls", () => {
       input: { name: "arc-player" },
       output: { ok: true }
     });
-    // The reply is still the only text — recall and FTS see no tool JSON.
+    // The reply is still the only text — a reader of history sees no tool JSON.
     expect(sessionText(session.messages[1])).toBe("Updated the endpoint.");
   });
 
@@ -2574,8 +2434,6 @@ describe("executeAgentTurn — the turn log", () => {
       user: "U123",
       ending: "reply",
       modelCalls: 1,
-      fallbacks: 0,
-      salvaged: false,
       tools: { final_reply: 1 }
     });
   });
@@ -2645,13 +2503,12 @@ describe("executeAgentTurn — the turn log", () => {
     expect(lines[0]).toMatchObject({ tenant: "acme", workspaceId: 42 });
   });
 
-  it("counts calls the turn was billed for and never got to use", async () => {
-    // Both the turn and its salvage narrate under an enforced tool choice, so
-    // `generateText` rejects with `ToolChoiceViolationError` twice and neither
-    // promise ever resolves to a result. Both calls were still charged, and both
-    // wrote a row to the AI Gateway log. Read from the resolved result, this
-    // whole turn would report zero calls and zero tokens — the most expensive
-    // shape a turn has, logged as if nothing had happened.
+  it("counts a call the turn was billed for and never got to use", async () => {
+    // The turn narrates under an enforced tool choice, so `generateText` rejects
+    // with `ToolChoiceViolationError` and the promise never resolves to a result.
+    // The call was still charged, and it wrote a row to the AI Gateway log. Read
+    // from the resolved result, this turn would report zero calls and zero tokens
+    // — logged as if nothing had happened.
     const session = new FakeSession();
     const model = new MockLanguageModelV4({
       doGenerate: async () => okResult("I have updated the endpoint.") as never
@@ -2660,11 +2517,7 @@ describe("executeAgentTurn — the turn log", () => {
     const lines = await turnLines(forcedCfg(session, model));
 
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({
-      ending: "none",
-      modelCalls: 2,
-      salvaged: true
-    });
+    expect(lines[0]).toMatchObject({ ending: "none", modelCalls: 1 });
     expect(lines[0]?.inputTokens).toBeGreaterThan(0);
     expect(lines[0]?.outputTokens).toBeGreaterThan(0);
   });

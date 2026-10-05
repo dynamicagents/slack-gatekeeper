@@ -5,11 +5,11 @@ import { startTurnLog, type ModelCallLike } from "@/agents/shared/turn-log";
 /**
  * The one line a turn leaves behind.
  *
- * What is checked here is the arithmetic — adding up charged model calls,
- * counting fallback-served ones, keeping "the provider said nothing" distinct
- * from "the provider said zero". That the *shape* matches a real
- * `onLanguageModelCallEnd` event is checked by the compiler at the `loop.ts` call
- * site, and that every exit reaches this is checked in `loop.spec.ts`.
+ * What is checked here is the arithmetic — adding up charged model calls, keeping
+ * "the provider said nothing" distinct from "the provider said zero". That the
+ * *shape* matches a real `onLanguageModelCallEnd` event is checked by the compiler
+ * at the `loop.ts` call site, and that every exit reaches this is checked in
+ * `loop.spec.ts`.
  */
 
 const identity = {
@@ -18,11 +18,8 @@ const identity = {
   tenant: "admin",
   workspaceId: 7,
   user: "U123",
-  model: "@cf/zai-org/glm-5.2"
+  model: "@cf/zai-org/glm-5.3-flash"
 };
-
-/** The spelling `model-fallback-middleware.ts` writes. Pinned by its own spec. */
-const FALLBACK_SERVED = { "slack-gatekeeper": { servedByFallback: true } };
 
 function usage(
   inputTokens: number | undefined,
@@ -45,13 +42,11 @@ function usage(
 function modelCall({
   tools = [],
   responseTimeMs = 0,
-  fallback = false,
   finishReason = "stop",
   tokens = usage(0, 0)
 }: {
   tools?: string[];
   responseTimeMs?: number;
-  fallback?: boolean;
   finishReason?: string;
   tokens?: LanguageModelUsage;
 } = {}): ModelCallLike {
@@ -59,7 +54,6 @@ function modelCall({
     usage: tokens,
     finishReason,
     performance: { responseTimeMs },
-    ...(fallback ? { providerMetadata: FALLBACK_SERVED } : {}),
     content: tools.map((toolName) => ({ type: "tool-call", toolName }))
   };
 }
@@ -83,7 +77,7 @@ describe("the turn log", () => {
   it("carries the turn's identity even when nothing ran", () => {
     const line = emitted(() => {});
 
-    expect(line).toMatchObject({ ...identity, modelCalls: 0, salvaged: false });
+    expect(line).toMatchObject({ ...identity, modelCalls: 0 });
     // No exit claimed the turn, which from here is indistinguishable from a
     // throw — and is exactly what a throw leaves behind.
     expect(line.ending).toBe("failed");
@@ -114,7 +108,6 @@ describe("the turn log", () => {
     expect(line).toMatchObject({
       ending: "reply",
       modelCalls: 2,
-      fallbacks: 0,
       // The last call's, not the first's: whatever came before was not the end.
       finishReason: "stop",
       modelMs: 300,
@@ -131,12 +124,12 @@ describe("the turn log", () => {
   it("counts a call the turn was billed for but never got to use", () => {
     // The case this design exists for. A model that narrates under an enforced
     // tool choice is charged and then discarded, so the turn has to record the
-    // call as it happens rather than reading a result that never arrives.
+    // call as it happens rather than reading a result that never arrives — here,
+    // a step that answered in prose and then one that reached the ending.
     const line = emitted((log) => {
       log.modelCall(
         modelCall({ tokens: usage(900, 40), finishReason: "stop" })
       );
-      log.salvaged();
       log.modelCall(
         modelCall({ tokens: usage(950, 60), tools: ["final_reply"] })
       );
@@ -145,21 +138,9 @@ describe("the turn log", () => {
 
     expect(line).toMatchObject({
       modelCalls: 2,
-      salvaged: true,
       inputTokens: 1850,
       outputTokens: 100
     });
-  });
-
-  it("counts the calls the fallback model served", () => {
-    const line = emitted((log) => {
-      log.modelCall(modelCall());
-      log.modelCall(modelCall({ fallback: true }));
-      log.modelCall(modelCall({ fallback: true }));
-      log.ending("reply");
-    });
-
-    expect(line).toMatchObject({ modelCalls: 3, fallbacks: 2 });
   });
 
   it("keeps an unreported token count out of the sum", () => {

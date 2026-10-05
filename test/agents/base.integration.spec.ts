@@ -43,7 +43,7 @@ function withAgent<T>(
   return runInDurableObject(stub, fn);
 }
 
-/** The session the admin executor builds in production, minus the archiver. */
+/** The session the admin executor builds in production. */
 function realSession(agent: AdminAgent, wsId = 0) {
   return buildAgentSession(agent, model, {
     soul: () => adminSoul(wsId),

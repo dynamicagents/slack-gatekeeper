@@ -1,58 +1,45 @@
 /** Name of the Slack channel whose members are org-level admins. */
 export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
 
-/** A chat model and the reasoning budget that belongs to that model. */
-interface ChatModel {
-  /** A Workers AI model id. Must support function calling. */
-  readonly id: string;
-  /**
-   * The highest `reasoning_effort` **this model's own documentation** defines.
-   * Not shared with any other model — see {@link CHAT_MODELS}.
-   */
-  readonly reasoningEffort: string;
-}
-
 /**
- * The chat models all in-repo agents run on, in the order they are tried: the
- * primary first, then the fallback the middleware reaches for when the primary
- * fails or answers in prose under an enforced tool choice. Both must support
- * function calling.
+ * The one chat model every in-repo agent runs on, and the reasoning budget that
+ * belongs to that model. Must support function calling.
  *
- * `reasoningEffort` is paired with its `id` because it is a property of that
- * model, not a global preference: Cloudflare documents a different
- * `reasoning_effort` enum per model and they do not overlap above `high`.
+ * `reasoningEffort` is paired with its `id` rather than standing alone because it
+ * is a property of that model, not a global preference: Cloudflare declares a
+ * different `reasoning_effort` enum per model and they do not overlap above
+ * `high`.
  *
  * **Nothing will tell you when it is wrong.** Workers AI coerces an unknown
- * effort instead of rejecting it: a single shared `"medium"` was once aimed at
- * GLM-5.2, whose enum has no `medium` at all, and every AI Gateway request body
- * showed it arriving as `high`. So when you change a model here, check its page
- * for its `reasoning_effort` enum, record it in the comment above the entry, and
- * set `reasoningEffort` to the highest that model offers — left to the
- * provider's default depth, GLM has answered registry questions from the
+ * effort instead of rejecting it: a shared `"medium"` was once aimed at GLM-5.2,
+ * whose enum has no `medium` at all, and every AI Gateway request body showed it
+ * arriving as `high`. So when you change the model here, read that model's enum
+ * off `worker-configuration.d.ts` — `wrangler types` writes one input type per
+ * catalog model, and it is the copy that moves when the catalog does — record it
+ * in the comment below, and set `reasoningEffort` to the highest that model
+ * offers. Left to the default depth, GLM has answered registry questions from the
  * conversation instead of calling the tool that would have checked.
  *
- * The two efforts do not travel the same way. The primary's rides as a model
- * setting; the fallback's cannot, because `workers-ai-provider` types
- * `reasoning_effort` as the flash models' `"low" | "medium" | "high"`, so `max`
- * does not typecheck there even though `binding.run` forwards it untouched. It
- * goes through `providerOptions["workers-ai"]` instead, applied by the fallback
- * middleware. One consequence while editing: the primary's effort is typechecked
- * against that enum and the fallback's is not, so a primary ceiling the provider
- * does not declare is a compile error rather than a silent coercion.
+ * `as const` keeps both as literals, which is what lets the provider accept the
+ * id; `satisfies` is what still rejects a level this model does not declare, now
+ * that the provider cannot. `workers-ai-provider` types its `reasoning_effort`
+ * model setting `low | medium | high`, a generation behind the runtime, so `max`
+ * does not compile as a model setting at all and travels as a per-call
+ * `providerOptions["workers-ai"]` entry instead — see `CHAT_CALL_OPTIONS` in
+ * `agents/model.ts`. That route is plain JSON to the compiler, which is why the
+ * ceiling is checked here against the generated types rather than there against
+ * the provider's.
  */
-export const CHAT_MODELS = [
-  // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | medium | high
-  { id: "@cf/zai-org/glm-5.3-flash", reasoningEffort: "high" },
-  // @cf/zai-org/glm-5.2 — reasoning_effort: none | high | max
-  { id: "@cf/zai-org/glm-5.2", reasoningEffort: "max" }
-  // `satisfies` rather than an annotation: it makes the pairing structural — an
-  // entry added with an `id` and no `reasoningEffort` will not compile — while
-  // `as const` keeps both as literals, which is what lets the provider accept the
-  // id and typecheck the primary's effort against its declared enum.
-] as const satisfies readonly ChatModel[];
-
-/** The model a turn is run on, and the fallback tried within the failing call. */
-export const [CHAT_PRIMARY, CHAT_FALLBACK] = CHAT_MODELS;
+export const CHAT_MODEL = {
+  // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | high | max
+  id: "@cf/zai-org/glm-5.3-flash",
+  reasoningEffort: "max"
+} as const satisfies {
+  id: keyof AiModels;
+  reasoningEffort: NonNullable<
+    AiModels["@cf/zai-org/glm-5.3-flash"]["inputs"]["reasoning_effort"]
+  >;
+};
 
 /**
  * Workers AI text-to-image model for admin avatar generation. FLUX.2 [klein] 9B —
@@ -60,41 +47,6 @@ export const [CHAT_PRIMARY, CHAT_FALLBACK] = CHAT_MODELS;
  * which we decode to bytes before storing.
  */
 export const AVATAR_IMAGE_MODEL_ID = "@cf/black-forest-labs/flux-2-klein-9b";
-
-/**
- * Workers AI embedding model for episodic recall (archived compacted history).
- * bge-m3 — multilingual (Slack channels are not English-only) with a long context
- * window. 1024-dimensional — must match the `agent-recall` Vectorize index dims.
- */
-export const EMBED_MODEL_ID = "@cf/baai/bge-m3";
-
-/**
- * How many texts one embedding request carries. The provider would default to 3000;
- * this keeps the request the size the recall store has always sent.
- */
-export const EMBED_MAX_PER_CALL = 100;
-
-/**
- * UTF-8 **bytes** an input is truncated to before it is embedded.
- *
- * Stands in for the binding's `truncate_inputs`, which cannot be reached through the
- * provider: it spreads extra settings into `binding.run`'s *options*, while Cloudflare
- * declares `truncate_inputs` on the model's *inputs*, and `AiOptions` is a closed type
- * with nowhere to smuggle it through. That flag defaults to `false`, so without a cap
- * of our own one over-long message errors the whole batch instead of being shortened.
- *
- * **Bytes rather than characters**, because only bytes bound the *tokens*
- * {@link EMBED_MODEL_ID} counts against its 60,000-token window: its SentencePiece
- * vocabulary spends at least one byte per token, so the encoded length is an upper
- * bound on the token count. A character count is not — one uncommon character can cost
- * several tokens, so a character cap that looks safe for Latin text can still overflow
- * on rarer scripts and reject the whole batch.
- *
- * 48,000 leaves headroom under the window, and leaves ordinary messages untouched:
- * Slack's own per-message ceiling is 40,000 characters. Only the vector is affected —
- * Vectorize still stores the full text as metadata, so recall quotes messages exactly.
- */
-export const EMBED_INPUT_MAX_BYTES = 48_000;
 
 /** Cloudflare AI Gateway slug — "default" auto-provisions a gateway on first request. */
 export const AI_GATEWAY_ID = "default";
