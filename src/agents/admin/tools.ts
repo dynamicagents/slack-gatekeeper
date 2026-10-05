@@ -1,8 +1,6 @@
-import { tool, type ToolApprovalConfiguration, type ToolSet } from "ai";
+import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { authorize, type UserAuthContext } from "@/auth";
 import type { VerifiedAgentCard } from "@/a2a/card-verify";
-import { askUserTool } from "@/agents/shared/ask-user";
 import {
   type AgentRow,
   type NotifyOn,
@@ -55,18 +53,17 @@ import {
  * admin's own avatar + display name). No discriminated `operation` — each tool
  * takes a flat schema the model can emit reliably.
  *
- * Two gating layers:
- *  1. Instance-scoped availability — `buildAdminTools` only constructs the
- *     org-only tools (`workspace_create`, `workspace_set_admin_channel`,
- *     `agents_domains_*`) on the org instance (`wsId === ORG_WORKSPACE_ID`); a
- *     workspace instance never receives them. `agents_*` act on the instance's wsId.
- *  2. Per-call `authorize()` defense-in-depth — the caller must be an admin of
- *     the instance's workspace (established by admin-channel membership).
+ * **The channel is the permission.** Whoever can post in a workspace's admin
+ * channel may use every tool here, so nothing checks *who* is asking. What is
+ * checked is *where*: an instance acts on its own workspace (`wsId`, from the
+ * admin channel the turn came through), and the org-only tools
+ * (`workspace_create`, `workspace_set_admin_channel`, `agents_domains_*`) exist
+ * only on the org instance — `buildAdminTools` builds them there and nowhere
+ * else, and each refuses again on any other.
  *
  * Tool *logic* is split from the AI-SDK wiring so it unit-tests without an LLM.
  */
 export interface AdminToolDeps {
-  ctx: UserAuthContext | null;
   /** The workspace this admin instance manages (admin:{wsId}). */
   wsId: number;
   /**
@@ -83,9 +80,9 @@ export interface AdminToolDeps {
    */
   generateImage?: (prompt: string) => Promise<GeneratedImage>;
   /**
-   * Persist a generated avatar in the admin DO storage; returns its key. `name`
-   * is `"admin"` (the admin's own avatar) or a custom agent's name — icons are
-   * pruned per agent.
+   * Persist a generated avatar in this workspace's avatar store; returns its
+   * key. `name` is `"admin"` (the admin's own avatar) or a custom agent's name —
+   * icons are pruned per agent.
    */
   storeIcon?: (
     img: GeneratedImage,
@@ -103,10 +100,6 @@ export type EndpointVerifier = (
 const RESERVED_NAMES = new Set(["admin", "onboarding"]);
 
 type ToolResult = Record<string, unknown>;
-
-function deny(reason: string): ToolResult {
-  return { error: `Not authorized: ${reason}` };
-}
 
 function shape(a: AgentRow, channels: string[]): ToolResult {
   return {
@@ -184,65 +177,14 @@ async function requireWritableAgent(
   return a;
 }
 
-// ---------------------------------------------------------------------------
-// Authorization gates — each returns a `deny` result, or null when the caller is
-// cleared. One per domain so the split tools keep the exact guard (and message)
-// their consolidated handler had.
-// ---------------------------------------------------------------------------
-
-/** Admin of this instance's workspace — the gate for the agent write tools. */
-function ensureAgentAdmin(deps: AdminToolDeps): ToolResult | null {
-  if (!deps.ctx) return deny("sign in as an admin to manage agents");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(`managing agents requires admin of workspace ${deps.wsId}`);
-  return null;
-}
-
-/** Admin of this instance's workspace — the gate for the self-identity tools. */
-function ensureSelfAdmin(deps: AdminToolDeps): ToolResult | null {
-  if (!deps.ctx) return deny("sign in as an admin to change your own identity");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(
-      `changing the admin agent's identity requires admin of workspace ${deps.wsId}`
-    );
-  return null;
-}
-
-/** Org admin — the gate for the org-only workspace tools. */
-function ensureWorkspaceOrgAdmin(deps: AdminToolDeps): ToolResult | null {
-  // Belt-and-suspenders: these tools are only built on admin:0, enforce anyway.
-  if (deps.wsId !== ORG_WORKSPACE_ID)
-    return deny("workspace management is only available to the org admin");
-  if (!deps.ctx) return deny("sign in as the org admin to manage workspaces");
-  if (
-    !authorize(deps.ctx, {
-      type: "IsWorkspaceAdmin",
-      workspaceId: ORG_WORKSPACE_ID
-    })
-  )
-    return deny("workspace management requires org admin");
-  return null;
-}
-
-/** Org admin — the gate for the org-only remote-agent-domain tools. */
-function ensureDomainsOrgAdmin(deps: AdminToolDeps): ToolResult | null {
-  if (deps.wsId !== ORG_WORKSPACE_ID)
-    return deny(
-      "remote agent domain management is only available to the org admin"
-    );
-  if (!deps.ctx)
-    return deny("sign in as the org admin to manage remote agent domains");
-  if (
-    !authorize(deps.ctx, {
-      type: "IsWorkspaceAdmin",
-      workspaceId: ORG_WORKSPACE_ID
-    })
-  )
-    return deny("remote agent domain management requires org admin");
+/** The org-only tools refuse on any instance but the org's. */
+function ensureOrgInstance(
+  deps: AdminToolDeps,
+  what: string
+): ToolResult | null {
+  if (deps.wsId !== ORG_WORKSPACE_ID) {
+    return { error: `${what} is only available to the org admin.` };
+  }
   return null;
 }
 
@@ -254,12 +196,6 @@ export async function agentsRead(
   deps: AdminToolDeps,
   args: { name?: string }
 ): Promise<ToolResult> {
-  if (!deps.ctx) return deny("sign in as an admin to read agents");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(`reading agents requires admin of workspace ${deps.wsId}`);
-
   if (args.name) {
     const a = await getAgent(args.name);
     return {
@@ -290,8 +226,6 @@ export async function agentsCreate(
   deps: AdminToolDeps,
   args: AgentsCreateArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
   const rejected = ensureNoBroadcastName(args.displayName);
   if (rejected) return rejected;
   const badDeadline = ensureValidDeadline(args.taskDeadlineSeconds);
@@ -349,8 +283,6 @@ export async function agentsUpdate(
   deps: AdminToolDeps,
   args: AgentsUpdateArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
   const rejected = ensureNoBroadcastName(args.displayName);
   if (rejected) return rejected;
   const badDeadline = ensureValidDeadline(args.taskDeadlineSeconds);
@@ -400,9 +332,8 @@ export async function agentsUpdate(
         error:
           `New endpoint for "${args.name}" is signed by a different key than the ` +
           `one pinned at registration. If the agent's signing identity changed ` +
-          `intentionally, call agents_repin to see the key the card now advertises, ` +
-          `then agents_repin_apply to write it behind a human approval — without ` +
-          `unregistering the agent.`
+          `intentionally, call agents_repin to pin the key the card now ` +
+          `advertises — without unregistering the agent.`
       };
     }
   }
@@ -439,9 +370,6 @@ export async function agentsAllowChannel(
   deps: AdminToolDeps,
   args: AgentsAllowChannelArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
   if (isDmChannel(args.channelId)) {
@@ -468,9 +396,6 @@ export async function agentsRevokeChannel(
   deps: AdminToolDeps,
   args: AgentsRevokeChannelArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
   await detachAgentChannel(args.name, args.channelId);
@@ -486,9 +411,6 @@ export async function agentsRegenerateAvatar(
   deps: AdminToolDeps,
   args: AgentsRegenerateAvatarArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
   const prompt = buildAgentAvatarPrompt({
@@ -509,22 +431,11 @@ export async function agentsRegenerateAvatar(
 
 export type AgentsDeleteArgs = { name: string };
 
-/**
- * Delete a custom agent and its channel mappings.
- *
- * Destructive and irreversible, so it never runs on the model's say-so alone: the
- * approval policy in {@link adminToolApproval} stops the call, a human approves it
- * in Slack, and the SDK then carries out *that* call — re-validated and re-authorized
- * against whoever approved it. The checks here run either way, because a policy is
- * a gate and not a substitute for a tool knowing what it is allowed to do.
- */
+/** Delete a custom agent and its channel mappings. */
 export async function agentsDelete(
   deps: AdminToolDeps,
   args: AgentsDeleteArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
   await unregisterAgent(args.name);
@@ -534,38 +445,26 @@ export async function agentsDelete(
 export type AgentsRepinArgs = { name: string };
 
 /**
- * Re-read a custom agent's AgentCard and report the signing identity it now
- * advertises, beside the one currently pinned. This call only reads; the write is
- * {@link agentsRepinApply}.
+ * Re-read a custom agent's AgentCard and pin the signing identity it now
+ * advertises.
  *
  * The deliberate hole in Trust-On-First-Use. TOFU is what makes a validly-signed
  * token from *any other* key a rejection rather than a login, so every other path
  * treats a changed signer as an attack: `agentsUpdate` refuses outright, and
  * callback verification fails with "callback token key does not match the agent's
- * pinned signing key". But an operator who rotates their own gatekeeper key is not an
- * attacker, and their only recourse used to be deleting the agent and registering
- * it again — which drops its channel mappings and its avatar to fix a single
- * column.
+ * pinned signing key". But an operator who rotates their own agent's key is not
+ * an attacker, and without this their only recourse is deleting the agent and
+ * registering it again — which drops its channel mappings and its avatar to fix
+ * a single column.
  *
- * So the trust decision is handed to the one party that can actually make it, over
- * two calls: this one reports the advertised key beside the pinned one, and
- * {@link agentsRepinApply} writes the key it reported, pausing for a workspace
- * admin's approval in Slack first — the same gate `agents_delete` uses, for the
- * same reason. The split is what lets the approval name the exact key being
- * written, rather than whatever the card says by the time anyone clicks.
- *
- * Nothing but the pin moves: the card is re-read at the endpoint and tenant already
- * on the row, so this cannot be used to re-point an agent somewhere else. A card
- * that still names the pinned key is a no-op, and says so without spending a
- * human's approval on nothing.
+ * Nothing but the pin moves: the card is re-read at the endpoint and tenant
+ * already on the row, so this cannot re-point an agent somewhere else. A card
+ * that still names the pinned key is a no-op, and says so.
  */
 export async function agentsRepin(
   deps: AdminToolDeps,
   args: AgentsRepinArgs
 ): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
   const target = await requireWritableAgent(deps, args.name);
   if ("error" in target) return target;
 
@@ -589,155 +488,13 @@ export async function agentsRepin(
     };
   }
 
+  await updateAgent(args.name, { cardSigningJku: jku, cardSigningKid: kid });
   return {
     ok: true,
     changed: true,
-    pinned: { jku: target.cardSigningJku, kid: target.cardSigningKid },
-    advertised: { jku, kid },
-    note:
-      `The card for "${args.name}" now advertises a different signing key. ` +
-      `To re-pin it, call agents_repin_apply with exactly this advertised jku ` +
-      `and kid — that call pauses for the user's approval before anything is ` +
-      `written.`
-  };
-}
-
-export type AgentsRepinApplyArgs = { name: string; jku: string; kid: string };
-
-/**
- * Write the signing identity {@link agentsRepin} reported, once a human approves it.
- *
- * The key is taken from the *input* rather than re-derived, because the input is
- * what the approval prompt put on screen — approving a re-pin means approving that
- * key, not whatever the card happens to say when the click arrives. So the live card
- * is read again and must still name it; a key that moved on in between is a
- * different decision than the one that was made, and is refused rather than written.
- */
-export async function agentsRepinApply(
-  deps: AdminToolDeps,
-  args: AgentsRepinApplyArgs
-): Promise<ToolResult> {
-  const denied = ensureAgentAdmin(deps);
-  if (denied) return denied;
-
-  const target = await requireWritableAgent(deps, args.name);
-  if ("error" in target) return target;
-
-  let verified: VerifiedAgentCard;
-  try {
-    verified = await deps.verifyEndpoint(target.a2aEndpoint, target.tenantId);
-  } catch (err) {
-    return {
-      error: `Could not re-read the card for "${args.name}": ${(err as Error).message}`
-    };
-  }
-
-  if (
-    verified.pin.cardSigningJku !== args.jku ||
-    verified.pin.cardSigningKid !== args.kid
-  ) {
-    return {
-      error:
-        `The signing key for "${args.name}" changed again since the approval ` +
-        `was raised, so nothing was re-pinned — call agents_repin again to ` +
-        `review the current key.`
-    };
-  }
-
-  await updateAgent(args.name, {
-    cardSigningJku: args.jku,
-    cardSigningKid: args.kid
-  });
-  return {
-    ok: true,
-    note: `Re-pinned agent "${args.name}" to signing key "${args.kid}".`
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Which admin calls need a human's Approve before they run.
-//
-// The policy is resolved per call by the SDK, and — this is the point — resolved
-// *again* when the approved call is replayed on the resuming turn. `deps` is built
-// per turn from the caller, so on that second pass the caller is whoever clicked
-// Approve. A non-admin's approval is refused there, by the same function that
-// raised the prompt, rather than by a second copy of the rule written out by hand.
-// ---------------------------------------------------------------------------
-
-/** The reason a gate gave, as the policy's own refusal sentence. */
-function refusal(result: ToolResult): string {
-  return String(result.error);
-}
-
-/** Per-tool approval policy for one admin turn. See the note above. */
-export function adminToolApproval(
-  deps: AdminToolDeps
-): ToolApprovalConfiguration<ToolSet, unknown> {
-  return {
-    agents_delete: async (input: unknown) => {
-      const { name } = input as AgentsDeleteArgs;
-      const denied = ensureAgentAdmin(deps);
-      if (denied) return { type: "denied", reason: refusal(denied) };
-      const target = await requireWritableAgent(deps, name);
-      if ("error" in target) return { type: "denied", reason: refusal(target) };
-      return {
-        type: "user-approval",
-        reason:
-          `Delete agent *${name}*? This permanently removes it and its ` +
-          `channel mappings, and cannot be undone.`
-      };
-    },
-
-    agents_repin_apply: async (input: unknown) => {
-      const { name, jku, kid } = input as AgentsRepinApplyArgs;
-      const denied = ensureAgentAdmin(deps);
-      if (denied) return { type: "denied", reason: refusal(denied) };
-      const target = await requireWritableAgent(deps, name);
-      if ("error" in target) return { type: "denied", reason: refusal(target) };
-
-      // A no-op must never spend a human's attention on nothing.
-      if (target.cardSigningJku === jku && target.cardSigningKid === kid) {
-        return {
-          type: "denied",
-          reason: `"${name}" is already pinned to that key — nothing to change.`
-        };
-      }
-
-      let verified: VerifiedAgentCard;
-      try {
-        verified = await deps.verifyEndpoint(
-          target.a2aEndpoint,
-          target.tenantId
-        );
-      } catch (err) {
-        return {
-          type: "denied",
-          reason: `Could not re-read the card for "${name}": ${(err as Error).message}`
-        };
-      }
-      if (
-        verified.pin.cardSigningJku !== jku ||
-        verified.pin.cardSigningKid !== kid
-      ) {
-        return {
-          type: "denied",
-          reason:
-            `The card for "${name}" advertises kid ` +
-            `\`${verified.pin.cardSigningKid}\`, not the one this call names — ` +
-            `call agents_repin again to review it.`
-        };
-      }
-
-      return {
-        type: "user-approval",
-        reason:
-          `Re-pin agent *${name}* to a new signing key?\n` +
-          `Pinned: \`${target.cardSigningKid ?? "(none)"}\`\n` +
-          `Card now says: \`${kid}\`\n` +
-          `Approve only if you rotated this agent's signing key yourself — ` +
-          `re-pinning is what makes the gatekeeper trust it.`
-      };
-    }
+    previous: { jku: target.cardSigningJku, kid: target.cardSigningKid },
+    pinned: { jku, kid },
+    note: `Re-pinned agent "${args.name}" to signing key "${kid}".`
   };
 }
 
@@ -745,16 +502,10 @@ export async function workspaceRead(
   deps: AdminToolDeps,
   args: { id?: number }
 ): Promise<ToolResult> {
-  if (!deps.ctx) return deny("sign in as an admin to read workspaces");
-  if (
-    !authorize(deps.ctx, { type: "IsWorkspaceAdmin", workspaceId: deps.wsId })
-  )
-    return deny(`reading workspaces requires admin of workspace ${deps.wsId}`);
-
   const isOrg = deps.wsId === ORG_WORKSPACE_ID;
   if (args.id !== undefined) {
     if (!isOrg && args.id !== deps.wsId)
-      return deny(`you can only read workspace ${deps.wsId}`);
+      return { error: `This admin can only read workspace ${deps.wsId}.` };
     const ws = await getWorkspace(args.id);
     return { workspaces: ws ? [ws] : [] };
   }
@@ -769,7 +520,7 @@ export async function workspaceCreate(
   deps: AdminToolDeps,
   args: WorkspaceCreateArgs
 ): Promise<ToolResult> {
-  const denied = ensureWorkspaceOrgAdmin(deps);
+  const denied = ensureOrgInstance(deps, "Workspace management");
   if (denied) return denied;
 
   const ws = await createWorkspace({ name: args.name });
@@ -782,7 +533,7 @@ async function workspaceSetAdminChannel(
   deps: AdminToolDeps,
   args: WorkspaceSetAdminChannelArgs
 ): Promise<ToolResult> {
-  const denied = ensureWorkspaceOrgAdmin(deps);
+  const denied = ensureOrgInstance(deps, "Workspace management");
   if (denied) return denied;
 
   if (!(await getWorkspace(args.id)))
@@ -837,7 +588,7 @@ function normalizeAgentDomain(
 export async function agentsDomainsList(
   deps: AdminToolDeps
 ): Promise<ToolResult> {
-  const denied = ensureDomainsOrgAdmin(deps);
+  const denied = ensureOrgInstance(deps, "Remote agent domain management");
   if (denied) return denied;
 
   return {
@@ -852,7 +603,7 @@ export async function agentsDomainsAdd(
   deps: AdminToolDeps,
   args: { domain: string }
 ): Promise<ToolResult> {
-  const denied = ensureDomainsOrgAdmin(deps);
+  const denied = ensureOrgInstance(deps, "Remote agent domain management");
   if (denied) return denied;
 
   const normalized = normalizeAgentDomain(args.domain);
@@ -882,7 +633,7 @@ export async function agentsDomainsRemove(
   deps: AdminToolDeps,
   args: { domain: string }
 ): Promise<ToolResult> {
-  const denied = ensureDomainsOrgAdmin(deps);
+  const denied = ensureOrgInstance(deps, "Remote agent domain management");
   if (denied) return denied;
 
   const normalized = normalizeAgentDomain(args.domain);
@@ -907,8 +658,9 @@ export async function agentsDomainsRemove(
 // ---------------------------------------------------------------------------
 
 /**
- * Generate an avatar image and persist it in the admin DO under `name`, returning
- * its public gatekeeper URL (`/icons/{wsId}/{name}/{key}.jpg`, served by the admin DO).
+ * Generate an avatar image and persist it in the workspace's avatar store under
+ * `name`, returning its public gatekeeper URL (`/icons/{wsId}/{name}/{key}.jpg`,
+ * served by that store).
  * Guards the image seams and the public-URL precondition. Shared by the admin's own
  * avatar (`name === "admin"`) and custom-agent avatars (`name === agent name`).
  */
@@ -953,9 +705,6 @@ export async function selfSetAvatar(
   deps: AdminToolDeps,
   args: SelfSetAvatarArgs
 ): Promise<ToolResult> {
-  const denied = ensureSelfAdmin(deps);
-  if (denied) return denied;
-
   const ws = await getWorkspace(deps.wsId);
   const workspaceName = ws?.name ?? `workspace ${deps.wsId}`;
   const prompt = buildAvatarPrompt({
@@ -978,8 +727,6 @@ export async function selfSetDisplayName(
   deps: AdminToolDeps,
   args: SelfSetDisplayNameArgs
 ): Promise<ToolResult> {
-  const denied = ensureSelfAdmin(deps);
-  if (denied) return denied;
   const rejected = ensureNoBroadcastName(args.displayName);
   if (rejected) return rejected;
 
@@ -1146,41 +893,20 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
     }),
     agents_delete: tool({
       description:
-        "Delete a custom agent and its channel mappings. Destructive and " +
-        "irreversible — the conversation pauses on this call for an explicit " +
-        "human approval in Slack, and the agent is removed only if approved. " +
-        "Call it once; do not ask for confirmation yourself.",
+        "Delete a custom agent and its channel mappings. Irreversible: the " +
+        "agent, its channels and its pending tasks are removed for good.",
       inputSchema: z.object({ name: z.string() }),
       execute: (args) => agentsDelete(deps, args)
     }),
     agents_repin: tool({
       description:
-        "Re-fetch a custom agent's AgentCard and report the signing key it now " +
-        "advertises beside the pinned one. Use when an agent's callbacks fail " +
-        "with \"callback token key does not match the agent's pinned signing " +
-        'key" because its signing key was rotated. This only reads: when the ' +
-        "key has changed, pass the advertised jku and kid it reports to " +
-        "agents_repin_apply to write them.",
+        "Re-read a custom agent's AgentCard and pin the signing key it now " +
+        "advertises. Use when an agent's callbacks fail with \"callback token " +
+        "key does not match the agent's pinned signing key\" because its " +
+        "operator rotated the key. Nothing but the pin changes — the endpoint, " +
+        "tenant, channels and avatar are untouched.",
       inputSchema: z.object({ name: z.string() }),
       execute: (args) => agentsRepin(deps, args)
-    }),
-    agents_repin_apply: tool({
-      description:
-        "Write the signing key agents_repin reported, replacing the pinned one. " +
-        "Pass the advertised jku and kid from that call verbatim. Nothing but " +
-        "the pin changes — the endpoint, tenant, channels and avatar are " +
-        "untouched. The conversation pauses on this call for a human approval, " +
-        "and the key is written only if approved.",
-      inputSchema: z.object({
-        name: z.string(),
-        jku: z
-          .string()
-          .describe("The advertised jku, exactly as agents_repin reported it"),
-        kid: z
-          .string()
-          .describe("The advertised kid, exactly as agents_repin reported it")
-      }),
-      execute: (args) => agentsRepinApply(deps, args)
     }),
     workspace_read: tool({
       description:
@@ -1214,10 +940,7 @@ export function buildAdminTools(deps: AdminToolDeps): ToolSet {
         displayName: z.string().describe("The admin agent's new display name")
       }),
       execute: (args) => selfSetDisplayName(deps, args)
-    }),
-    // A control tool with no handler: the turn pauses on the call itself and keeps
-    // it until the human answers — see `shared/ask-user.ts`.
-    ask_user: askUserTool
+    })
   };
 
   if (deps.wsId === ORG_WORKSPACE_ID) {

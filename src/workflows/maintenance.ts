@@ -6,7 +6,7 @@ import {
   sweepStaleHitlRequests
 } from "@/db/models/hitl-requests";
 import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
-import { timeoutAgentTask } from "@/agents/dispatch";
+import { timeoutAgentTask } from "@/a2a/dispatch";
 
 type MaintenanceWorkflowPayload = Record<string, never>;
 

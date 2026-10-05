@@ -27,7 +27,7 @@ import {
   cancelHitlRequestsByToken
 } from "@/db/models/hitl-requests";
 import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
-import { _resetIssuerCacheForTest } from "@/agents/dispatch";
+import { _resetIssuerCacheForTest } from "@/a2a/dispatch";
 import { buildAgentCard } from "@/a2a/card";
 import {
   inputRequestToSlackBlocks,

@@ -3,7 +3,7 @@ import {
   type Message,
   type TaskPushNotificationConfig
 } from "@a2a-js/sdk";
-import { buildUserAuthContext, type UserAuthContext } from "@/auth";
+import type { UserAuthContext } from "@/auth";
 import { env } from "cloudflare:workers";
 import {
   signGatekeeperToken,
@@ -19,17 +19,15 @@ import {
   buildHitlTimeoutParts,
   type HitlAnswerChoice
 } from "@/a2a/hitl";
-import { buildAgentCard } from "@/a2a/card";
 import { buildMessage, textPart } from "@/a2a/parts";
-import { localPushNotificationConfig } from "@/a2a/notifications/local";
 import { NOTIFICATIONS_PATH } from "@/a2a/notifications/remote";
 import { notifyHitlContinuationFailed } from "@/a2a/notifications/hitl";
 import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import {
-  sendA2ALocal,
   sendA2ARemote,
   cancelA2ARemote,
   type A2AAccept,
+  type A2ARemoteTarget,
   type CancelOutcome
 } from "@/a2a/client";
 import { audienceFor, validateRemoteEndpoint } from "@/a2a/endpoint";
@@ -37,7 +35,14 @@ import {
   getAllowedRemoteAgentDomains,
   getPublicUrl
 } from "@/db/models/workspace-configs";
-import { renderTurn, turnContextFromPayload } from "@/agents/shared/messages";
+import { renderTurn, turnContextFromPayload } from "@/a2a/turn";
+import { isDmChannel } from "@/router/resolve";
+import {
+  adminIdentity,
+  onboardingIdentity,
+  type BuiltinTenant
+} from "@/agents/identity";
+import { agentsWorker, builtinEndpoint } from "@/agents/worker";
 
 /** The subset of an agent registry row the dispatcher needs (Rpc-serializable). */
 export interface DispatchAgentRef {
@@ -50,10 +55,9 @@ export interface DispatchAgentRef {
 }
 
 /**
- * The per-agent routing extras carried alongside the caller. The universal
- * `user` lives on {@link DispatchPayload}; this union holds only the fields that
- * differ between agents. The executor narrows on these (it reads deserialized
- * JSON and has no access to {@link DispatchAgentRef}).
+ * The routing facts that ride on the A2A `message.metadata`. Who/where/when is
+ * carried in the turn *text* (the gatekeeper-applied `<turn>` wrapper), and no
+ * permission context ever crosses: the signed token is the only authority.
  *
  * Both facts travel, mirroring the registry: `agentKind` is *where* the agent
  * runs, `tenant` is *which* agent it is. Carrying only the tenant would not
@@ -61,17 +65,8 @@ export interface DispatchAgentRef {
  * built-in literals and TypeScript could not tell the members apart.
  */
 export type DispatchMetadata =
-  | { agentKind: "local"; tenant: "admin"; adminWorkspaceId: number }
-  | { agentKind: "local"; tenant: "onboarding" }
+  | { agentKind: "local"; tenant: BuiltinTenant }
   | { agentKind: "remote"; tenant: string; workspaceId: number };
-
-/**
- * What rides on the A2A `message.metadata` and what the executor reads back.
- * Who/where/when is carried in the turn *text* (the Gatekeeper-applied `<turn>`
- * wrapper), not here — this is only the caller (`user`, for authorization) plus
- * the per-kind routing extras.
- */
-export type AgentTurnMetadata = { user: UserAuthContext } & DispatchMetadata;
 
 export interface DispatchPayload {
   /**
@@ -92,9 +87,12 @@ export interface DispatchPayload {
   threadTs: string;
   /** Slack message timestamp of the originating user turn. */
   messageTs: string;
-  /** The caller — ALWAYS present (the classifier boundary guarantees it). */
+  /**
+   * The person who wrote the turn — ALWAYS present (the classifier boundary
+   * guarantees it). Only their name and id cross, inside the `<turn>` wrapper.
+   */
   user: UserAuthContext;
-  /** Only the per-kind extras; merged with `user` onto the wire metadata. */
+  /** The wire metadata. */
   metadata: DispatchMetadata;
 }
 
@@ -118,10 +116,6 @@ async function resolveIssuer(): Promise<string | null> {
   if (issuer) cachedIssuer = issuer;
   return issuer;
 }
-
-/** Stable per-thread A2A context id, e.g. `"{channelId}:{threadTs}"`. */
-const buildContextId = (channelId: string, threadTs: string): string =>
-  `${channelId}:${threadTs}`;
 
 /** Encode bytes as a fixed-length lowercase-alphanumeric (base36) id. */
 function base36Id(bytes: Uint8Array, length: number): string {
@@ -195,63 +189,119 @@ function buildRemoteContextId(
 }
 
 /**
- * The Durable Object namespace for a built-in local agent, or `undefined` for
- * remote agents (reached over HTTP at their `a2aEndpoint`).
+ * Whether an agent is one of this Worker's own core tenants.
  *
  * Two decisions, deliberately kept on two different fields:
  *
- *  - **`kind` decides local vs remote.** It is set by the gatekeeper when the row
- *    is created and no admin can choose it.
- *  - **`tenantId` decides which local agent**, the same field that picks which
- *    agent at a remote endpoint. So one column means "which agent" on both
- *    paths, and a locally-generated agent later becomes a tenant resolved from
- *    a table rather than a new arm of this `switch`.
+ *  - **`kind` decides built-in vs remote.** It is set by the gatekeeper when the
+ *    row is created and no admin can choose it.
+ *  - **`tenantId` decides which built-in**, the same field that picks which
+ *    agent at a remote endpoint, so one column means "which agent" on both
+ *    paths.
  *
- * The `kind` guard has to come first and has to stay on `kind`. Routing
- * local-vs-remote off `tenantId` alone would let a **remote agent registered
- * with `tenantId: "admin"` be dispatched into this gatekeeper's own AdminAgent** —
- * privilege escalation through a field an org admin types. `dispatch.spec.ts`
- * asserts that directly.
- *
- * Direct `env` access keeps the binding types intact — renaming a binding fails
- * to compile here rather than string-indexing `env` and casting the type away.
+ * The `kind` guard has to come first and has to stay on `kind`. Routing off
+ * `tenantId` alone would let a **remote agent registered with `tenantId:
+ * "admin"` be dispatched into this gatekeeper's own admin** — privilege
+ * escalation through a field an admin types. `dispatch.spec.ts` asserts that
+ * directly, and the mounted tenants refuse any identity but a built-in's on
+ * top of it (`src/agents/worker.ts`).
  */
-function localNamespaceFor(
-  agent: Pick<AgentRow, "kind" | "tenantId">
-): DurableObjectNamespace | undefined {
-  if (agent.kind === "remote") return undefined;
-  switch (agent.tenantId) {
-    case "admin":
-      return env.AdminAgent;
-    case "onboarding":
-      return env.OnboardingAgent;
-    default:
-      return undefined;
-  }
+function isBuiltin(agent: Pick<AgentRow, "kind">): boolean {
+  return agent.kind === "local";
 }
 
 /**
- * Durable Object instance name for a local agent. The admin agent runs **one
- * instance per workspace** (`admin:0` = org, `admin:1`, …) and the onboarding
- * concierge runs **one instance per user** (`onboarding:{slackUserId}`), so each
- * has its own SQLite — isolated Sessions + memory.
- *
- * Keyed on the tenant, the same field `localNamespaceFor` picks the class with,
- * so one value chooses both. The strings it produces are unchanged, which is why
- * built-ins keep their existing Durable Objects across the `kind` rename.
+ * The identity a built-in is dispatched as, derived from the channel the turn
+ * is in — so a continuation or a cancel, which know the channel and nothing
+ * about the person, reach the same instance the dispatch did. Null when the
+ * channel no longer names one: an admin channel since reassigned, or a
+ * non-DM handed to onboarding.
  */
-export function instanceNameFor(metadata: AgentTurnMetadata): string {
-  if (metadata.agentKind !== "local") {
-    throw new Error("unreachable: instanceNameFor called for a remote agent");
-  }
-  switch (metadata.tenant) {
-    case "admin":
-      return `admin:${metadata.adminWorkspaceId}`;
+async function builtinIdentity(
+  agent: Pick<DispatchAgentRef, "tenantId" | "workspaceId">,
+  channelId: string
+): Promise<RemoteIdentity | null> {
+  switch (agent.tenantId) {
+    case "admin": {
+      const workspace = await getWorkspaceByAdminChannel(channelId);
+      return workspace ? adminIdentity(workspace.id) : null;
+    }
     case "onboarding":
-      return `onboarding:${metadata.user.slackUserId}`;
+      return isDmChannel(channelId)
+        ? onboardingIdentity(channelId, agent.workspaceId)
+        : null;
     default:
-      throw new Error("unreachable: no local agent for that tenant");
+      return null;
   }
+}
+
+/** The gatekeeper's public origin, which every token and callback is minted against. */
+async function requireIssuer(): Promise<string> {
+  const issuer = await resolveIssuer();
+  if (!issuer) {
+    throw new Error(
+      "Gatekeeper public URL has not been discovered yet. " +
+        "Ensure the worker has received at least one Slack event before dispatching to agents."
+    );
+  }
+  return issuer;
+}
+
+/**
+ * Where, and as whom, a call to an agent goes — one path for every agent.
+ *
+ * A remote agent is dialed over HTTPS at its registered endpoint, after the
+ * SSRF and approved-domain checks. A built-in is a core tenant on this Worker:
+ * its endpoint is derived rather than stored, the domain policy does not apply
+ * to our own origin, and the request is handed to the mounted A2A handler
+ * in-process instead of leaving the isolate. Everything else — the signed
+ * token, the tenant, the push callback — is the same on both.
+ */
+async function targetFor(
+  agent: DispatchAgentRef,
+  identity: RemoteIdentity,
+  acceptTimeoutMs?: number
+): Promise<{ target: A2ARemoteTarget; issuer: string }> {
+  // A refused endpoint is a verdict, not a missing precondition, so it is
+  // checked before anything else can fail.
+  if (!isBuiltin(agent)) {
+    const allowedDomains = await getAllowedRemoteAgentDomains();
+    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
+  }
+  const issuer = await requireIssuer();
+  let endpoint = agent.a2aEndpoint;
+  let transport: typeof fetch | undefined;
+  if (isBuiltin(agent)) {
+    endpoint = builtinEndpoint(issuer);
+    transport = ((input: RequestInfo | URL, init?: RequestInit) =>
+      agentsWorker(new Request(input, init), env)) as typeof fetch;
+  }
+  const authToken = await signGatekeeperToken({
+    audience: audienceFor(endpoint),
+    issuer,
+    identity,
+    tenant: agent.tenantId
+  });
+  return {
+    target: {
+      endpoint,
+      authToken,
+      tenant: agent.tenantId,
+      acceptTimeoutMs,
+      transport
+    },
+    issuer
+  };
+}
+
+/** The identity an agent is called as, or null for a built-in whose channel names none. */
+async function identityFor(
+  agent: DispatchAgentRef,
+  channelId: string
+): Promise<RemoteIdentity | null> {
+  return isBuiltin(agent)
+    ? builtinIdentity(agent, channelId)
+    : buildRemoteIdentity(agent);
 }
 
 /**
@@ -278,8 +328,7 @@ function remotePushNotificationConfig(
 
 /**
  * The outcome of a dispatch. All agents accept a Task here and deliver their real
- * reply later: remote agents call the authenticated public callback, while local
- * built-ins use a trusted in-process sender. The workflow receives the shared
+ * reply later to the authenticated push callback. The workflow receives the shared
  * correlation `token` and the assigned `taskId`; a contract violation (a reply
  * that isn't a Task acceptance) is surfaced as a visible error reply.
  */
@@ -294,8 +343,8 @@ export type DispatchResult =
  *
  * The copy lives here rather than in `@/a2a/errors` because `a2a/` owns protocol
  * facts while dispatch owns what a user is told — and only dispatch knows whose
- * fault it is. On the *local* path the refusal comes from the gatekeeper's own A2A
- * server (`src/a2a/serve.ts`), so "contact the agent developer" would be wrong.
+ * fault it is. A built-in's refusal comes from this Worker's own core tenants,
+ * so "contact the agent developer" would be wrong.
  */
 function protocolErrorText(
   agent: Pick<DispatchAgentRef, "name" | "kind" | "tenantId">,
@@ -332,7 +381,7 @@ function protocolErrorText(
     default:
       reason = `${who} rejected the request (A2A error ${code}).`;
   }
-  return localNamespaceFor(agent)
+  return isBuiltin(agent)
     ? `${reason} This is a gatekeeper bug — please check the error logs.`
     : `${reason} Please contact the agent developer.`;
 }
@@ -358,125 +407,64 @@ function dispatchResultFor(
     case "contract_violation":
       return {
         kind: "error_reply",
-        text: localNamespaceFor(agent)
-          ? "Local agent did not provide the required task acknowledgment."
+        text: isBuiltin(agent)
+          ? "Built-in agent did not provide the required task acknowledgment."
           : "Remote agent did not provide the required task acknowledgment."
       };
   }
 }
 
 /**
- * Dispatch a user message to an agent over A2A. Routing is by `agent.kind`:
- * built-in local agents are reached in-process via their DO `stub.fetch`; custom
- * agents go over real HTTP at their `a2aEndpoint`. Both return task acceptance
- * and deliver status snapshots through their respective push-notification path.
+ * Dispatch a user message to an agent over A2A. Every agent — remote, or one of
+ * the built-in core tenants on this Worker — is called the same way (see
+ * {@link targetFor}): a signed token, an accept-first `SendMessage`, and a
+ * reply delivered later to the push callback.
  */
 export async function dispatchToAgent(
   agent: DispatchAgentRef,
   payload: DispatchPayload
 ): Promise<DispatchResult> {
-  const localContextId = buildContextId(payload.channelId, payload.threadTs);
-  const ns = localNamespaceFor(agent);
-
-  // Deterministic per-dispatch id → the A2A `messageId` (dedupe key) and, for
-  // remotes, the push `token`. Stable across retries so re-delivery is idempotent.
+  // Deterministic per-dispatch id → the A2A `messageId` (dedupe key) and the
+  // push `token`. Stable across retries so re-delivery is idempotent.
   const dispatchId = await buildDispatchId(payload.eventId, agent);
 
-  // The Gatekeeper owns provenance: who/where/when is inlined into the turn text via
-  // the `<turn>` wrapper, once, identically for local and remote agents. Nothing
-  // structured rides alongside — downstream agents, and anything reading history
-  // back, read it out of the text. See renderTurn / parseTurn in shared/messages.
+  // The gatekeeper owns provenance: who/where/when is inlined into the turn
+  // text via the `<turn>` wrapper, once, identically for every agent.
   const text = renderTurn(payload.text, turnContextFromPayload(payload));
 
-  if (!ns) {
-    // Custom agent → real HTTP. The caller's identity travels in a short-lived,
-    // EdDSA-signed gatekeeper JWT (verified by the remote against our public JWKS),
-    // NOT as plaintext `message.metadata` — so a remote agent can neither read
-    // the full `UserAuthContext` nor forge the caller's permissions.
-    const allowedDomains = await getAllowedRemoteAgentDomains();
-    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains); // SSRF + approved-domain defense-in-depth
-
-    const identity = buildRemoteIdentity(agent);
-    const issuer = await resolveIssuer();
-    if (!issuer) {
-      throw new Error(
-        "Gatekeeper public URL has not been discovered yet. " +
-          "Ensure the worker has received at least one Slack event before registering remote agents."
-      );
-    }
-    const gatekeeperToken = await signGatekeeperToken({
-      audience: audienceFor(agent.a2aEndpoint),
-      issuer,
-      identity,
-      tenant: agent.tenantId
-    });
-
-    const remoteMessage = buildMessage({
-      // Deterministic id so a retried dispatch is dedupable by the remote rather
-      // than appended as a fresh turn (A2A `messageId` is the sender-set dedupe key).
-      messageId: dispatchId,
-      role: Role.ROLE_USER,
-      parts: [textPart(text)],
-      contextId: buildRemoteContextId(
-        identity,
-        payload.channelId,
-        payload.threadTs
-      ),
-      // The signed token is the only authority — it names the calling
-      // gatekeeper-agent instance, not any Slack user. The turn's who/where/when
-      // lives in the `<turn>` text; no gatekeeper authorization or permission
-      // context ever crosses this boundary.
-      metadata: { ...payload.metadata }
-    });
-
-    // Push-notification validation token = the same deterministic dispatch id. The
-    // remote echoes it on the callback so the gatekeeper correlates it to the pending
-    // task (A2A §13.2); the webhook still verifies the remote's signature against
-    // its pinned card key (that JWT is the real authenticator — this token is the
-    // correlation/dedupe key, stable across retries so they collapse to one row).
-    const accept = await sendA2ARemote(
-      {
-        endpoint: agent.a2aEndpoint,
-        authToken: gatekeeperToken,
-        tenant: agent.tenantId
-      },
-      remoteMessage,
-      remotePushNotificationConfig(issuer, dispatchId)
+  const identity = await identityFor(agent, payload.channelId);
+  if (!identity) {
+    throw new Error(
+      `BUG: built-in ${agent.tenantId} resolved for a channel that names no instance of it`
     );
-    return dispatchResultFor(accept, agent, dispatchId);
   }
+  const { target, issuer } = await targetFor(agent, identity);
 
-  // Local agent → in-process via DO stub.fetch. Trusted same-worker dispatch, so
-  // the full caller context rides on the message metadata (for authorization);
-  // provenance still travels in the `<turn>` text like every other agent.
-  const metadata: AgentTurnMetadata = {
-    user: payload.user,
-    ...payload.metadata
-  };
   const message = buildMessage({
-    // Deterministic id (same dedupe rationale as the remote path).
+    // Deterministic id so a retried dispatch is dedupable by the agent rather
+    // than appended as a fresh turn (A2A `messageId` is the sender-set dedupe key).
     messageId: dispatchId,
     role: Role.ROLE_USER,
     parts: [textPart(text)],
-    contextId: localContextId,
-    metadata: { ...metadata }
+    contextId: buildRemoteContextId(
+      identity,
+      payload.channelId,
+      payload.threadTs
+    ),
+    // The signed token is the only authority — it names the calling
+    // gatekeeper-agent instance, not any Slack user.
+    metadata: { ...payload.metadata }
   });
 
-  const instanceName = instanceNameFor(metadata);
-
-  const stub = ns.get(ns.idFromName(instanceName));
-  const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) =>
-    stub.fetch(input as RequestInfo, init)) as typeof fetch;
-  const card = buildAgentCard({
-    name: agent.name,
-    description: `Local ${agent.kind} agent`,
-    pushNotifications: true
-  });
-
-  const accept = await sendA2ALocal(
-    { card, fetchImpl, tenant: agent.tenantId },
+  // Push-notification validation token = the same deterministic dispatch id. The
+  // agent echoes it on the callback so the gatekeeper correlates it to the pending
+  // task (A2A §13.2); the webhook still verifies the agent's signature against
+  // its pinned card key (that JWT is the real authenticator — this token is the
+  // correlation/dedupe key, stable across retries so they collapse to one row).
+  const accept = await sendA2ARemote(
+    target,
     message,
-    localPushNotificationConfig(dispatchId)
+    remotePushNotificationConfig(issuer, dispatchId)
   );
   return dispatchResultFor(accept, agent, dispatchId);
 }
@@ -493,19 +481,6 @@ export type HitlAnswer = HitlAnswerChoice & {
   answeredBy: string;
   /** Human-readable answer for the resume TextPart (option label or freeform). */
   humanText: string;
-};
-
-/**
- * The caller a system-initiated continuation (a HITL timeout) authorizes as when
- * there is no human answerer. Zero permissions: a timed-out prompt should let a
- * local agent finalize, never perform a privileged write on nobody's behalf.
- */
-const SYSTEM_CALLER: UserAuthContext = {
-  slackUserId: "gatekeeper",
-  displayName: "gatekeeper",
-  isPrimaryOwner: false,
-  isOrgAdmin: false,
-  adminWorkspaces: []
 };
 
 /**
@@ -551,9 +526,9 @@ async function markResumed(token: string): Promise<void> {
 }
 
 /**
- * Continue a task parked on a human-in-the-loop prompt. Mirrors
- * {@link dispatchToAgent}'s two branches but *continues* an existing task rather
- * than starting one: the message carries the paused `taskId` + `contextId` +
+ * Continue a task parked on a human-in-the-loop prompt. Calls the agent the way
+ * {@link dispatchToAgent} does but *continues* an existing task rather than
+ * starting one: the message carries the paused `taskId` + `contextId` +
  * `referenceTaskIds` (A2A multi-turn), and the push config reuses the original
  * `token` so continued callbacks land on the same `agent_tasks` row. On a
  * successful accept the row is un-parked (`resumeFromInput`) so the resumed
@@ -568,8 +543,7 @@ async function sendTaskContinuation(
   input: {
     parts: Message["parts"];
     messageId: string;
-    caller: UserAuthContext;
-    /** A remote agent's accept timeout; see `A2ARemoteTarget.acceptTimeoutMs`. */
+    /** An agent's accept timeout; see `A2ARemoteTarget.acceptTimeoutMs`. */
     acceptTimeoutMs?: number;
   }
 ): Promise<ContinuationOutcome> {
@@ -590,99 +564,27 @@ async function sendTaskContinuation(
     return { kind: "failed" };
   }
 
-  const ns = localNamespaceFor(agent);
-
-  if (!ns) {
-    // Custom agent → real HTTP, same identity/endpoint checks as dispatch.
-    const allowedDomains = await getAllowedRemoteAgentDomains();
-    validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
-    const issuer = await resolveIssuer();
-    if (!issuer) {
-      console.error(
-        "[hitl] continuation: gatekeeper public URL not discovered",
-        {
-          requestId: row.requestId
-        }
-      );
-      return { kind: "failed" };
-    }
-    const ref: DispatchAgentRef = {
-      name: agent.name,
-      kind: agent.kind,
-      a2aEndpoint: agent.a2aEndpoint,
-      tenantId: agent.tenantId,
-      workspaceId: agent.workspaceId
-    };
-    const gatekeeperToken = await signGatekeeperToken({
-      audience: audienceFor(agent.a2aEndpoint),
-      issuer,
-      identity: buildRemoteIdentity(ref),
-      tenant: agent.tenantId
-    });
-    const message = buildMessage({
-      messageId: input.messageId,
-      role: Role.ROLE_USER,
-      taskId: row.taskId,
-      contextId: row.contextId,
-      referenceTaskIds: [row.taskId],
-      parts: input.parts,
-      // Typed explicitly: `buildMessage` takes an open metadata bag, so nothing
-      // would have caught this drifting from `DispatchMetadata` otherwise.
-      metadata: {
-        agentKind: "remote",
-        tenant: agent.tenantId,
-        workspaceId: agent.workspaceId
-      } satisfies DispatchMetadata
-    });
-    const accept = await sendA2ARemote(
-      {
-        endpoint: agent.a2aEndpoint,
-        authToken: gatekeeperToken,
-        tenant: agent.tenantId,
-        acceptTimeoutMs: input.acceptTimeoutMs
-      },
-      message,
-      remotePushNotificationConfig(issuer, row.token)
-    );
-    if (accept.kind === "accepted") {
-      await markResumed(row.token);
-      return { kind: "resumed" };
-    }
-    console.error("[hitl] continuation: remote did not accept", {
+  const ref: DispatchAgentRef = {
+    name: agent.name,
+    kind: agent.kind,
+    a2aEndpoint: agent.a2aEndpoint,
+    tenantId: agent.tenantId,
+    workspaceId: agent.workspaceId
+  };
+  const identity = await identityFor(ref, row.channelId);
+  if (!identity) {
+    console.error("[hitl] continuation: channel names no instance", {
       agent: agent.name,
-      requestId: row.requestId,
-      accept: accept.kind
+      channelId: row.channelId,
+      requestId: row.requestId
     });
-    return { kind: "failed", detail: continuationFailureDetail(agent, accept) };
+    return { kind: "failed" };
   }
-
-  // Local built-in → in-process via DO stub.fetch. The DO instance is
-  // reconstructed from the caller/channel — the same keys the message workflow
-  // used (admin: the channel's workspace; onboarding: the DM's user).
-  let metadata: AgentTurnMetadata;
-  if (agent.tenantId === "admin") {
-    const workspace = await getWorkspaceByAdminChannel(row.channelId);
-    if (!workspace) {
-      console.error("[hitl] continuation: admin channel has no workspace", {
-        channelId: row.channelId,
-        requestId: row.requestId
-      });
-      return { kind: "failed" };
-    }
-    metadata = {
-      user: input.caller,
-      agentKind: "local",
-      tenant: "admin",
-      adminWorkspaceId: workspace.id
-    };
-  } else {
-    metadata = {
-      user: input.caller,
-      agentKind: "local",
-      tenant: "onboarding"
-    };
-  }
-
+  const { target, issuer } = await targetFor(
+    ref,
+    identity,
+    input.acceptTimeoutMs
+  );
   const message = buildMessage({
     messageId: input.messageId,
     role: Role.ROLE_USER,
@@ -690,27 +592,26 @@ async function sendTaskContinuation(
     contextId: row.contextId,
     referenceTaskIds: [row.taskId],
     parts: input.parts,
-    metadata: { ...metadata }
+    // Typed explicitly: `buildMessage` takes an open metadata bag, so nothing
+    // would have caught this drifting from `DispatchMetadata` otherwise.
+    metadata: (isBuiltin(agent)
+      ? { agentKind: "local", tenant: agent.tenantId as BuiltinTenant }
+      : {
+          agentKind: "remote",
+          tenant: agent.tenantId,
+          workspaceId: agent.workspaceId
+        }) satisfies DispatchMetadata
   });
-  const instanceName = instanceNameFor(metadata);
-  const stub = ns.get(ns.idFromName(instanceName));
-  const fetchImpl = ((input2: RequestInfo | URL, init?: RequestInit) =>
-    stub.fetch(input2 as RequestInfo, init)) as typeof fetch;
-  const card = buildAgentCard({
-    name: agent.name,
-    description: `Local ${agent.kind} agent`,
-    pushNotifications: true
-  });
-  const accept = await sendA2ALocal(
-    { card, fetchImpl, tenant: agent.tenantId },
+  const accept = await sendA2ARemote(
+    target,
     message,
-    localPushNotificationConfig(row.token)
+    remotePushNotificationConfig(issuer, row.token)
   );
   if (accept.kind === "accepted") {
     await markResumed(row.token);
     return { kind: "resumed" };
   }
-  console.error("[hitl] continuation: local agent did not accept", {
+  console.error("[hitl] continuation: agent did not accept", {
     agent: agent.name,
     requestId: row.requestId,
     accept: accept.kind
@@ -731,7 +632,7 @@ async function sendTaskContinuation(
 const RESUME_RETRY_DELAYS_MS = [2_000, 5_000] as const;
 
 /**
- * A remote agent's accept timeout on an answer. Accepting one is recording it and
+ * An agent's accept timeout on an answer. Accepting one is recording it and
  * waking the parked run, not generating, so this can be a sixth of a dispatch's —
  * and has to be, for three attempts to fit {@link RESUME_RETRY_DELAYS_MS}' budget.
  */
@@ -750,8 +651,8 @@ const RESUME_ACCEPT_TIMEOUT_MS = 5_000;
 export type ResumeOutcome = "resumed" | "refused" | "undelivered";
 
 /**
- * Resume a parked task with a human's answer. The answerer becomes the caller
- * (anyone in the thread may answer), so a resumed local turn authorizes as them.
+ * Resume a parked task with a human's answer. Anyone in the thread may answer:
+ * being in the channel is the permission, for an answer as for a request.
  *
  * A failure that could be transient is retried after each of
  * {@link RESUME_RETRY_DELAYS_MS}. That is safe because the `messageId` is the same
@@ -768,16 +669,13 @@ export async function resumeAgentTask(
   // guarantee that one of them is present.
   const parts = buildHitlResponseParts({ ...answer, requestId: row.requestId });
   const messageId = `${row.token}:r:${row.requestId}`;
-  let caller: UserAuthContext | undefined;
 
   for (let attempt = 1; ; attempt++) {
     let outcome: ContinuationOutcome;
     try {
-      caller ??= await buildUserAuthContext(answer.answeredBy);
       outcome = await sendTaskContinuation(row, {
         parts,
         messageId,
-        caller,
         acceptTimeoutMs: RESUME_ACCEPT_TIMEOUT_MS
       });
     } catch (err) {
@@ -801,16 +699,14 @@ export async function resumeAgentTask(
 
 /**
  * End a parked task whose HITL prompt hit its TTL: send a timeout signal so the
- * agent can finalize gracefully. Authorizes as the zero-permission
- * {@link SYSTEM_CALLER} since no human answered. If the timeout signal can't be
+ * agent can finalize gracefully. If the timeout signal can't be
  * delivered (the agent is unreachable), post a thread notice so the user learns
  * the agent is down and can fix it — the expiry note alone wouldn't reveal that.
  */
 export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
   const outcome = await sendTaskContinuation(row, {
     parts: buildHitlTimeoutParts(row.requestId),
-    messageId: `${row.token}:t:${row.requestId}`,
-    caller: SYSTEM_CALLER
+    messageId: `${row.token}:t:${row.requestId}`
   });
   if (outcome.kind === "failed") {
     await notifyHitlContinuationFailed(row, outcome.detail);
@@ -818,48 +714,27 @@ export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
 }
 
 /**
- * Ask an agent to cancel an in-flight task via the standard A2A `tasks/cancel`.
- * Mirrors the remote branch of {@link dispatchToAgent}: SSRF/allowlist validation
- * plus a freshly signed gatekeeper-identity JWT (audience = the endpoint origin),
- * then the cancel call. The response is authoritative — the gatekeeper reconciles
- * from it and expects no push callback afterwards.
+ * Ask an agent to cancel an in-flight task via the standard A2A `tasks/cancel`,
+ * called the way {@link dispatchToAgent} calls it (see {@link targetFor}). The
+ * response is authoritative — the gatekeeper reconciles from it and expects no
+ * push callback afterwards.
  *
- * Local built-ins now run their turn in the background (accept-first), and the
- * gatekeeper stops them via the in-loop `isCancelRequested(token)` poll rather than
- * A2A `tasks/cancel` — so `tasks/cancel` stays a no-op here, reported as
- * `not_cancelable` so the caller still reconciles its ledger row without
- * contacting anything.
+ * `channelId` is the channel the task was dispatched in, which is what names a
+ * built-in's instance. A built-in really stops: core terminates the task's
+ * workflow and aborts the turn in flight.
  */
 export async function cancelAgentTask(
   agent: DispatchAgentRef,
-  taskId: string
+  taskId: string,
+  channelId: string
 ): Promise<CancelOutcome> {
-  if (localNamespaceFor(agent)) {
-    return { kind: "not_cancelable" };
+  const identity = await identityFor(agent, channelId);
+  if (!identity) {
+    return {
+      kind: "error",
+      message: `no ${agent.tenantId} instance for channel ${channelId}`
+    };
   }
-
-  const allowedDomains = await getAllowedRemoteAgentDomains();
-  validateRemoteEndpoint(agent.a2aEndpoint, allowedDomains);
-
-  const issuer = await resolveIssuer();
-  if (!issuer) {
-    throw new Error(
-      "Gatekeeper public URL has not been discovered yet; cannot sign a cancel request."
-    );
-  }
-  const gatekeeperToken = await signGatekeeperToken({
-    audience: audienceFor(agent.a2aEndpoint),
-    issuer,
-    identity: buildRemoteIdentity(agent),
-    tenant: agent.tenantId
-  });
-
-  return cancelA2ARemote(
-    {
-      endpoint: agent.a2aEndpoint,
-      authToken: gatekeeperToken,
-      tenant: agent.tenantId
-    },
-    taskId
-  );
+  const { target } = await targetFor(agent, identity);
+  return cancelA2ARemote(target, taskId);
 }

@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
 import {
   AgentCard,
   Message,
@@ -16,8 +15,8 @@ import {
   timeoutAgentTask,
   buildDispatchId,
   buildAgentInstanceKey
-} from "@/agents/dispatch";
-import { slackTsToIso } from "@/agents/shared/messages";
+} from "@/a2a/dispatch";
+import { slackTsToIso } from "@/a2a/turn";
 import type { UserAuthContext } from "@/auth";
 import { IDENTITY_CLAIM } from "@/auth/agent-outbound";
 import { importGatekeeperPublicKey } from "../helpers/auth";
@@ -25,7 +24,7 @@ import { buildAgentCard } from "@/a2a/card";
 import { HITL_TIMEOUT_TYPE } from "@/a2a/hitl";
 import { dataPart, partsText, textPart } from "@/a2a/parts";
 import { agentMessage, makeTask } from "../helpers/a2a";
-import { stubAgentAi } from "../helpers/agents";
+import { stubOutbound } from "../helpers/agents";
 import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
@@ -41,6 +40,13 @@ import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
 } from "@/db/models/workspace-configs";
+import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
+import { signGatekeeperToken } from "@/auth/agent-outbound";
+import {
+  AGENTS_RPC_PATH,
+  agentsWorker,
+  builtinEndpoint
+} from "@/agents/worker";
 import { useStorageReset } from "../helpers/storage";
 
 useStorageReset();
@@ -247,146 +253,155 @@ afterEach(async () => {
   await setAllowedRemoteAgentDomains([]);
 });
 
-// End-to-end of the local A2A path: client (official SDK) → DO stub.fetch →
-// serveA2A → DefaultRequestHandler → executor → Task acceptance, all in-process.
-// Reply delivery itself uses the trusted local notification sender.
-describe("dispatchToAgent (local Durable Object)", () => {
-  // Dispatch returns as soon as the task is accepted, so the agent's turn runs
-  // on unawaited work; stub its model so that turn finishes offline instead of
-  // rejecting against the AI binding.
-  beforeEach(() => stubAgentAi());
+// A built-in is a core tenant on this Worker, called the way a remote agent is
+// — signed token, accept-first `SendMessage` — but handed to the mounted A2A
+// endpoint in-process. Core's edge still fetches the gatekeeper's JWKS to verify
+// the token, which `stubOutbound` routes back into this Worker.
+describe("dispatchToAgent (built-in)", () => {
+  const ORIGIN = "https://gatekeeper.test";
+  let outbound: string[];
 
-  it("reaches the AdminAgent A2A server and accepts a task", async () => {
-    // Exercises the full local A2A path into the real AdminAgent DO (which runs
-    // the AI loop over its Session/SQLite). The response is an A2A Task; status
-    // snapshots are delivered through the local sender instead of inline.
-    const result = await dispatchToAgent(
-      {
-        name: "admin",
-        kind: "local",
-        a2aEndpoint: "http://admin.local",
-        tenantId: "admin",
-        workspaceId: 0
-      },
-      {
-        eventId: "Ev-admin",
-        text: "ping",
-        channelId: "C1",
-        channelName: null,
-        threadTs: "1.1",
-        messageTs: "1.1",
-        user: user("U1"),
-        metadata: { agentKind: "local", tenant: "admin", adminWorkspaceId: 0 }
+  beforeEach(async () => {
+    await setPublicUrl(ORIGIN);
+    await setWorkspaceAdminChannel(0, "C_ORG");
+    outbound = [];
+    stubOutbound(ORIGIN, () => ({ ok: true, ts: "1700.2" }));
+    const routed = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        outbound.push(new Request(input, init).url);
+        return routed(input, init);
       }
     );
-    expect(result.kind).toBe("accepted");
-    if (result.kind === "accepted") {
-      expect(result.taskId.length).toBeGreaterThan(0);
-      expect(result.token).toBe(
-        await buildDispatchId("Ev-admin", {
-          name: "admin",
-          kind: "local",
-          workspaceId: 0
-        })
-      );
-    }
   });
 
-  it("routes onboarding to its per-user instance and accepts a task", async () => {
-    // The onboarding instance is keyed by the caller's slackUserId (read from
-    // metadata.user); the round-trip into the real DO proves wiring before the
-    // in-process sender delivers its task status snapshots.
-    const result = await dispatchToAgent(
-      {
-        name: "onboarding",
-        kind: "local",
-        a2aEndpoint: "http://onboarding.local",
-        tenantId: "onboarding",
-        workspaceId: 0
-      },
-      {
-        eventId: "Ev-onb",
-        text: "hi",
-        channelId: "D1",
-        channelName: null,
-        threadTs: "1.1",
-        messageTs: "1.1",
-        user: user("U_onb"),
-        metadata: { agentKind: "local", tenant: "onboarding" }
-      }
-    );
-    expect(result.kind).toBe("accepted");
-    if (result.kind === "accepted") {
-      expect(result.taskId.length).toBeGreaterThan(0);
-      expect(result.token).toBe(
-        await buildDispatchId("Ev-onb", {
-          name: "onboarding",
-          kind: "local",
-          workspaceId: 0
-        })
-      );
-    }
-  });
+  const ADMIN = {
+    name: "admin",
+    kind: "local" as const,
+    a2aEndpoint: "http://admin.local",
+    tenantId: "admin",
+    workspaceId: 0
+  };
+  const ONBOARDING = {
+    name: "onboarding",
+    kind: "local" as const,
+    a2aEndpoint: "http://onboarding.local",
+    tenantId: "onboarding",
+    workspaceId: 0
+  };
 
-  it("persists the accepted task in the agent's own storage", async () => {
-    // The task has to outlive the isolate that made it: a turn parked on a HITL
-    // prompt releases its liveness barrier immediately, so the Durable Object is
-    // evictable long before the human answers. Held in memory, the resumed turn
-    // arrives at a fresh isolate and fails with `TaskNotFound`.
-    const dispatch = (eventId: string) =>
-      dispatchToAgent(
-        {
-          name: "admin",
-          kind: "local",
-          a2aEndpoint: "http://admin.local",
-          tenantId: "admin",
-          workspaceId: 0
-        },
-        {
-          eventId,
-          text: "ping",
-          channelId: "C_PERSIST",
-          channelName: null,
-          threadTs: "1.1",
-          messageTs: "1.1",
-          user: user("U1"),
-          metadata: {
-            agentKind: "local",
-            tenant: "admin",
-            adminWorkspaceId: 91
-          }
-        }
-      );
-    const readStorage = <T>(prefix: string) => {
-      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:91"));
-      return runInDurableObject(stub, (agent, state) =>
-        state.storage.list<T>({ prefix })
-      );
+  function payload(eventId: string, channelId: string, text = "ping") {
+    return {
+      eventId,
+      text,
+      channelId,
+      channelName: null,
+      threadTs: "1.1",
+      messageTs: "1.1",
+      user: user("U1")
     };
+  }
 
-    const result = await dispatch("Ev-persist-1");
-    expect(result.kind).toBe("accepted");
-    const taskId = result.kind === "accepted" ? result.taskId : "";
-
-    await vi.waitFor(async () =>
-      expect([...(await readStorage("a2a:task:")).keys()]).toContain(
-        `a2a:task:${taskId}`
-      )
-    );
-
-    // The sweep is a side check, not per-message work: once an instance has run
-    // it, further turns on that same instance must not touch storage again.
-    const marker = await vi.waitFor(async () => {
-      const swept = await readStorage<number>("a2a:swept-at");
-      expect(swept.size).toBe(1);
-      return swept.get("a2a:swept-at");
+  it("hands the admin's turn to its tenant in-process and accepts a task", async () => {
+    const result = await dispatchToAgent(ADMIN, {
+      ...payload("Ev-admin", "C_ORG"),
+      metadata: { agentKind: "local", tenant: "admin" }
     });
-    await dispatch("Ev-persist-2");
-    expect(
-      (await readStorage<number>("a2a:swept-at")).get("a2a:swept-at")
-    ).toBe(marker);
+    expect(result.kind).toBe("accepted");
+    if (result.kind !== "accepted") return;
+    expect(result.taskId.length).toBeGreaterThan(0);
+    expect(result.token).toBe(await buildDispatchId("Ev-admin", ADMIN));
+
+    // The task lives in the workspace's admin host, `admin:{wsId}`.
+    const host = env.AdminHost.get(env.AdminHost.idFromName("admin:0"));
+    expect((await host.getTask(result.taskId))?.id).toBe(result.taskId);
+    // Nothing left the isolate but core reading our own JWKS: the call itself
+    // never touched the network.
+    expect(outbound.some((u) => u.endsWith(AGENTS_RPC_PATH))).toBe(false);
   });
 
+  it("keys onboarding by its direct-message channel", async () => {
+    const result = await dispatchToAgent(ONBOARDING, {
+      ...payload("Ev-onb", "D1", "hi"),
+      metadata: { agentKind: "local", tenant: "onboarding" }
+    });
+    expect(result.kind).toBe("accepted");
+    if (result.kind !== "accepted") return;
+    const host = env.OnboardingHost.get(
+      env.OnboardingHost.idFromName("onboarding:D1")
+    );
+    expect((await host.getTask(result.taskId))?.id).toBe(result.taskId);
+  });
+
+  it("refuses an admin dispatch from a channel that is no workspace's admin channel", async () => {
+    await expect(
+      dispatchToAgent(ADMIN, {
+        ...payload("Ev-stray", "C_NOT_ADMIN"),
+        metadata: { agentKind: "local", tenant: "admin" }
+      })
+    ).rejects.toThrow(/names no instance/);
+  });
+
+  it("the tenants refuse a token minted for a remote agent", async () => {
+    // A remote row pointed at this origin with tenant `admin` carries a valid
+    // gatekeeper token. Its identity says `remote`, which the mount refuses.
+    const token = await signGatekeeperToken({
+      audience: builtinEndpoint(ORIGIN),
+      issuer: ORIGIN,
+      tenant: "admin",
+      identity: {
+        key: "remote:0:evil",
+        name: "evil",
+        kind: "remote",
+        workspaceId: 0
+      }
+    });
+    const res = await agentsWorker(
+      new Request(builtinEndpoint(ORIGIN), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "a2a-version": "1.0"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "SendMessage",
+          params: {
+            tenant: "admin",
+            message: {
+              messageId: "m-evil",
+              role: "ROLE_USER",
+              parts: [{ text: "list agents" }]
+            },
+            configuration: {
+              returnImmediately: true,
+              taskPushNotificationConfig: {
+                url: `${ORIGIN}/a2a/notifications`,
+                token: "t-evil"
+              }
+            }
+          }
+        })
+      }),
+      env
+    );
+    const body = (await res.json().catch(() => ({}))) as {
+      result?: unknown;
+      error?: unknown;
+    };
+    expect(body.result).toBeUndefined();
+    expect(
+      await env.AdminHost.get(
+        env.AdminHost.idFromName("remote:0:evil")
+      ).listTasks({ includeArtifacts: false, limit: 10, offset: 0 })
+    ).toMatchObject({ totalSize: 0 });
+  });
+});
+
+describe("dispatchToAgent (remote)", () => {
   it("namespaces remote identity and context per logical agent instance", async () => {
     await setPublicUrl("https://gatekeeper.test");
     await setAllowedRemoteAgentDomains(["example.com"]);
@@ -815,22 +830,37 @@ describe("dispatchToAgent (tenant)", () => {
 });
 
 describe("cancelAgentTask", () => {
-  it("is a no-op for local built-in agents (never contacts them)", async () => {
-    const fetchSpy = vi.fn(async () => new Response("x", { status: 500 }));
-    vi.stubGlobal("fetch", fetchSpy);
+  it("really stops a built-in's turn", async () => {
+    // The 🛑 used to drop only a built-in's reply while its turn ran on. Core's
+    // host terminates the task's workflow and aborts the turn in flight.
+    await setPublicUrl("https://gatekeeper.test");
+    await setWorkspaceAdminChannel(0, "C_ORG");
+    stubOutbound("https://gatekeeper.test", () => ({ ok: true, ts: "1.2" }));
+    const admin = {
+      name: "admin",
+      kind: "local" as const,
+      a2aEndpoint: "http://admin.local",
+      tenantId: "admin",
+      workspaceId: 0
+    };
+    const accepted = await dispatchToAgent(admin, {
+      eventId: "Ev-stop",
+      text: "wait:30",
+      channelId: "C_ORG",
+      channelName: null,
+      threadTs: "1.1",
+      messageTs: "1.1",
+      user: user("U1"),
+      metadata: { agentKind: "local", tenant: "admin" }
+    });
+    if (accepted.kind !== "accepted") throw new Error("not accepted");
 
-    const out = await cancelAgentTask(
-      {
-        name: "admin",
-        kind: "local",
-        a2aEndpoint: "http://admin.local",
-        tenantId: "admin",
-        workspaceId: 0
-      },
-      "task-1"
+    const out = await cancelAgentTask(admin, accepted.taskId, "C_ORG");
+    expect(out.kind).toBe("canceled");
+    const host = env.AdminHost.get(env.AdminHost.idFromName("admin:0"));
+    expect((await host.getTask(accepted.taskId))?.status.state).toBe(
+      TaskState.TASK_STATE_CANCELED
     );
-    expect(out).toEqual({ kind: "not_cancelable" });
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("signs a gatekeeper JWT and cancels a remote task", async () => {
@@ -847,7 +877,8 @@ describe("cancelAgentTask", () => {
         tenantId: "main",
         workspaceId: 7
       },
-      "task-9"
+      "task-9",
+      "C1"
     );
     expect(out.kind).toBe("canceled");
     expect(posts.at(-1)?.authorization).toMatch(/^Bearer /);
@@ -856,9 +887,8 @@ describe("cancelAgentTask", () => {
 
 // The TTL-timeout continuation: when a HITL prompt expires with no answer, the
 // gatekeeper continues the parked task with a HITL_TIMEOUT DataPart so the agent can
-// finalize, authorizing as the zero-permission SYSTEM_CALLER. This exercises the
-// remote branch of sendTaskContinuation (custom-agent HTTP), which the human-answer
-// path (resumeAgentTask) shares — the timeout branch was previously uncovered.
+// finalize. This exercises sendTaskContinuation against a custom agent over HTTP,
+// which the human-answer path (resumeAgentTask) shares.
 describe("timeoutAgentTask (remote continuation)", () => {
   const TOKEN = "tok-timeout";
   const TASK_ID = "task-1";

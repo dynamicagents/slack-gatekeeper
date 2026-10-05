@@ -102,8 +102,9 @@ export const agents = sqliteTable(
   "agents",
   {
     name: text("name").primaryKey(),
-    // Where this agent runs, and nothing else. `local` is reached in-process
-    // through a Durable Object stub; `remote` over HTTP at `a2aEndpoint`.
+    // Where this agent runs, and nothing else. `local` is one of this Worker's
+    // own core tenants, dispatched in-process to its mounted A2A endpoint;
+    // `remote` over HTTP at `a2aEndpoint`.
     // *Which* agent it is — including which built-in — is `tenantId`, on both
     // paths. The gatekeeper sets this itself; no admin chooses it, which is what
     // keeps a registered agent from claiming to be in-process.
@@ -112,8 +113,9 @@ export const agents = sqliteTable(
     // Optional gatekeeper-hosted, admin-generated avatar URL (never from the AgentCard).
     iconUrl: text("icon_url"),
     // Always set: custom agents carry a real HTTP endpoint; built-ins use an
-    // `http://{name}.local` sentinel. Whether an agent is local is decided by
-    // `kind`, not by this value.
+    // `http://{name}.local` sentinel, because their endpoint is derived from the
+    // gatekeeper's own public URL at dispatch. Whether an agent is local is
+    // decided by `kind`, not by this value.
     a2aEndpoint: text("a2a_endpoint").notNull(),
     // Which agent at that location. One origin serves many agents over a single
     // A2A endpoint (spec §8.3.2), and the tenant is what picks between them —
@@ -124,11 +126,12 @@ export const agents = sqliteTable(
     // optional at every insert forever and turn `''` into a second sentinel
     // beside `http://{name}.local`. Built-ins carry a real tenant too
     // (`admin`, `onboarding`) rather than an empty one, so the column means the
-    // same thing in every row — see `localNamespaceFor`, which routes on it.
+    // same thing in every row — see `isBuiltin` in `src/a2a/dispatch.ts`.
     tenantId: text("tenant_id").notNull(),
     // Pinned AgentCard signing identity for custom agents (Trust-On-First-Use).
     // Verified at registration; a later card signed by a different key is
-    // rejected. Null for built-in local agents (admin/onboarding are unsigned).
+    // rejected. Null for built-ins, whose key is this Worker's own
+    // `A2A_SIGNING_KEY` and is pinned by construction.
     cardSigningJku: text("card_signing_jku"),
     cardSigningKid: text("card_signing_kid"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),

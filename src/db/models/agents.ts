@@ -7,17 +7,11 @@ import { sanitizeDisplayName } from "@/util/slack-text";
 import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
 
 export type AgentRow = typeof schema.agents.$inferSelect;
-/** Where an agent runs: `local` in-process, `remote` over HTTP. */
-export type AgentKind = AgentRow["kind"];
 /**
- * The tenants hosted in-repo as Durable Objects.
- *
- * Declared rather than derived from {@link AgentKind}, which no longer names
- * individual built-ins, and deliberately a closed union: it is what makes the
- * local callback guard and `A2AAgent.builtinTenant()` compiler-checked. Widening
- * this to `string` would turn both into unchecked comparisons.
+ * Where an agent runs: `local` is one of this Worker's own core tenants (see
+ * `src/agents/worker.ts`), `remote` is reached over HTTP at its endpoint.
  */
-export type BuiltinTenant = "admin" | "onboarding";
+export type AgentKind = AgentRow["kind"];
 export type NotifyOn = AgentRow["notifyOn"];
 
 export interface RegisterAgentInput {

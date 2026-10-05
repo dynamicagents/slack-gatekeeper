@@ -21,9 +21,10 @@ import { getSlackUser } from "@/db/models/users";
  *   - `workspaces` — workspaces the caller administers
  *   - `health`     — on-demand registry status for the caller
  *
- * Everything self-scopes to the caller's `UserAuthContext`. There is no
- * `authorize()` deny (the concierge serves everyone); instead, workspace-specific
- * rows are filtered to what the caller is entitled to see. The tool never writes.
+ * Everything self-scopes to the caller's `UserAuthContext`. There is no deny
+ * (the concierge serves everyone); instead, workspace-specific rows are filtered
+ * to what the caller is entitled to see. `directory_read` never writes, and
+ * `trigger_reconcile` only asks for a sync the nightly cron runs anyway.
  *
  * Logic is split from the AI-SDK wiring so it unit-tests without an LLM.
  */
@@ -158,16 +159,11 @@ async function directoryRead(
   }
 }
 
-async function triggerReconcile(deps: OnboardingToolDeps): Promise<ToolResult> {
-  const canTrigger =
-    !!deps.ctx && (deps.ctx.isOrgAdmin || deps.ctx.isPrimaryOwner);
-  if (!canTrigger) {
-    return {
-      triggered: false,
-      error: "Only org admins or the primary owner can trigger a reconcile run."
-    };
-  }
-
+/**
+ * Start a reconcile run. Open to anyone who can DM the concierge: the run is
+ * idempotent, and the same one starts every night regardless.
+ */
+export async function triggerReconcile(): Promise<ToolResult> {
   const instance = await env.RECONCILE_WORKFLOW.create({});
   return {
     triggered: true,
@@ -175,8 +171,14 @@ async function triggerReconcile(deps: OnboardingToolDeps): Promise<ToolResult> {
   };
 }
 
-/** Build the onboarding concierge's (read-only) tool set. */
-export function buildOnboardingTools(deps: OnboardingToolDeps): ToolSet {
+/**
+ * Build the onboarding concierge's tool set. The caller is resolved per call,
+ * from the registry, because the person behind an instance can gain or lose a
+ * workspace between one message and the next.
+ */
+export function buildOnboardingTools(deps: {
+  caller: () => Promise<UserAuthContext | null>;
+}): ToolSet {
   return {
     directory_read: tool({
       description:
@@ -187,13 +189,13 @@ export function buildOnboardingTools(deps: OnboardingToolDeps): ToolSet {
       inputSchema: z.object({
         operation: z.enum(["agents", "workspaces", "health"])
       }),
-      execute: (args) => directoryRead(deps, args)
+      execute: async (args) => directoryRead({ ctx: await deps.caller() }, args)
     }),
     trigger_reconcile: tool({
       description:
         "Trigger an asynchronous reconcile workflow run to sync Slack reality into the registry.",
       inputSchema: z.object({}),
-      execute: () => triggerReconcile(deps)
+      execute: () => triggerReconcile()
     })
   };
 }

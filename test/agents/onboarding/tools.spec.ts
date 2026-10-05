@@ -141,29 +141,29 @@ describe("onboarding tools — directory_read health", () => {
 });
 
 describe("onboarding tools — buildOnboardingTools", () => {
+  /** The wiring takes its caller lazily, resolved at the call. */
+  const caller = (c: ReturnType<typeof ctx>) => ({ caller: async () => c });
+
   it("exposes directory_read and trigger_reconcile tools", () => {
-    const tools = buildOnboardingTools(deps(ctx()));
+    const tools = buildOnboardingTools(caller(ctx()));
     expect(Object.keys(tools)).toEqual(["directory_read", "trigger_reconcile"]);
   });
 
-  it("trigger_reconcile is denied for non-admin callers", async () => {
-    const tools = buildOnboardingTools(deps(ctx()));
+  it("directory_read scopes to the caller it resolves at the call", async () => {
+    const tools = buildOnboardingTools(caller(null as never));
     const result = await (
-      tools.trigger_reconcile as unknown as { execute: () => Promise<unknown> }
-    ).execute();
-    expect(result).toMatchObject({
-      triggered: false,
-      error: expect.stringMatching(/only org admins|primary owner/i)
-    });
+      tools.directory_read as unknown as {
+        execute: (args: { operation: string }) => Promise<unknown>;
+      }
+    ).execute({ operation: "workspaces" });
+    expect(result).toEqual({ workspaces: [] });
   });
 
-  it("trigger_reconcile starts workflow for org admin callers", async () => {
+  it("trigger_reconcile starts the workflow for anyone who can DM the concierge", async () => {
     vi.spyOn(env.RECONCILE_WORKFLOW, "create").mockResolvedValue({
       id: "wf-real"
     } as WorkflowInstance);
-    const tools = buildOnboardingTools({
-      ctx: ctx({ isOrgAdmin: true })
-    });
+    const tools = buildOnboardingTools(caller(ctx()));
     const result = await (
       tools.trigger_reconcile as unknown as { execute: () => Promise<unknown> }
     ).execute();

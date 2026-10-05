@@ -75,6 +75,19 @@ This prints a private JWK and ready-to-paste commands for both routes.
 Set the printed key as `GATEKEEPER_JWT_PRIVATE_KEY` in `.env` for local dev, and
 deploy it with `wrangler deploy --secrets-file .env` or `wrangler secret put`.
 
+The built-in agents (admin and onboarding) are
+[`@dynamicagents/core`](https://github.com/dynamicagents/core) agents running in
+this Worker, and they sign their own replies with a second key:
+
+```bash
+npx da-keys --kid builtin-1
+```
+
+Set the printed key as `A2A_SIGNING_KEY` the same way. Keep the two keys
+separate: one signs the gatekeeper's tokens, the other the built-ins' callbacks.
+`GATEKEEPER_ORIGINS` in `wrangler.jsonc` must name the Worker's public origin —
+the origin of `routes` — or the built-ins refuse every dispatch.
+
 ### 7. Deploy
 
 ```bash
@@ -156,7 +169,7 @@ ARCHITECTURE.md   # Agent design, routing, and future A2A layer
 ## What's included
 
 - **Slack webhook handler** — URL verification + event routing
-- **AI responses** — Powered by Workers AI (no external API key required)
+- **Built-in agents** — an admin agent per workspace and an onboarding concierge per DM, running on [`@dynamicagents/core`](https://github.com/dynamicagents/core) and Workers AI (no external API key required)
 - **Task scheduling** — One-time, delayed, and cron-based reminders posted back to Slack
 - **Durable Object persistence** — SQLite-backed state via the Agents SDK
 - **CI/CD** — GitHub Actions sanity check (format + lint + TypeScript) on every push, and automatic deploy to Cloudflare on every green merge to `main`
@@ -236,7 +249,8 @@ Required one-time configuration:
   re-asserts. Bound resources such as Workers AI need no scope of
   their own to deploy against.
 - The Worker runtime secrets (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
-  `GATEKEEPER_JWT_PRIVATE_KEY`) are deliberately not stored in GitHub. Set them
+  `GATEKEEPER_JWT_PRIVATE_KEY`, `A2A_SIGNING_KEY`) are deliberately not stored in
+  GitHub. Set them
   once with `npx wrangler secret put`; they persist on the Worker across
   deploys.
 

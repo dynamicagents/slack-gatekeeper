@@ -1,4 +1,6 @@
+import { env } from "cloudflare:workers";
 import { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
+import type { JWK } from "jose";
 import { getAgent } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
@@ -14,6 +16,7 @@ import {
   AgentCallbackAuthError
 } from "@/auth/agent-inbound";
 import { parseStreamResponse, snapshotOf } from "@/a2a/snapshot";
+import { builtinJwksUrl, builtinPublicJwk } from "@/agents/worker";
 import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 
 /**
@@ -23,7 +26,8 @@ import { deliverTaskToSlack, TaskDeliveryValidationError } from "./shared";
 export { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 
 /**
- * The gatekeeper path remote agents POST A2A Task snapshots to.
+ * The gatekeeper path every agent POSTs A2A Task snapshots to — remote agents
+ * and the built-in tenants alike.
  *
  * Deliberately **not** in the protocol package. It is not a shared constant at
  * all: the gatekeeper hands each agent the full callback URL in the
@@ -49,8 +53,8 @@ async function captureCallbackError(
 }
 
 /**
- * Handle a remote agent's authenticated push-notification callback. The token
- * and pinned card key are verified here, before shared delivery reads the
+ * Handle an agent's authenticated push-notification callback. The token and
+ * pinned card key are verified here, before shared delivery reads the
  * notification body or posts any agent-controlled output to Slack.
  */
 export async function handleRemoteAgentNotification(
@@ -90,22 +94,26 @@ export async function handleRemoteAgentNotification(
     );
     return new Response("agent not verifiable", { status: 401 });
   }
-  // Only custom (remote) agents are reachable through this public callback.
-  // Built-in agents deliver in-process via the trusted local sender and never
-  // hold a card signing key, so a token that maps to one here is illegitimate —
-  // reject it explicitly rather than leaning on the missing-key check below.
-  if (agent.kind !== "remote") {
-    console.error("[remote-notifications] built-in agent token on callback", {
-      agent: row.agentName,
-      kind: agent.kind
-    });
-    await captureCallbackError(
-      notificationToken,
-      "this task is delivered internally and cannot be completed through the public callback"
-    );
-    return new Response("not a remote agent", { status: 401 });
-  }
-  if (!agent.cardSigningJku || !agent.cardSigningKid) {
+  const issuer = await getPublicUrl();
+  const origin = issuer ?? new URL(request.url).origin;
+  const audience = `${origin}${NOTIFICATIONS_PATH}`;
+  const allowedDomains = await getAllowedRemoteAgentDomains();
+
+  // A built-in is a core tenant on this Worker, calling back over HTTP like any
+  // remote agent. Its key is our own secret, so it is pinned by construction:
+  // the `jku` its card advertises and the key read straight off the secret.
+  let pin: { cardSigningJku: string; cardSigningKid: string };
+  let key: JWK | undefined;
+  if (agent.kind === "local") {
+    const jwk = builtinPublicJwk(env);
+    pin = { cardSigningJku: builtinJwksUrl(origin), cardSigningKid: jwk.kid };
+    key = jwk;
+  } else if (agent.cardSigningJku && agent.cardSigningKid) {
+    pin = {
+      cardSigningJku: agent.cardSigningJku,
+      cardSigningKid: agent.cardSigningKid
+    };
+  } else {
     console.error("[remote-notifications] agent missing or unsigned", {
       agent: row.agentName
     });
@@ -116,19 +124,13 @@ export async function handleRemoteAgentNotification(
     return new Response("agent not verifiable", { status: 401 });
   }
 
-  const issuer = await getPublicUrl();
-  const audience = `${issuer ?? new URL(request.url).origin}${NOTIFICATIONS_PATH}`;
-  const allowedDomains = await getAllowedRemoteAgentDomains();
-
   try {
     await verifyAgentCallbackToken({
       token: bearer,
-      pin: {
-        cardSigningJku: agent.cardSigningJku,
-        cardSigningKid: agent.cardSigningKid
-      },
+      pin,
       audience,
-      allowedDomains
+      allowedDomains,
+      key
     });
   } catch (err) {
     if (err instanceof AgentCallbackAuthError) {

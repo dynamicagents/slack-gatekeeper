@@ -5,6 +5,11 @@ import {
   waitOnExecutionContext
 } from "cloudflare:test";
 import worker from "../src/server";
+import {
+  AGENTS_JWKS_PATH,
+  AGENTS_RPC_PATH,
+  builtinPublicJwk
+} from "@/agents/worker";
 import { useStorageReset } from "./helpers/storage";
 
 useStorageReset();
@@ -47,8 +52,8 @@ describe("Worker routing", () => {
   });
 
   it("serves a stored admin avatar with a long immutable cache", async () => {
-    // Seed an avatar in the admin:0 DO, then fetch it through the public route.
-    const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:0"));
+    // Seed an avatar in the admin:0 avatar store, then fetch it through the public route.
+    const stub = env.AvatarStore.get(env.AvatarStore.idFromName("admin:0"));
     const data = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]);
     const { key } = await stub.putIcon(data, "image/jpeg", "admin");
 
@@ -79,9 +84,8 @@ describe("Worker routing", () => {
   });
 
   // Regression: the /icons route must only forward the exact avatar shape
-  // ({16-hex}.{ext}). A path with extra segments must NOT reach the admin DO,
-  // otherwise it would fall through to the A2A handler and expose the
-  // AgentCard (and any other GET the bridge serves) under the /icons prefix.
+  // ({16-hex}.{ext}). A path with extra segments must NOT reach the avatar store,
+  // nor — though it ends like one — the built-ins' AgentCard route.
   it.each([
     "/icons/0/admin/.well-known/agent-card.json",
     "/icons/0/admin/deadbeefdeadbeef.jpg/extra",
@@ -101,7 +105,7 @@ describe("Worker routing", () => {
 
   describe("admin avatar icon index (sliding window pruning)", () => {
     it("keeps both icons when exactly ICON_KEEP (2) are stored", async () => {
-      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:10"));
+      const stub = env.AvatarStore.get(env.AvatarStore.idFromName("admin:10"));
       const { key: k1 } = await stub.putIcon(
         new Uint8Array([0x01]),
         "image/jpeg",
@@ -117,7 +121,7 @@ describe("Worker routing", () => {
     });
 
     it("evicts the oldest icon when a 3rd distinct icon is stored", async () => {
-      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:11"));
+      const stub = env.AvatarStore.get(env.AvatarStore.idFromName("admin:11"));
       const { key: k1 } = await stub.putIcon(
         new Uint8Array([0x0a]),
         "image/jpeg",
@@ -139,7 +143,7 @@ describe("Worker routing", () => {
     });
 
     it("deduplicates: storing the same bytes twice does not grow the index", async () => {
-      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:12"));
+      const stub = env.AvatarStore.get(env.AvatarStore.idFromName("admin:12"));
       const bytes = new Uint8Array([0xff, 0xd8, 0xff]);
       const { key: k1 } = await stub.putIcon(bytes, "image/jpeg", "admin");
       const { key: k2 } = await stub.putIcon(bytes, "image/jpeg", "admin");
@@ -155,7 +159,7 @@ describe("Worker routing", () => {
     });
 
     it("prunes per agent: a custom agent's avatars don't evict the admin's own", async () => {
-      const stub = env.AdminAgent.get(env.AdminAgent.idFromName("admin:13"));
+      const stub = env.AvatarStore.get(env.AvatarStore.idFromName("admin:13"));
       // The admin's own avatar under the "admin" name.
       const { key: self } = await stub.putIcon(
         new Uint8Array([0x10]),
@@ -198,5 +202,54 @@ describe("Worker routing", () => {
     // Never leak the private scalar.
     expect(body.keys[0].d).toBeUndefined();
     expect(body.keys[0].kid).toBeTruthy();
+  });
+
+  describe("the built-in agents' endpoint", () => {
+    async function get(path: string, init?: RequestInit) {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(
+        new Request(`https://gw.example.com${path}`, init),
+        env,
+        ctx
+      );
+      await waitOnExecutionContext(ctx);
+      return res;
+    }
+
+    it("serves the built-ins' card-signing key, not the gatekeeper's", async () => {
+      const res = await get(AGENTS_JWKS_PATH);
+      expect(res.status).toBe(200);
+      const { keys } = (await res.json()) as {
+        keys: Array<{ kid: string; d?: string }>;
+      };
+      expect(keys).toHaveLength(1);
+      expect(keys[0].d).toBeUndefined();
+      expect(keys[0].kid).toBe(builtinPublicJwk(env).kid);
+      const own = (await (await get("/.well-known/jwks.json")).json()) as {
+        keys: Array<{ kid: string }>;
+      };
+      expect(own.keys[0].kid).not.toBe(keys[0].kid);
+    });
+
+    it("serves a signed stub card at the well-known path", async () => {
+      const res = await get("/.well-known/agent-card.json");
+      expect(res.status).toBe(200);
+      const card = (await res.json()) as {
+        description: string;
+        signatures: unknown[];
+      };
+      expect(card.description).toContain("`admin`");
+      expect(card.description).toContain("`onboarding`");
+      expect(card.signatures.length).toBeGreaterThan(0);
+    });
+
+    it("refuses a JSON-RPC call that carries no gatekeeper token", async () => {
+      const res = await get(AGENTS_RPC_PATH, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage" })
+      });
+      expect(res.status).toBe(401);
+    });
   });
 });

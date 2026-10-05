@@ -65,7 +65,7 @@ const USAGE = `cf.mjs — Cloudflare API proxy (credentials from ${ENV_FILE})
   wf <name>                              list recent instances of a workflow
   wf <name> <instanceId> [--json]        one instance, per-step pass/fail
   ai [--since 2h] [--model <m>]          AI Gateway calls, as a digest
-     [--meta phase=round]                filter by one custom-metadata entry
+     [--meta phase=turn]                 filter by one custom-metadata entry
      [--limit 20] [--json|--raw]
   ai <logId> [--full] [--max N]          one call: prompt + reply (bodies)
   fields [--worker <name>]               list available log fields
@@ -456,7 +456,7 @@ async function cmdAi(args) {
   if (flags.model) query.push(["model", String(flags.model)]);
   // Custom metadata is filterable, but only through the two generic keys the API
   // exposes — `metadata.key` and `metadata.value`, never `metadata.<name>`. So
-  // `--meta phase=round` is two filters ANDed, and `--meta phase` on its own asks
+  // `--meta phase=turn` is two filters ANDed, and `--meta phase` on its own asks
   // only "was this key set at all", which is the useful question while a
   // deploy is still rolling out.
   if (flags.meta) {
@@ -512,7 +512,7 @@ async function cmdAi(args) {
     const c = `$${(l.cost ?? 0).toFixed(5)}`.padEnd(9);
     const st = l.success ? (l.cached ? "cached" : "ok") : "FAIL";
     // What kind of call this was, which is the one thing no other column says:
-    // a round, a compaction summary and a recall embedding all look alike here.
+    // a turn, a compaction summary and a sub-agent call all look alike here.
     // `call` is what this was spelled before `phase` replaced it, and a gateway
     // log is retained for long enough that both spellings are live at once — so
     // read the old key too rather than blank every row from before the deploy.

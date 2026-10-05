@@ -34,6 +34,10 @@ export class AgentCallbackAuthError extends Error {
  * caller atomically flipping the `agent_tasks` row (`completeAgentTask`), which
  * dedupes replays across isolates. Returns the verified claims on success.
  *
+ * A built-in agent's key is this Worker's own secret, so its caller passes the
+ * public half as `key` and the pinned JWKS is not fetched — it would be a
+ * request to ourselves for a value already in hand.
+ *
  * Throws {@link AgentCallbackAuthError} on any mismatch.
  */
 export async function verifyAgentCallbackToken(args: {
@@ -43,6 +47,8 @@ export async function verifyAgentCallbackToken(args: {
   audience: string;
   /** Org-approved domains — SSRF guard when resolving the pinned JWKS. */
   allowedDomains: string[];
+  /** The pinned key itself, when it is already known; skips resolving `jku`. */
+  key?: JWK;
 }): Promise<JWTPayload> {
   const { token, pin, audience, allowedDomains } = args;
 
@@ -66,11 +72,13 @@ export async function verifyAgentCallbackToken(args: {
 
   let jwk: JWK;
   try {
-    jwk = await resolveSigningKey(
-      pin.cardSigningJku,
-      pin.cardSigningKid,
-      allowedDomains
-    );
+    jwk =
+      args.key ??
+      (await resolveSigningKey(
+        pin.cardSigningJku,
+        pin.cardSigningKid,
+        allowedDomains
+      ));
   } catch (err) {
     throw new AgentCallbackAuthError(
       `could not resolve pinned signing key: ${(err as Error).message}`
