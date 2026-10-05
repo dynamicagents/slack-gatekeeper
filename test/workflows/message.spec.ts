@@ -428,8 +428,14 @@ describe("MessageWorkflow — remote custom agents", () => {
   }
 
   let seq = 0;
+  /**
+   * Each message gets its own ts. An earlier test's `ReactionWorkflow` is never
+   * awaited and can remove its 🛑 after the next test has stubbed `fetch`, so a
+   * reaction assertion counts only the calls on its own message.
+   */
   function makeChannelMessageRequest(channelId: string) {
     const eventId = `Ev-remote-${++seq}`;
+    const ts = `1700.${String(seq).padStart(6, "0")}`;
     const body = JSON.stringify({
       type: "event_callback",
       event_id: eventId,
@@ -440,11 +446,11 @@ describe("MessageWorkflow — remote custom agents", () => {
         channel: channelId,
         user: "U1",
         text: "hello remote",
-        ts: "1700.1",
-        event_ts: "1700.1"
+        ts,
+        event_ts: ts
       }
     });
-    return { body, eventId };
+    return { body, eventId, ts };
   }
 
   // Compute the deterministic push token the workflow uses for this event + agent.
@@ -585,7 +591,7 @@ describe("MessageWorkflow — remote custom agents", () => {
       env.REACTION_WORKFLOW
     );
     try {
-      const { body } = makeChannelMessageRequest(REMOTE_CHANNEL);
+      const { body, ts } = makeChannelMessageRequest(REMOTE_CHANNEL);
       expect((await trigger(body)).status).toBe(200);
 
       const [msg] = await msgIntrospector.get();
@@ -594,11 +600,12 @@ describe("MessageWorkflow — remote custom agents", () => {
       await reaction.waitForStatus("complete");
 
       // 🛑 added by the handler; removed after the collect-reaction signal.
-      expect(slackReactions.map((r) => r.method)).toEqual([
+      const onThis = slackReactions.filter((r) => r.timestamp === ts);
+      expect(onThis.map((r) => r.method)).toEqual([
         "reactions.add",
         "reactions.remove"
       ]);
-      expect(slackReactions[0]).toMatchObject({
+      expect(onThis[0]).toMatchObject({
         name: STOP_REACTION,
         channel: REMOTE_CHANNEL
       });
@@ -613,7 +620,7 @@ describe("MessageWorkflow — remote custom agents", () => {
     stubFetch({ remoteMode: "accepted", slackReactions });
     const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
-      const { body } = makeChannelMessageRequest(REMOTE_CHANNEL);
+      const { body, ts } = makeChannelMessageRequest(REMOTE_CHANNEL);
       expect((await trigger(body)).status).toBe(200);
 
       const [instance] = await msgIntrospector.get();
@@ -622,11 +629,12 @@ describe("MessageWorkflow — remote custom agents", () => {
       // Message workflow completed but no collect-reaction signal was sent —
       // the 🛑 must persist until the push-notification callback (or backstop)
       // removes it, so the user sees "in progress" until the agent actually replies.
+      const onThis = slackReactions.filter((r) => r.timestamp === ts);
+      expect(onThis.filter((r) => r.method === "reactions.add")).toHaveLength(
+        1
+      );
       expect(
-        slackReactions.filter((r) => r.method === "reactions.add")
-      ).toHaveLength(1);
-      expect(
-        slackReactions.filter((r) => r.method === "reactions.remove")
+        onThis.filter((r) => r.method === "reactions.remove")
       ).toHaveLength(0);
     } finally {
       await msgIntrospector.dispose();
