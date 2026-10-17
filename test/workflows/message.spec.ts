@@ -14,7 +14,7 @@ import {
   resumeAgentTask,
   _resetIssuerCacheForTest
 } from "@/a2a/dispatch";
-import { getHitlRequest } from "@/db/models/hitl-requests";
+import { getHitlForm } from "@/db/models/hitl-forms";
 import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
@@ -222,19 +222,18 @@ describe("MessageWorkflow — built-in agents", () => {
           (await getAgentTaskByToken(token))?.status === "awaiting-input"
       );
       const prompt = await env.DB.prepare(
-        "SELECT request_id FROM hitl_requests WHERE token = ?"
+        "SELECT request_id FROM hitl_forms WHERE token = ?"
       )
         .bind(token)
         .first<{ request_id: string }>();
-      const row = await getHitlRequest(prompt!.request_id);
-      expect(row?.promptText).toContain("Proceed?");
+      const row = await getHitlForm(prompt!.request_id);
+      expect(row?.requestJson.questions[0]?.prompt).toBe("Proceed?");
 
       // Anyone in the channel may answer.
       expect(
         await resumeAgentTask(row!, {
-          optionId: "option_1",
-          answeredBy: "U_SOMEONE",
-          humanText: "Yes"
+          answers: { q1: { optionIds: ["q1.o1"] } },
+          answeredBy: "U_SOMEONE"
         })
       ).toBe("resumed");
 

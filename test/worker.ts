@@ -1,5 +1,6 @@
 import type { ThinkModel } from "@cloudflare/think";
 import {
+  askUser,
   call,
   scriptedModel,
   type MockStep,
@@ -72,7 +73,7 @@ function rule(view: ModelTurnView): MockStep {
   if (ask !== undefined) {
     return view.answered
       ? { text: `answered: ${view.lastUserText}` }
-      : call("ask_user", { question: ask, options: ["Yes", "No"] });
+      : askUser(ask, ["Yes", "No"]);
   }
   const wait = after(text, "wait:");
   if (wait !== undefined) {

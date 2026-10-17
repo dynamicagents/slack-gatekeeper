@@ -15,8 +15,9 @@ import {
   ORG_WORKSPACE_ID
 } from "@/db/models/workspaces";
 import { createAgentTask, getAgentTaskByToken } from "@/db/models/agent-tasks";
-import { createHitlRequest, getHitlRequest } from "@/db/models/hitl-requests";
+import { createHitlForm, getHitlForm } from "@/db/models/hitl-forms";
 import { useStorageReset } from "../helpers/storage";
+import { choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -154,7 +155,7 @@ describe("agents — registry CRUD", () => {
       replyThreadTs: null,
       eventId: "Ev_CASCADE"
     });
-    await createHitlRequest({
+    await createHitlForm({
       requestId: "req-cascade",
       token: "tok-cascade",
       taskId: "task-cascade",
@@ -162,10 +163,7 @@ describe("agents — registry CRUD", () => {
       agentName: "crud-agent-used",
       channelId: "C_USED",
       threadTs: null,
-      requestKind: "approval",
-      promptText: "Approve?",
-      optionsJson: null,
-      allowFreeform: false,
+      request: choiceForm("req-cascade", "Approve?"),
       deadlineAt: Math.floor(Date.now() / 1000) + 3600
     });
 
@@ -174,6 +172,6 @@ describe("agents — registry CRUD", () => {
     expect(await getAgent("crud-agent-used")).toBeNull();
     expect(await getAgentChannels("crud-agent-used")).toEqual([]);
     expect(await getAgentTaskByToken("tok-cascade")).toBeNull();
-    expect(await getHitlRequest("req-cascade")).toBeNull();
+    expect(await getHitlForm("req-cascade")).toBeNull();
   });
 });

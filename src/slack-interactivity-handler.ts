@@ -7,35 +7,38 @@ import type {
   SlackBlockActionsPayload,
   SlackViewSubmissionPayload
 } from "@chat-adapter/slack/webhook";
-import {
-  parseSlackInputResponse,
-  parseSlackFreeformValue,
-  SLACK_FREEFORM_ACTION_PREFIX,
-  SLACK_FREEFORM_BLOCK_ID,
-  SLACK_FREEFORM_CALLBACK_ID
-} from "@chat-adapter/slack/blocks";
-import { MAX_MESSAGE_TEXT_BYTES } from "@dynamicagents/g2a-protocol";
-import type { SlackInputOption } from "@chat-adapter/slack/blocks";
 import { env } from "cloudflare:workers";
 import { guardTeamId } from "@/slack-webhook-handler";
 import {
-  getHitlRequest,
+  getHitlForm,
   claimHitlAnswer,
-  reopenHitlRequest,
-  type HitlRequestRow
-} from "@/db/models/hitl-requests";
-import { optionLabel, type HitlAnswerChoice } from "@/a2a/hitl";
+  reopenHitlForm,
+  type HitlFormRow
+} from "@/db/models/hitl-forms";
+import { answersText } from "@/a2a/hitl";
 import {
   markHitlPromptResolved,
   TASK_ENDED_NOTE
 } from "@/a2a/notifications/hitl";
-import { resumeAgentTask, type ResumeOutcome } from "@/a2a/dispatch";
+import {
+  resumeAgentTask,
+  type HitlSubmission,
+  type ResumeOutcome
+} from "@/a2a/dispatch";
 import {
   answeredBlocks,
   answeredFallbackBlocks,
   fallbackText,
-  freeformView
+  formView,
+  FORM_CALLBACK_ID,
+  requestFallbackText
 } from "@/slack/hitl/render";
+import {
+  formAnswers,
+  formErrors,
+  pickAnswers,
+  readControl
+} from "@/slack/hitl/answer";
 import {
   postEphemeral,
   updateBlocks,
@@ -46,19 +49,8 @@ import { isRecord } from "@/util/json";
 
 const OK = () => new Response("ok", { status: 200 });
 
-/** Parse the stored options JSON back into the rendered option set (or []). */
-function optionsOf(row: HitlRequestRow): SlackInputOption[] {
-  if (!row.optionsJson) return [];
-  try {
-    const parsed: unknown = JSON.parse(row.optionsJson);
-    return Array.isArray(parsed) ? (parsed as SlackInputOption[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 /** Ephemeral notice text when a click lands on a prompt that is no longer open. */
-function alreadyResolvedText(row: HitlRequestRow): string {
+function alreadyResolvedText(row: HitlFormRow): string {
   switch (row.status) {
     case "answered":
       return row.answeredBy
@@ -83,7 +75,7 @@ const DELIVERY_NOTE_BLOCK_ID = "hitl-delivery-note";
 /** Longest answer label quoted in a delivery note; a typed answer can be long. */
 const MAX_NOTE_LABEL_CHARS = 200;
 
-/** Longest typed answer handed back to its author for pasting in again. */
+/** Longest typed answers handed back to their author for pasting in again. */
 const MAX_RETURNED_ANSWER_CHARS = 30_000;
 
 function clip(text: string, max: number): string {
@@ -111,8 +103,7 @@ function deliveryNote(text: string): unknown {
 
 /**
  * The prompt while its answer is being sent: as it was, minus every control
- * (buttons, radios, selects and "Type your answer" are all `actions` blocks), plus
- * a note saying whose answer is on its way.
+ * (all in `actions` blocks), plus a note saying whose answer is on its way.
  */
 function sendingBlocks(blocks: readonly unknown[], note: string): unknown[] {
   return [
@@ -129,33 +120,29 @@ function reopenedBlocks(blocks: readonly unknown[], note: string): unknown[] {
 }
 
 /**
- * Record a human's answer to a HITL prompt and resume the task. First-click-wins
- * via the atomic claim: a losing racer (or a click on an already-resolved prompt)
- * gets an ephemeral notice instead.
+ * Record a person's answers to a HITL prompt and resume the task. First-answer-
+ * wins via the atomic claim: a losing racer (or a click on an already-resolved
+ * prompt) gets an ephemeral notice instead.
  *
  * Slack shows nothing once a click is acknowledged, so every sign of progress is
  * an update we make. When the click carried the prompt's blocks, the prompt loses
- * its controls and says the answer is on its way while it is sent; a typed answer
- * arrives from a modal, which carries none, so its prompt is left alone.
+ * its controls and says the answer is on its way while it is sent; answers from a
+ * modal carry none, so their prompt is left alone.
  *
  * Only once the agent has accepted (or refused) does the prompt show the answered
- * state. If the answer never got there, the claim is undone and the prompt comes
+ * state. If the answers never got there, the claim is undone and the prompt comes
  * back as it was clicked, with a note — or, with no blocks to put back, its author
  * is told privately, with what they typed.
  */
 async function answerHitl(
   requestId: string,
-  input: HitlAnswerChoice & { answeredBy: string },
+  input: HitlSubmission,
   clickedBlocks?: readonly unknown[]
 ): Promise<void> {
-  const claimed = await claimHitlAnswer(requestId, {
-    answeredBy: input.answeredBy,
-    optionId: input.optionId,
-    text: input.text
-  });
+  const claimed = await claimHitlAnswer(requestId, input);
 
   if (!claimed) {
-    const row = await getHitlRequest(requestId);
+    const row = await getHitlForm(requestId);
     if (row) {
       await postEphemeral({
         channelId: row.channelId,
@@ -167,11 +154,7 @@ async function answerHitl(
     return;
   }
 
-  const label =
-    optionLabel(optionsOf(claimed), input.optionId) ??
-    input.text ??
-    input.optionId ??
-    "answered";
+  const label = answersText(claimed.requestJson, input.answers) || "answered";
   const noteLabel = clip(label, MAX_NOTE_LABEL_CHARS);
   const ts = claimed.slackMessageTs;
   const blocks = ts ? clickedBlocks : undefined;
@@ -198,20 +181,17 @@ async function answerHitl(
         })
       : undefined;
 
-  // Spread rather than re-listing the two fields: rebuilding them by hand loses
-  // the union's narrowing and lets an answer with neither back through.
-  const outcome: ResumeOutcome = await resumeAgentTask(claimed, {
-    ...input,
-    humanText: label
-  }).catch((err: unknown) => {
-    console.error("[hitl] resume failed before any verdict", {
-      requestId,
-      err: err instanceof Error ? err.message : String(err)
-    });
-    return "undelivered" as const;
-  });
+  const outcome: ResumeOutcome = await resumeAgentTask(claimed, input).catch(
+    (err: unknown) => {
+      console.error("[hitl] resume failed before any verdict", {
+        requestId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return "undelivered" as const;
+    }
+  );
 
-  if (outcome === "undelivered" && (await reopenHitlRequest(requestId))) {
+  if (outcome === "undelivered" && (await reopenHitlForm(requestId))) {
     await sending;
     await offerAnswerAgain(claimed, input, noteLabel, blocks);
     return;
@@ -221,7 +201,7 @@ async function answerHitl(
   // Delivered, refused (the answer stands, and the thread has been told), or
   // never delivered to a task that has since ended. Either way someone answered,
   // and the prompt must stop offering controls.
-  if (ts) await showAnswered(claimed, ts, label, input.answeredBy);
+  if (ts) await showAnswered(claimed, ts, input, label);
 }
 
 /**
@@ -230,17 +210,17 @@ async function answerHitl(
  * would claim an answer already sent.
  */
 async function showAnswered(
-  row: HitlRequestRow,
+  row: HitlFormRow,
   ts: string,
-  answer: string,
-  answeredBy: string
+  input: HitlSubmission,
+  label: string
 ): Promise<void> {
-  const text = fallbackText(`Answered: ${answer}`);
+  const text = fallbackText(`Answered: ${label}`);
   try {
     await updateBlocks({
       channelId: row.channelId,
       ts,
-      blocks: answeredBlocks({ prompt: row.promptText, answer, answeredBy }),
+      blocks: answeredBlocks({ request: row.requestJson, ...input }),
       text
     });
     return;
@@ -255,7 +235,7 @@ async function showAnswered(
     await updateBlocks({
       channelId: row.channelId,
       ts,
-      blocks: answeredFallbackBlocks(answeredBy),
+      blocks: answeredFallbackBlocks(input.answeredBy),
       text
     });
   } catch (err) {
@@ -272,8 +252,8 @@ async function showAnswered(
  * update — privately to whoever answered, with their typed text so it is not lost.
  */
 async function offerAnswerAgain(
-  row: HitlRequestRow,
-  input: HitlAnswerChoice & { answeredBy: string },
+  row: HitlFormRow,
+  input: HitlSubmission,
   noteLabel: string,
   blocks: readonly unknown[] | undefined
 ): Promise<void> {
@@ -286,7 +266,7 @@ async function offerAnswerAgain(
           blocks,
           `⚠️ <@${input.answeredBy}>'s answer (*${noteLabel}*) didn't reach *${row.agentName}* — please answer again.`
         ),
-        text: fallbackText(row.promptText)
+        text: requestFallbackText(row.requestJson)
       });
       await closeIfEndedMeanwhile(row.requestId);
       return;
@@ -299,13 +279,14 @@ async function offerAnswerAgain(
   }
 
   const failed = `didn't reach *${row.agentName}*, so the question is open again — please answer again.`;
+  const typed = Object.values(input.answers).some((a) => a.text);
   try {
     await postEphemeral({
       channelId: row.channelId,
       userId: input.answeredBy,
       threadTs: row.threadTs,
-      text: input.text
-        ? `⚠️ Your answer ${failed} What you wrote:\n${clip(input.text, MAX_RETURNED_ANSWER_CHARS)}`
+      text: typed
+        ? `⚠️ Your answer ${failed} What you wrote:\n${clip(answersText(row.requestJson, input.answers), MAX_RETURNED_ANSWER_CHARS)}`
         : `⚠️ Your answer (*${noteLabel}*) ${failed}`
     });
   } catch (err) {
@@ -325,121 +306,80 @@ async function offerAnswerAgain(
  * after writing, so whichever order the two landed in, the closed state is last.
  */
 async function closeIfEndedMeanwhile(requestId: string): Promise<void> {
-  const row = await getHitlRequest(requestId);
+  const row = await getHitlForm(requestId);
   if (row?.status === "canceled") {
     await markHitlPromptResolved(row, TASK_ENDED_NOTE);
   }
 }
 
-/** Handle a button/select/radio click, or a "Something else…" freeform button. */
+/** A note to whoever clicked a prompt that is no longer open. */
+async function tellClosed(row: HitlFormRow, userId: string): Promise<void> {
+  await postEphemeral({
+    channelId: row.channelId,
+    userId,
+    threadTs: row.threadTs,
+    text: alreadyResolvedText(row)
+  });
+}
+
+/** Handle a click on a prompt's controls: a pick, or opening the form's modal. */
 async function handleBlockActions(
   payload: SlackBlockActionsPayload
 ): Promise<void> {
   for (const action of payload.actions) {
-    // A fixed-option answer (button, static_select, or radio).
-    const parsed = parseSlackInputResponse(action);
-    if (parsed?.optionId) {
+    const control = readControl(action);
+    if (!control) continue;
+    const row = await getHitlForm(control.requestId);
+    if (!row) continue;
+
+    if (control.kind === "pick") {
+      const answers = pickAnswers(row.requestJson, control);
+      if (!answers) continue;
       await answerHitl(
-        parsed.requestId,
-        { optionId: parsed.optionId, answeredBy: payload.userId },
+        control.requestId,
+        { answers, answeredBy: payload.userId },
         payload.messageBlocks
       );
       continue;
     }
 
-    // The freeform "Something else…" button → open the typed-answer modal.
-    if (action.actionId.startsWith(SLACK_FREEFORM_ACTION_PREFIX)) {
-      const requestId =
-        action.value ??
-        action.actionId.slice(SLACK_FREEFORM_ACTION_PREFIX.length);
-      if (!payload.triggerId) continue;
-      const row = await getHitlRequest(requestId);
-      if (!row || row.status !== "awaiting") {
-        if (row) {
-          await postEphemeral({
-            channelId: row.channelId,
-            userId: payload.userId,
-            threadTs: row.threadTs,
-            text: alreadyResolvedText(row)
-          });
-        }
-        continue;
-      }
-      try {
-        await openView(
-          payload.triggerId,
-          freeformView({ requestId, prompt: row.promptText })
-        );
-      } catch (err) {
-        console.error("[hitl] failed to open freeform modal", {
-          requestId,
-          ...slackErrorFields(err)
-        });
-      }
+    if (!payload.triggerId) continue;
+    if (row.status !== "awaiting") {
+      await tellClosed(row, payload.userId);
+      continue;
+    }
+    try {
+      await openView(
+        payload.triggerId,
+        formView(row.requestJson, control.question)
+      );
+    } catch (err) {
+      console.error("[hitl] failed to open the form", {
+        requestId: control.requestId,
+        ...slackErrorFields(err)
+      });
     }
   }
 }
 
-const encoder = new TextEncoder();
-
-/**
- * Refuse a typed answer the far end would refuse anyway — on the request path,
- * while Slack is still listening.
- *
- * The agent runtime bounds the text of an inbound message at
- * {@link MAX_MESSAGE_TEXT_BYTES} and rejects anything past it. Left to
- * {@link handleViewSubmission}, which runs in `ctx.waitUntil` *after* the
- * response is sent, that rejection lands too late to matter: the prompt has
- * already been claimed and marked answered, so the person's answer is gone, the
- * question cannot be asked again, and there is nothing to retry.
- *
- * Checked here, the same text is a correctable mistake. `response_action:
- * "errors"` keeps the modal open with what they wrote still in it, the prompt is
- * never claimed, and they can shorten it and submit again. Measuring is
- * synchronous, so moving it on-path costs no I/O against the 3s ack budget.
- *
- * Returns the refusal response, or `undefined` to carry on.
- */
-function overlongFreeformAnswer(
-  payload: SlackViewSubmissionPayload
-): Response | undefined {
-  if (payload.callbackId !== SLACK_FREEFORM_CALLBACK_ID) return undefined;
-  const text = payload.values
-    ? parseSlackFreeformValue(payload.values)
-    : undefined;
-  // Trimmed, because that is what gets sent and therefore what gets measured —
-  // see the constant's own doc for the rest of the algorithm.
-  const trimmed = text?.trim();
-  if (
-    !trimmed ||
-    encoder.encode(trimmed).byteLength <= MAX_MESSAGE_TEXT_BYTES
-  ) {
-    return undefined;
-  }
-  return Response.json({
-    response_action: "errors",
-    errors: {
-      [SLACK_FREEFORM_BLOCK_ID]:
-        "That answer is too long to send — please shorten it."
-    }
-  });
-}
-
-/** Handle a freeform-modal submission (the typed "Something else…" answer). */
+/** Handle a submitted form: read its answers against the questions, and send them. */
 async function handleViewSubmission(
   payload: SlackViewSubmissionPayload
 ): Promise<void> {
-  if (payload.callbackId !== SLACK_FREEFORM_CALLBACK_ID) return;
   const requestId = payload.privateMetadata;
   if (!requestId) return;
-  const text = payload.values
-    ? parseSlackFreeformValue(payload.values)
-    : undefined;
-  if (!text || !text.trim()) return;
-  await answerHitl(requestId, {
-    text: text.trim(),
-    answeredBy: payload.userId
-  });
+  const row = await getHitlForm(requestId);
+  if (!row) return;
+  const answers = formAnswers(row.requestJson, payload.values ?? []);
+  if (!answers) {
+    // `formErrors` refused this on the request path; reaching here means the
+    // modal and the stored form disagree, which a person cannot fix.
+    console.error("[hitl] a submitted form answers nothing it asked", {
+      requestId
+    });
+    return;
+  }
+  await answerHitl(requestId, { answers, answeredBy: payload.userId });
 }
 
 /**
@@ -474,11 +414,18 @@ export async function handleSlackInteractivity(
     return OK();
   }
 
-  if (payload.kind === "view_submission") {
+  if (
+    payload.kind === "view_submission" &&
+    payload.callbackId === FORM_CALLBACK_ID
+  ) {
     const guard = await guardTeamId(payload.teamId);
     if (guard) return guard;
-    const tooLong = overlongFreeformAnswer(payload);
-    if (tooLong) return tooLong;
+    // On the request path, while Slack is still listening: refused here, a
+    // mistake keeps the modal open with what was typed still in it. Refused by
+    // the agent after the claim, the question would be spent on an answer
+    // nobody holds.
+    const errors = formErrors(payload.values ?? []);
+    if (errors) return Response.json({ response_action: "errors", errors });
     ctx.waitUntil(handleViewSubmission(payload));
     // An empty 200 tells Slack to close the modal.
     return new Response(null, { status: 200 });

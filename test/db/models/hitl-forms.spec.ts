@@ -9,17 +9,18 @@ import {
   completeAgentTask
 } from "@/db/models/agent-tasks";
 import {
-  createHitlRequest,
-  getHitlRequest,
-  setHitlSlackMessageTs,
+  createHitlForm,
+  getHitlForm,
+  setHitlFormMessageTs,
   claimHitlAnswer,
-  reopenHitlRequest,
-  cancelHitlRequest,
-  cancelHitlRequestsByToken,
-  expireStaleHitlRequests,
-  sweepStaleHitlRequests,
-  type CreateHitlRequestInput
-} from "@/db/models/hitl-requests";
+  reopenHitlForm,
+  cancelHitlForm,
+  cancelHitlFormsByToken,
+  expireStaleHitlForms,
+  sweepStaleHitlForms,
+  type CreateHitlFormInput
+} from "@/db/models/hitl-forms";
+import { choiceForm } from "../../helpers/hitl";
 import { useStorageReset } from "../../helpers/storage";
 
 useStorageReset();
@@ -37,8 +38,8 @@ beforeEach(async () => {
 
 function input(
   requestId: string,
-  over: Partial<CreateHitlRequestInput> = {}
-): CreateHitlRequestInput {
+  over: Partial<CreateHitlFormInput> = {}
+): CreateHitlFormInput {
   return {
     requestId,
     token: "tok-1",
@@ -47,90 +48,104 @@ function input(
     agentName: "remoteagent",
     channelId: "C1",
     threadTs: "1700.1",
-    requestKind: "choice",
-    promptText: "Pick one",
-    optionsJson: JSON.stringify([
+    request: choiceForm(requestId, "Pick one", [
       { id: "a", label: "Alpha" },
       { id: "b", label: "Beta" }
     ]),
-    allowFreeform: false,
     deadlineAt: Math.floor(Date.now() / 1000) + 600,
     ...over
   };
 }
 
-describe("hitl-requests model", () => {
+describe("hitl-forms model", () => {
   it("creates and reads a request", async () => {
-    expect(await createHitlRequest(input("req-a"))).toBe(true);
-    const row = await getHitlRequest("req-a");
+    expect(await createHitlForm(input("req-a"))).toBe(true);
+    const row = await getHitlForm("req-a");
     expect(row?.status).toBe("awaiting");
-    expect(row?.requestKind).toBe("choice");
+    expect(row?.requestJson.questions[0]?.prompt).toBe("Pick one");
     expect(row?.contextId).toBe("C1:1700.1");
   });
 
   it("is idempotent on the requestId PK (dedup returns false, no clobber)", async () => {
     expect(
-      await createHitlRequest(input("req-b", { promptText: "first" }))
+      await createHitlForm(
+        input("req-b", { request: choiceForm("req-b", "first") })
+      )
     ).toBe(true);
     expect(
-      await createHitlRequest(input("req-b", { promptText: "second" }))
+      await createHitlForm(
+        input("req-b", { request: choiceForm("req-b", "second") })
+      )
     ).toBe(false);
-    expect((await getHitlRequest("req-b"))?.promptText).toBe("first");
+    expect((await getHitlForm("req-b"))?.requestJson.questions[0]?.prompt).toBe(
+      "first"
+    );
   });
 
   it("records the Slack message ts", async () => {
-    await createHitlRequest(input("req-ts"));
-    await setHitlSlackMessageTs("req-ts", "1700.55");
-    expect((await getHitlRequest("req-ts"))?.slackMessageTs).toBe("1700.55");
+    await createHitlForm(input("req-ts"));
+    await setHitlFormMessageTs("req-ts", "1700.55");
+    expect((await getHitlForm("req-ts"))?.slackMessageTs).toBe("1700.55");
   });
 
   describe("claimHitlAnswer (first-click-wins)", () => {
     it("claims an awaiting request and returns the full row", async () => {
-      await createHitlRequest(input("req-c"));
+      await createHitlForm(input("req-c"));
       const claimed = await claimHitlAnswer("req-c", {
         answeredBy: "U1",
-        optionId: "a"
+        answers: { q1: { optionIds: ["a"] } }
       });
       expect(claimed).not.toBeNull();
       expect(claimed?.status).toBe("answered");
       expect(claimed?.answeredBy).toBe("U1");
-      expect(claimed?.answeredOptionId).toBe("a");
+      expect(claimed?.answersJson).toEqual({ q1: { optionIds: ["a"] } });
       expect(claimed?.answeredAt).not.toBeNull();
     });
 
     it("lets exactly one of two racing claims win", async () => {
-      await createHitlRequest(input("req-race"));
+      await createHitlForm(input("req-race"));
       const [first, second] = await Promise.all([
-        claimHitlAnswer("req-race", { answeredBy: "U1", optionId: "a" }),
-        claimHitlAnswer("req-race", { answeredBy: "U2", optionId: "b" })
+        claimHitlAnswer("req-race", {
+          answeredBy: "U1",
+          answers: { q1: { optionIds: ["a"] } }
+        }),
+        claimHitlAnswer("req-race", {
+          answeredBy: "U2",
+          answers: { q1: { optionIds: ["b"] } }
+        })
       ]);
       const winners = [first, second].filter((r) => r !== null);
       expect(winners).toHaveLength(1);
     });
 
     it("returns null for an already-answered, expired, or unknown request", async () => {
-      await createHitlRequest(input("req-d"));
-      await claimHitlAnswer("req-d", { answeredBy: "U1", optionId: "a" });
+      await createHitlForm(input("req-d"));
+      await claimHitlAnswer("req-d", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
       expect(
-        await claimHitlAnswer("req-d", { answeredBy: "U2", optionId: "b" })
+        await claimHitlAnswer("req-d", {
+          answeredBy: "U2",
+          answers: { q1: { optionIds: ["b"] } }
+        })
       ).toBeNull();
       expect(
-        await claimHitlAnswer("req-nope", { answeredBy: "U2" })
+        await claimHitlAnswer("req-nope", { answeredBy: "U2", answers: {} })
       ).toBeNull();
     });
 
-    it("records a freeform text answer without an optionId", async () => {
-      await createHitlRequest(input("req-free", { allowFreeform: true }));
+    it("records a typed answer in place of a pick", async () => {
+      await createHitlForm(input("req-free"));
       const claimed = await claimHitlAnswer("req-free", {
         answeredBy: "U1",
-        text: "something else"
+        answers: { q1: { text: "something else" } }
       });
-      expect(claimed?.answerText).toBe("something else");
-      expect(claimed?.answeredOptionId).toBeNull();
+      expect(claimed?.answersJson).toEqual({ q1: { text: "something else" } });
     });
   });
 
-  describe("reopenHitlRequest", () => {
+  describe("reopenHitlForm", () => {
     /** A task parked on its prompt, as `deliverHitlRequest` leaves it. */
     async function parkedTask(token: string) {
       await createAgentTask({
@@ -147,112 +162,129 @@ describe("hitl-requests model", () => {
 
     it("reopens an answered request while its task is parked, clearing the answer", async () => {
       await parkedTask("tok-open");
-      await createHitlRequest(input("req-open", { token: "tok-open" }));
-      await claimHitlAnswer("req-open", { answeredBy: "U1", text: "typed" });
+      await createHitlForm(input("req-open", { token: "tok-open" }));
+      await claimHitlAnswer("req-open", {
+        answeredBy: "U1",
+        answers: { q1: { text: "typed" } }
+      });
 
-      expect(await reopenHitlRequest("req-open")).toBe(true);
-      const row = await getHitlRequest("req-open");
+      expect(await reopenHitlForm("req-open")).toBe(true);
+      const row = await getHitlForm("req-open");
       expect(row?.status).toBe("awaiting");
       expect(row?.answeredBy).toBeNull();
-      expect(row?.answeredOptionId).toBeNull();
-      expect(row?.answerText).toBeNull();
+      expect(row?.answersJson).toBeNull();
       expect(row?.answeredAt).toBeNull();
 
       // Open again means claimable again.
       expect(
-        await claimHitlAnswer("req-open", { answeredBy: "U2", optionId: "b" })
+        await claimHitlAnswer("req-open", {
+          answeredBy: "U2",
+          answers: { q1: { optionIds: ["b"] } }
+        })
       ).not.toBeNull();
     });
 
     it("leaves the answer when the task is no longer parked", async () => {
       await parkedTask("tok-done");
-      await createHitlRequest(input("req-over", { token: "tok-done" }));
-      await claimHitlAnswer("req-over", { answeredBy: "U1", optionId: "a" });
+      await createHitlForm(input("req-over", { token: "tok-done" }));
+      await claimHitlAnswer("req-over", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
       // The task finished while the answer was on its way.
       await completeAgentTask("tok-done");
 
-      expect(await reopenHitlRequest("req-over")).toBe(false);
-      expect((await getHitlRequest("req-over"))?.status).toBe("answered");
+      expect(await reopenHitlForm("req-over")).toBe(false);
+      expect((await getHitlForm("req-over"))?.status).toBe("answered");
     });
 
     it("does not touch a request that was never answered", async () => {
       await parkedTask("tok-idle");
-      await createHitlRequest(input("req-idle", { token: "tok-idle" }));
-      await createHitlRequest(input("req-shut", { token: "tok-idle" }));
-      await cancelHitlRequest("req-shut");
+      await createHitlForm(input("req-idle", { token: "tok-idle" }));
+      await createHitlForm(input("req-shut", { token: "tok-idle" }));
+      await cancelHitlForm("req-shut");
 
-      expect(await reopenHitlRequest("req-idle")).toBe(false);
-      expect(await reopenHitlRequest("req-shut")).toBe(false);
-      expect(await reopenHitlRequest("req-nope")).toBe(false);
-      expect((await getHitlRequest("req-shut"))?.status).toBe("canceled");
+      expect(await reopenHitlForm("req-idle")).toBe(false);
+      expect(await reopenHitlForm("req-shut")).toBe(false);
+      expect(await reopenHitlForm("req-nope")).toBe(false);
+      expect((await getHitlForm("req-shut"))?.status).toBe("canceled");
     });
 
     it("does not reopen on the strength of another task being parked", async () => {
       await parkedTask("tok-other");
-      await createHitlRequest(input("req-orphan", { token: "tok-gone" }));
-      await claimHitlAnswer("req-orphan", { answeredBy: "U1", optionId: "a" });
+      await createHitlForm(input("req-orphan", { token: "tok-gone" }));
+      await claimHitlAnswer("req-orphan", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
 
-      expect(await reopenHitlRequest("req-orphan")).toBe(false);
+      expect(await reopenHitlForm("req-orphan")).toBe(false);
     });
   });
 
   describe("cancelHitlRequest", () => {
     it("cancels one awaiting request, once, and leaves its siblings open", async () => {
-      await createHitlRequest(input("req-one", { token: "tok-z" }));
-      await createHitlRequest(input("req-two", { token: "tok-z" }));
-      expect(await cancelHitlRequest("req-one")).toBe(true);
-      expect(await cancelHitlRequest("req-one")).toBe(false);
-      expect((await getHitlRequest("req-one"))?.status).toBe("canceled");
-      expect((await getHitlRequest("req-two"))?.status).toBe("awaiting");
+      await createHitlForm(input("req-one", { token: "tok-z" }));
+      await createHitlForm(input("req-two", { token: "tok-z" }));
+      expect(await cancelHitlForm("req-one")).toBe(true);
+      expect(await cancelHitlForm("req-one")).toBe(false);
+      expect((await getHitlForm("req-one"))?.status).toBe("canceled");
+      expect((await getHitlForm("req-two"))?.status).toBe("awaiting");
     });
 
     it("does not reopen or overwrite an answered request", async () => {
-      await createHitlRequest(input("req-done"));
-      await claimHitlAnswer("req-done", { answeredBy: "U1", optionId: "a" });
-      expect(await cancelHitlRequest("req-done")).toBe(false);
-      expect((await getHitlRequest("req-done"))?.status).toBe("answered");
+      await createHitlForm(input("req-done"));
+      await claimHitlAnswer("req-done", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
+      expect(await cancelHitlForm("req-done")).toBe(false);
+      expect((await getHitlForm("req-done"))?.status).toBe("answered");
     });
   });
 
-  describe("cancelHitlRequestsByToken", () => {
+  describe("cancelHitlFormsByToken", () => {
     it("cancels every open request for a token and returns them", async () => {
-      await createHitlRequest(input("req-e", { token: "tok-x" }));
-      await createHitlRequest(input("req-f", { token: "tok-x" }));
-      const canceled = await cancelHitlRequestsByToken("tok-x");
+      await createHitlForm(input("req-e", { token: "tok-x" }));
+      await createHitlForm(input("req-f", { token: "tok-x" }));
+      const canceled = await cancelHitlFormsByToken("tok-x");
       expect(canceled.map((r) => r.requestId).sort()).toEqual([
         "req-e",
         "req-f"
       ]);
-      expect((await getHitlRequest("req-e"))?.status).toBe("canceled");
+      expect((await getHitlForm("req-e"))?.status).toBe("canceled");
     });
 
     it("does not touch already-answered requests", async () => {
-      await createHitlRequest(input("req-g", { token: "tok-y" }));
-      await claimHitlAnswer("req-g", { answeredBy: "U1", optionId: "a" });
-      const canceled = await cancelHitlRequestsByToken("tok-y");
+      await createHitlForm(input("req-g", { token: "tok-y" }));
+      await claimHitlAnswer("req-g", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
+      const canceled = await cancelHitlFormsByToken("tok-y");
       expect(canceled).toHaveLength(0);
-      expect((await getHitlRequest("req-g"))?.status).toBe("answered");
+      expect((await getHitlForm("req-g"))?.status).toBe("answered");
     });
   });
 
-  describe("expireStaleHitlRequests", () => {
+  describe("expireStaleHitlForms", () => {
     it("expires only awaiting requests past their deadline", async () => {
       const now = Math.floor(Date.now() / 1000);
-      await createHitlRequest(input("req-past", { deadlineAt: now - 10 }));
-      await createHitlRequest(input("req-future", { deadlineAt: now + 1000 }));
-      const expired = await expireStaleHitlRequests(now);
+      await createHitlForm(input("req-past", { deadlineAt: now - 10 }));
+      await createHitlForm(input("req-future", { deadlineAt: now + 1000 }));
+      const expired = await expireStaleHitlForms(now);
       expect(expired.map((r) => r.requestId)).toEqual(["req-past"]);
-      expect((await getHitlRequest("req-past"))?.status).toBe("expired");
-      expect((await getHitlRequest("req-future"))?.status).toBe("awaiting");
+      expect((await getHitlForm("req-past"))?.status).toBe("expired");
+      expect((await getHitlForm("req-future"))?.status).toBe("awaiting");
     });
   });
 
   it("sweeps only resolved rows older than the cutoff", async () => {
-    await createHitlRequest(input("req-sweep"));
-    expect(await sweepStaleHitlRequests(24 * 60 * 60)).toBe(0);
+    await createHitlForm(input("req-sweep"));
+    expect(await sweepStaleHitlForms(24 * 60 * 60)).toBe(0);
     // A negative window (cutoff in the future) collects everything.
-    expect(await sweepStaleHitlRequests(-10)).toBeGreaterThanOrEqual(1);
-    expect(await getHitlRequest("req-sweep")).toBeNull();
+    expect(await sweepStaleHitlForms(-10)).toBeGreaterThanOrEqual(1);
+    expect(await getHitlForm("req-sweep")).toBeNull();
   });
 });
 

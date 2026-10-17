@@ -1,24 +1,21 @@
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import { suspendForInput, type AgentTaskRow } from "@/db/models/agent-tasks";
+import type { HitlOption, HitlQuestion } from "@dynamicagents/g2a-protocol";
 import {
-  cancelHitlRequest,
-  cancelHitlRequestsByToken,
-  createHitlRequest,
-  getHitlRequest,
-  setHitlSlackMessageTs,
-  type HitlRequestRow
-} from "@/db/models/hitl-requests";
+  cancelHitlForm,
+  cancelHitlFormsByToken,
+  createHitlForm,
+  getHitlForm,
+  setHitlFormMessageTs,
+  type HitlFormRow
+} from "@/db/models/hitl-forms";
 import { sanitizeAgentReply } from "@/a2a/client";
-import {
-  toSlackInputRequest,
-  type HitlRequest,
-  type HitlOption
-} from "@/a2a/hitl";
+import type { HitlRequest } from "@/a2a/hitl";
 import type { TaskSnapshot } from "@/a2a/snapshot";
 import {
-  fallbackText,
   requestBlocks,
+  requestFallbackText,
   resolvedBlocks
 } from "@/slack/hitl/render";
 import {
@@ -28,19 +25,46 @@ import {
   updateBlocks
 } from "@/wrappers/slack";
 
-/** Sanitize an agent-authored option (label/description are untrusted output). */
+/** `text`, sanitized, when there is any: every string an agent wrote is untrusted. */
+function sanitized(text: string | undefined): string | undefined {
+  return text === undefined ? undefined : sanitizeAgentReply(text);
+}
+
 function sanitizeOption(option: HitlOption): HitlOption {
   return {
     ...option,
     label: sanitizeAgentReply(option.label),
-    description: option.description
-      ? sanitizeAgentReply(option.description)
-      : undefined
+    ...(option.description
+      ? { description: sanitized(option.description) }
+      : {}),
+    ...(option.example ? { example: sanitized(option.example) } : {})
   };
 }
 
+function sanitizeQuestion(question: HitlQuestion): HitlQuestion {
+  const base = {
+    ...question,
+    prompt: sanitizeAgentReply(question.prompt),
+    ...(question.header ? { header: sanitized(question.header) } : {})
+  };
+  switch (base.kind) {
+    case "choice":
+      return { ...base, options: base.options.map(sanitizeOption) };
+    case "approval":
+      return {
+        ...base,
+        artifact: {
+          ...base.artifact,
+          url: sanitizeAgentReply(base.artifact.url)
+        }
+      };
+    case "text":
+      return base;
+  }
+}
+
 /**
- * Render a human-in-the-loop prompt to Slack and park the task.
+ * Render a human-in-the-loop form to Slack and park the task.
  *
  * Called from the delivery boundary when an `input-required` snapshot carries a
  * HITL request data part. Sanitizes the agent's prompt/options before they are
@@ -56,17 +80,15 @@ export async function deliverHitlRequest(
   snapshot: TaskSnapshot,
   req: HitlRequest
 ): Promise<void> {
-  const sanitized: HitlRequest = {
+  const request: HitlRequest = {
     ...req,
-    prompt: sanitizeAgentReply(req.prompt),
-    options: req.options?.map(sanitizeOption)
+    ...(req.prompt ? { prompt: sanitized(req.prompt) } : {}),
+    questions: req.questions.map(sanitizeQuestion)
   };
-  const slackReq = toSlackInputRequest(sanitized);
-  const optionsJson = JSON.stringify(slackReq.options ?? []);
 
   // Idempotent create is the dedup guard: an at-least-once push redelivery of the
   // same input-required update returns `created: false` and skips re-posting.
-  const created = await createHitlRequest({
+  const created = await createHitlForm({
     requestId: req.requestId,
     token,
     taskId: snapshot.taskId,
@@ -74,10 +96,7 @@ export async function deliverHitlRequest(
     agentName: row.agentName,
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
-    requestKind: sanitized.requestKind,
-    promptText: sanitized.prompt,
-    optionsJson,
-    allowFreeform: sanitized.allowFreeform ?? false,
+    request,
     deadlineAt: Math.floor(Date.now() / 1000) + HITL_REQUEST_TTL_SECONDS
   });
 
@@ -85,7 +104,7 @@ export async function deliverHitlRequest(
     // A duplicate — unless a prior attempt created the row but crashed before it
     // could post (no ts recorded). Recover that one case; otherwise it is a true
     // redelivery of an already-shown prompt.
-    const existing = await getHitlRequest(req.requestId);
+    const existing = await getHitlForm(req.requestId);
     if (
       !existing ||
       existing.status !== "awaiting" ||
@@ -110,7 +129,7 @@ export async function deliverHitlRequest(
     // alone: a park also fails on a task already parked on an earlier prompt, and
     // that prompt still stands. (A finished task's other prompts were closed by
     // the delivery that finished it.)
-    await cancelHitlRequest(req.requestId);
+    await cancelHitlForm(req.requestId);
     return;
   }
 
@@ -121,12 +140,12 @@ export async function deliverHitlRequest(
   const ts = await postBlocks({
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
-    blocks: requestBlocks(slackReq),
-    text: fallbackText(sanitized.prompt),
+    blocks: requestBlocks(request),
+    text: requestFallbackText(request),
     username: displayName,
     iconUrl
   });
-  if (ts) await setHitlSlackMessageTs(req.requestId, ts);
+  if (ts) await setHitlFormMessageTs(req.requestId, ts);
 }
 
 /**
@@ -136,7 +155,7 @@ export async function deliverHitlRequest(
  * terminal in D1, so the resolution stands regardless of the cosmetic update.
  */
 export async function markHitlPromptResolved(
-  row: HitlRequestRow,
+  row: HitlFormRow,
   note: string
 ): Promise<void> {
   if (!row.slackMessageTs) return;
@@ -144,7 +163,7 @@ export async function markHitlPromptResolved(
     await updateBlocks({
       channelId: row.channelId,
       ts: row.slackMessageTs,
-      blocks: resolvedBlocks(row.promptText, note),
+      blocks: resolvedBlocks(row.requestJson, note),
       text: note
     });
   } catch (err) {
@@ -177,7 +196,7 @@ export async function closeOpenHitlPrompts(
   token: string,
   note: string
 ): Promise<void> {
-  const closed = await cancelHitlRequestsByToken(token);
+  const closed = await cancelHitlFormsByToken(token);
   for (const prompt of closed) {
     await markHitlPromptResolved(prompt, note);
   }
@@ -198,7 +217,7 @@ export async function closeOpenHitlPrompts(
  * inference — so it must not be stated when the agent demonstrably answered.
  */
 export async function notifyHitlContinuationFailed(
-  row: HitlRequestRow,
+  row: HitlFormRow,
   detail?: string
 ): Promise<void> {
   const text = detail

@@ -129,7 +129,7 @@ name are woken, the rest are skipped, and the thread is told so.
 ## Data storage
 
 Registry state lives in **D1** (`da-registry`, bound as `DB`), schema in `src/db/schema.ts`
-and migrations in `migrations/` (drizzle-generated; `npm run db:generate`). Nine tables:
+and migrations in `migrations/` (drizzle-generated; `npm run db:generate`).
 
 | Table               | Purpose                                                                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -140,7 +140,8 @@ and migrations in `migrations/` (drizzle-generated; `npm run db:generate`). Nine
 | `agents`            | The agent registry — kind (`local`/`remote`), tenant, endpoint, card signing pin, `notify_on`, `task_deadline_seconds` (per-agent reply budget, 1 hour by default) |
 | `agent_channels`    | Which agents are allowed on which channels                                                                                                                         |
 | `agent_tasks`       | Correlation rows tying an A2A task back to its Slack message                                                                                                       |
-| `hitl_requests`     | Open human-in-the-loop prompts and their TTL                                                                                                                       |
+| `hitl_forms`        | Human-in-the-loop prompts: the form asked, its answers, and its TTL                                                                                                |
+| `hitl_requests`     | Superseded by `hitl_forms` and no longer read; dropped by a later migration                                                                                        |
 | `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                                                                                     |
 
 Per-agent conversation history and memory are **not** in D1 — a built-in's live in

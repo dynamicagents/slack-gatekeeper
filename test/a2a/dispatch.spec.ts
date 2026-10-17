@@ -32,10 +32,10 @@ import {
   getAgentTaskByToken
 } from "@/db/models/agent-tasks";
 import {
-  createHitlRequest,
-  getHitlRequest,
-  type HitlRequestRow
-} from "@/db/models/hitl-requests";
+  createHitlForm,
+  getHitlForm,
+  type HitlFormRow
+} from "@/db/models/hitl-forms";
 import {
   setAllowedRemoteAgentDomains,
   setPublicUrl
@@ -48,6 +48,7 @@ import {
   builtinEndpoint
 } from "@/agents/worker";
 import { useStorageReset } from "../helpers/storage";
+import { choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -898,7 +899,7 @@ describe("timeoutAgentTask (remote continuation)", () => {
   // Register a custom (remote) agent, record its dispatched task, and park it on an
   // open HITL prompt — the exact state a timeout sweep continues from. Returns the
   // persisted request row that timeoutAgentTask consumes.
-  async function setupParkedRow(): Promise<HitlRequestRow> {
+  async function setupParkedRow(): Promise<HitlFormRow> {
     await registerAgent({
       name: "alpha",
       kind: "remote",
@@ -918,7 +919,7 @@ describe("timeoutAgentTask (remote continuation)", () => {
     });
     // pending → awaiting-input: the task is suspended while the prompt is open.
     await suspendForInput(TOKEN);
-    await createHitlRequest({
+    await createHitlForm({
       requestId: REQUEST_ID,
       token: TOKEN,
       taskId: TASK_ID,
@@ -926,13 +927,10 @@ describe("timeoutAgentTask (remote continuation)", () => {
       agentName: "alpha",
       channelId: "C1",
       threadTs: "1700.1",
-      requestKind: "approval",
-      promptText: "Proceed?",
-      optionsJson: null,
-      allowFreeform: false,
+      request: choiceForm(REQUEST_ID),
       deadlineAt: Math.floor(Date.now() / 1000) - 1
     });
-    const row = await getHitlRequest(REQUEST_ID);
+    const row = await getHitlForm(REQUEST_ID);
     if (!row) throw new Error("failed to seed HITL request row");
     return row;
   }

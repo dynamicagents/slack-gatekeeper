@@ -21,21 +21,26 @@ import {
   completeAgentTask
 } from "@/db/models/agent-tasks";
 import {
-  createHitlRequest,
-  setHitlSlackMessageTs,
-  getHitlRequest,
-  cancelHitlRequestsByToken
-} from "@/db/models/hitl-requests";
+  createHitlForm,
+  setHitlFormMessageTs,
+  getHitlForm,
+  cancelHitlFormsByToken
+} from "@/db/models/hitl-forms";
 import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
 import { _resetIssuerCacheForTest } from "@/a2a/dispatch";
 import { buildAgentCard } from "@/a2a/card";
 import {
-  inputRequestToSlackBlocks,
-  SLACK_FREEFORM_ACTION_ID,
-  SLACK_FREEFORM_BLOCK_ID,
-  SLACK_FREEFORM_CALLBACK_ID
-} from "@chat-adapter/slack/blocks";
-import { MAX_MESSAGE_TEXT_BYTES } from "@dynamicagents/g2a-protocol";
+  FORM_CALLBACK_ID,
+  otherBlockId,
+  PICK_ACTION,
+  requestBlocks
+} from "@/slack/hitl/render";
+import { choiceForm } from "./helpers/hitl";
+import {
+  HITL_REQUEST_TYPE,
+  MAX_MESSAGE_TEXT_BYTES,
+  type HitlRequestData
+} from "@dynamicagents/g2a-protocol";
 import { HITL_RESPONSE_TYPE } from "@/a2a/hitl";
 import { dataOf, partsText } from "@/a2a/parts";
 import { agentMessage, makeTask } from "./helpers/a2a";
@@ -51,6 +56,8 @@ const ISSUER = "https://gw.example.com";
 
 interface Captured {
   slackUpdates: URLSearchParams[];
+  /** Views opened with `views.open`, decoded. */
+  views?: Record<string, unknown>[];
   slackEphemerals: URLSearchParams[];
   /** Plain `chat.postMessage` thread replies (e.g. the resume-failed notice). */
   slackReplies: URLSearchParams[];
@@ -108,6 +115,13 @@ function stub(
           });
         }
         return Response.json({ ok: true, ts: "1700.9" });
+      }
+      if (url.includes("views.open")) {
+        const params = new URLSearchParams(await request.clone().text());
+        captured.views?.push(
+          JSON.parse(params.get("view") ?? "{}") as Record<string, unknown>
+        );
+        return Response.json({ ok: true, view: { id: "V1" } });
       }
       if (url.includes("chat.postEphemeral")) {
         captured.slackEphemerals.push(
@@ -183,21 +197,18 @@ async function interactivityRequest(payload: unknown): Promise<Request> {
   });
 }
 
-/** A freeform-modal submission, as Slack posts it after the typed answer. */
+/** A typed answer submitted from the "Other…" modal, as Slack posts it. */
 function freeformSubmission(requestId: string, text: string) {
   return {
     type: "view_submission",
     user: { id: "U1" },
     view: {
-      callback_id: SLACK_FREEFORM_CALLBACK_ID,
+      callback_id: FORM_CALLBACK_ID,
       private_metadata: requestId,
       state: {
         values: {
-          [SLACK_FREEFORM_BLOCK_ID]: {
-            [SLACK_FREEFORM_ACTION_ID]: {
-              type: "plain_text_input",
-              value: text
-            }
+          [otherBlockId(0)]: {
+            value: { type: "plain_text_input", value: text }
           }
         }
       }
@@ -207,27 +218,20 @@ function freeformSubmission(requestId: string, text: string) {
 
 /** The prompt `seedParkedRequest` stands for, as `deliverHitlRequest` posts it. */
 function promptBlocks(requestId: string): unknown[] {
-  return inputRequestToSlackBlocks({
-    prompt: "Proceed?",
-    requestId,
-    display: "buttons",
-    options: [
-      { id: "approve", label: "Approve" },
-      { id: "reject", label: "Reject" }
-    ]
-  });
+  return requestBlocks(choiceForm(requestId));
 }
 
 /**
- * A click on the prompt. Slack sends the message's blocks as they are at the
- * moment of the click; pass `blocks` to click a prompt the gatekeeper has since
- * changed.
+ * A click on the prompt's button for `optionId`. Slack sends the message's
+ * blocks as they are at the moment of the click; pass `blocks` to click a
+ * prompt the gatekeeper has since changed.
  */
 function buttonAction(
   requestId: string,
   optionId: string,
   blocks: unknown[] = promptBlocks(requestId)
 ) {
+  const index = ["approve", "reject"].indexOf(optionId);
   return {
     type: "block_actions",
     user: { id: "U1" },
@@ -236,15 +240,19 @@ function buttonAction(
     message: { ts: "1700.9", blocks },
     actions: [
       {
-        action_id: `input:${requestId}:button:0`,
-        value: optionId,
+        action_id: `${PICK_ACTION}-${index}`,
+        value: JSON.stringify({ r: requestId, q: 0, o: index }),
         type: "button"
       }
     ]
   };
 }
 
-async function seedParkedRequest(requestId: string, promptText = "Proceed?") {
+async function seedParkedRequest(
+  requestId: string,
+  prompt = "Proceed?",
+  request = choiceForm(requestId, prompt)
+) {
   await createAgentTask({
     token: "tok-1",
     taskId: "task-1",
@@ -255,7 +263,7 @@ async function seedParkedRequest(requestId: string, promptText = "Proceed?") {
     eventId: "Ev1"
   });
   await suspendForInput("tok-1");
-  await createHitlRequest({
+  await createHitlForm({
     requestId,
     token: "tok-1",
     taskId: "task-1",
@@ -263,17 +271,11 @@ async function seedParkedRequest(requestId: string, promptText = "Proceed?") {
     agentName: "remoteagent",
     channelId: "C1",
     threadTs: "1700.1",
-    requestKind: "approval",
-    promptText,
-    optionsJson: JSON.stringify([
-      { id: "approve", label: "Approve" },
-      { id: "reject", label: "Reject" }
-    ]),
-    allowFreeform: false,
+    request,
     deadlineAt: Math.floor(Date.now() / 1000) + 600
   });
   // Simulate the prompt having been posted, so the answered-state update targets it.
-  await setHitlSlackMessageTs(requestId, "1700.9");
+  await setHitlFormMessageTs(requestId, "1700.9");
 }
 
 beforeEach(async () => {
@@ -355,10 +357,10 @@ describe("handleSlackInteractivity", () => {
     expect(res.status).toBe(200);
 
     // Request is now answered by U1.
-    const row = await getHitlRequest("req-1");
+    const row = await getHitlForm("req-1");
     expect(row?.status).toBe("answered");
     expect(row?.answeredBy).toBe("U1");
-    expect(row?.answeredOptionId).toBe("approve");
+    expect(row?.answersJson).toEqual({ q1: { optionIds: ["approve"] } });
 
     // The prompt said the answer was on its way, then that it was answered.
     expect(captured.slackUpdates).toHaveLength(2);
@@ -379,7 +381,7 @@ describe("handleSlackInteractivity", () => {
     expect(answer).toMatchObject({
       type: HITL_RESPONSE_TYPE,
       requestId: "req-1",
-      optionId: "approve"
+      answers: { q1: { optionIds: ["approve"] } }
     });
     // The human-readable option label rides in the text part.
     expect(partsText(resume.parts)).toBe("Approve");
@@ -438,7 +440,7 @@ describe("handleSlackInteractivity", () => {
 
     // The answer is recorded and the prompt shows the answered state — the
     // human's action stands; only the handoff to the agent failed.
-    const row = await getHitlRequest("req-3");
+    const row = await getHitlForm("req-3");
     expect(row?.status).toBe("answered");
     expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
 
@@ -500,7 +502,7 @@ describe("an answer that doesn't reach the agent", () => {
     expect(new Set(captured.resumeMessages.map((m) => m.messageId)).size).toBe(
       1
     );
-    expect((await getHitlRequest("req-retry"))?.status).toBe("answered");
+    expect((await getHitlForm("req-retry"))?.status).toBe("answered");
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("pending");
     expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
     expect(captured.slackEphemerals).toEqual([]);
@@ -514,10 +516,10 @@ describe("an answer that doesn't reach the agent", () => {
     await click(buttonAction("req-lost", "approve"));
 
     expect(captured.resumeMessages).toHaveLength(3);
-    const row = await getHitlRequest("req-lost");
+    const row = await getHitlForm("req-lost");
     expect(row?.status).toBe("awaiting");
     expect(row?.answeredBy).toBeNull();
-    expect(row?.answeredOptionId).toBeNull();
+    expect(row?.answersJson).toBeNull();
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("awaiting-input");
 
     // First "sending", with the controls gone; last, the prompt exactly as it was
@@ -547,7 +549,7 @@ describe("an answer that doesn't reach the agent", () => {
       )
     );
 
-    expect((await getHitlRequest("req-again"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-again"))?.status).toBe("awaiting");
     expect(notesOf(captured.slackUpdates.at(-1))).toEqual([
       "⚠️ <@U1>'s answer (*Reject*) didn't reach *remoteagent* — please answer again."
     ]);
@@ -561,7 +563,7 @@ describe("an answer that doesn't reach the agent", () => {
     );
 
     expect(captured.resumeMessages).toHaveLength(7);
-    expect((await getHitlRequest("req-again"))?.status).toBe("answered");
+    expect((await getHitlForm("req-again"))?.status).toBe("answered");
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("pending");
     expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
   });
@@ -582,7 +584,7 @@ describe("an answer that doesn't reach the agent", () => {
 
     const done = click(buttonAction("req-hung", "approve"));
     await vi.waitFor(async () => {
-      expect((await getHitlRequest("req-hung"))?.status).toBe("awaiting");
+      expect((await getHitlForm("req-hung"))?.status).toBe("awaiting");
     });
     release();
     await done;
@@ -598,14 +600,14 @@ describe("an answer that doesn't reach the agent", () => {
       onUpdate: async (params) => {
         // A final status closes the task's prompts while the restore is in flight.
         if (params.get("text") === "Proceed?") {
-          await cancelHitlRequestsByToken("tok-1");
+          await cancelHitlFormsByToken("tok-1");
         }
       }
     });
 
     await click(buttonAction("req-race", "approve"));
 
-    expect((await getHitlRequest("req-race"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-race"))?.status).toBe("canceled");
     const last = captured.slackUpdates.at(-1);
     expect(last?.get("text")).toBe(TASK_ENDED_NOTE);
     expect(blocksOf(last)).not.toContainEqual(
@@ -621,7 +623,7 @@ describe("an answer that doesn't reach the agent", () => {
     await click(freeformSubmission("req-typed", "ship it on friday"));
 
     expect(captured.resumeMessages).toHaveLength(3);
-    expect((await getHitlRequest("req-typed"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-typed"))?.status).toBe("awaiting");
     // A modal submission carries no blocks, so the prompt was never touched.
     expect(captured.slackUpdates).toEqual([]);
     expect(captured.slackEphemerals).toHaveLength(1);
@@ -644,7 +646,7 @@ describe("an answer that doesn't reach the agent", () => {
     await click(buttonAction("req-ended", "approve"));
 
     // Re-opening would put live controls back on a finished task.
-    expect((await getHitlRequest("req-ended"))?.status).toBe("answered");
+    expect((await getHitlForm("req-ended"))?.status).toBe("answered");
     expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
     expect(captured.slackEphemerals).toEqual([]);
   });
@@ -658,7 +660,7 @@ describe("an answer that doesn't reach the agent", () => {
 
     expect(waits).toEqual([]);
     expect(captured.resumeMessages).toHaveLength(1);
-    expect((await getHitlRequest("req-refused"))?.status).toBe("answered");
+    expect((await getHitlForm("req-refused"))?.status).toBe("answered");
     expect(captured.slackReplies).toHaveLength(1);
   });
 });
@@ -700,7 +702,7 @@ describe("an over-long freeform answer", () => {
     expect(await res.json()).toEqual({
       response_action: "errors",
       errors: {
-        [SLACK_FREEFORM_BLOCK_ID]: expect.stringContaining("too long")
+        [otherBlockId(0)]: expect.stringContaining("too long")
       }
     });
 
@@ -708,7 +710,7 @@ describe("an over-long freeform answer", () => {
     // that matters — the prompt is still open for a shorter answer.
     expect(captured.resumeMessages).toEqual([]);
     expect(captured.slackUpdates).toEqual([]);
-    expect((await getHitlRequest("req-long"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-long"))?.status).toBe("awaiting");
     expect((await getAgentTaskByToken("tok-1"))?.status).toBe("awaiting-input");
   });
 
@@ -730,7 +732,7 @@ describe("an over-long freeform answer", () => {
     expect(await res.text()).toBe("");
     expect(captured.resumeMessages).toHaveLength(1);
     expect(partsText(captured.resumeMessages[0].parts)).toBe(answer);
-    expect((await getHitlRequest("req-exact"))?.status).toBe("answered");
+    expect((await getHitlForm("req-exact"))?.status).toBe("answered");
   });
 
   it("measures bytes, not characters", async () => {
@@ -755,7 +757,7 @@ describe("an over-long freeform answer", () => {
     expect(
       ((await res.json()) as { response_action?: string }).response_action
     ).toBe("errors");
-    expect((await getHitlRequest("req-utf8"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-utf8"))?.status).toBe("awaiting");
   });
 });
 
@@ -828,5 +830,137 @@ describe("the answered state", () => {
       })
     );
     errors.mockRestore();
+  });
+});
+
+/**
+ * A form of several questions: answered in a modal opened from the prompt's
+ * one button, and sent as one answer per question.
+ */
+describe("a form of several questions", () => {
+  const form: HitlRequestData = {
+    type: HITL_REQUEST_TYPE,
+    requestId: "req-form",
+    questions: [
+      {
+        kind: "choice",
+        id: "db",
+        prompt: "Which database?",
+        header: "Database",
+        options: [
+          { id: "pg", label: "Postgres" },
+          { id: "lite", label: "SQLite" }
+        ]
+      },
+      { kind: "text", id: "name", prompt: "Name it?" }
+    ]
+  };
+
+  const emptyCapture = (): Captured => ({
+    slackUpdates: [],
+    slackEphemerals: [],
+    slackReplies: [],
+    resumeMessages: [],
+    views: []
+  });
+
+  async function send(payload: unknown): Promise<Response> {
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(payload),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+    return res;
+  }
+
+  function submission(values: Record<string, Record<string, unknown>>) {
+    return {
+      type: "view_submission",
+      user: { id: "U1" },
+      view: {
+        callback_id: FORM_CALLBACK_ID,
+        private_metadata: "req-form",
+        state: { values }
+      }
+    };
+  }
+
+  it("opens the form from the prompt's Answer button", async () => {
+    await seedParkedRequest("req-form", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+    const [answer] = (
+      requestBlocks(form).find(
+        (b) => (b as { type?: string }).type === "actions"
+      ) as { elements: { action_id: string; value: string }[] }
+    ).elements;
+
+    await send({
+      type: "block_actions",
+      user: { id: "U1" },
+      trigger_id: "trig-1",
+      channel: { id: "C1" },
+      message: { ts: "1700.9", blocks: requestBlocks(form) },
+      actions: [{ ...answer, type: "button" }]
+    });
+
+    expect(captured.views).toHaveLength(1);
+    expect(captured.views![0]).toMatchObject({
+      callback_id: FORM_CALLBACK_ID,
+      private_metadata: "req-form"
+    });
+  });
+
+  it("sends one answer per question, keyed by its id", async () => {
+    await seedParkedRequest("req-form", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+
+    const res = await send(
+      submission({
+        "q0:choice": {
+          value: { type: "radio_buttons", selected_option: { value: "0" } }
+        },
+        "q0:other": { value: { type: "plain_text_input", value: null } },
+        "q1:text": { value: { type: "plain_text_input", value: "forms" } }
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const resume = captured.resumeMessages[0]!;
+    expect(resume.parts.map(dataOf).find((d) => d !== undefined)).toMatchObject(
+      {
+        requestId: "req-form",
+        answers: { db: { optionIds: ["pg"] }, name: { text: "forms" } }
+      }
+    );
+    expect(partsText(resume.parts)).toBe(
+      "Database\nPostgres\n\nName it?\nforms"
+    );
+    expect((await getHitlForm("req-form"))?.status).toBe("answered");
+  });
+
+  it("keeps the modal open on a question left unanswered, claiming nothing", async () => {
+    await seedParkedRequest("req-form", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+
+    const res = await send(
+      submission({
+        "q0:choice": {
+          value: { type: "radio_buttons", selected_option: null }
+        },
+        "q0:other": { value: { type: "plain_text_input", value: "  " } },
+        "q1:text": { value: { type: "plain_text_input", value: "forms" } }
+      })
+    );
+
+    expect(await res.json()).toEqual({
+      response_action: "errors",
+      errors: { "q0:choice": expect.stringContaining("Pick one") }
+    });
+    expect(captured.resumeMessages).toEqual([]);
+    expect((await getHitlForm("req-form"))?.status).toBe("awaiting");
   });
 });

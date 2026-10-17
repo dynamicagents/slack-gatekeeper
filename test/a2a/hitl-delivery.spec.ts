@@ -7,14 +7,14 @@ import {
   createAgentTask,
   getAgentTaskByToken
 } from "@/db/models/agent-tasks";
-import { getHitlRequest } from "@/db/models/hitl-requests";
+import { getHitlForm } from "@/db/models/hitl-forms";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
 import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
-import { HITL_REQUEST_TYPE } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
 import { makeSnapshot } from "../helpers/a2a";
 import { useStorageReset } from "../helpers/storage";
+import { choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -74,12 +74,7 @@ function hitlTask(
   opts: { state?: TaskState; withDataPart?: boolean } = {}
 ): TaskSnapshot {
   const fallback = textPart("Proceed with deletion?");
-  const request = dataPart({
-    type: HITL_REQUEST_TYPE,
-    requestId,
-    requestKind: "approval",
-    prompt: "Proceed with deletion?"
-  });
+  const request = dataPart(choiceForm(requestId, "Proceed with deletion?"));
   return makeSnapshot({
     id: "task-1",
     contextId: "C1:1700.1",
@@ -141,7 +136,7 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect(posts[0].thread_ts).toBe("1700.1");
 
     // Persisted the request, awaiting an answer, with the Slack ts recorded.
-    const req = await getHitlRequest("req-del-1");
+    const req = await getHitlForm("req-del-1");
     expect(req?.status).toBe("awaiting");
     expect(req?.taskId).toBe("task-1");
     expect(req?.contextId).toBe("C1:1700.1");
@@ -186,7 +181,7 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("completed");
     // And the request is closed, not left `awaiting` for the expiry sweep to send
     // a timeout onto a task that is already over.
-    expect((await getHitlRequest("req-race"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-race"))?.status).toBe("canceled");
   });
 
   it("closes a second prompt that fails to park, and only that one", async () => {
@@ -198,9 +193,9 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     // over — so the question it is parked on still stands.
     await deliver(hitlTask("req-second"));
 
-    expect((await getHitlRequest("req-first"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-first"))?.status).toBe("awaiting");
     // Never shown, so never left for the sweep to time out.
-    expect((await getHitlRequest("req-second"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-second"))?.status).toBe("canceled");
     expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
     expect(posts.filter((p) => p.blocks)).toHaveLength(1);
   });
@@ -233,7 +228,7 @@ describe("deliverTaskToSlack — a final status closes the task's open prompt", 
       makeSnapshot({ id: "task-1", state, text: "Gave up.", messageId: "f1" })
     );
 
-    expect((await getHitlRequest("req-final"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-final"))?.status).toBe("canceled");
     const updates = posts.filter((p) => p.method === "chat.update");
     expect(updates).toHaveLength(1);
     expect(updates[0].ts).toBe("1700.9");
@@ -260,7 +255,7 @@ describe("deliverTaskToSlack — a final status closes the task's open prompt", 
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
       "awaiting-input"
     );
-    expect((await getHitlRequest("req-retry"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-retry"))?.status).toBe("canceled");
 
     // The retry posts the reply and completes, without editing the prompt again.
     stubFetch(posts);
@@ -283,7 +278,7 @@ describe("deliverTaskToSlack — a final status closes the task's open prompt", 
       })
     );
 
-    expect((await getHitlRequest("req-open"))?.status).toBe("awaiting");
+    expect((await getHitlForm("req-open"))?.status).toBe("awaiting");
     expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
   });
 });

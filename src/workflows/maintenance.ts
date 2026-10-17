@@ -2,9 +2,9 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { sweepStaleAgentTasks } from "@/db/models/agent-tasks";
 import {
-  expireStaleHitlRequests,
-  sweepStaleHitlRequests
-} from "@/db/models/hitl-requests";
+  expireStaleHitlForms,
+  sweepStaleHitlForms
+} from "@/db/models/hitl-forms";
 import { markHitlPromptResolved } from "@/a2a/notifications/hitl";
 import { timeoutAgentTask } from "@/a2a/dispatch";
 
@@ -19,7 +19,7 @@ type MaintenanceWorkflowPayload = Record<string, never>;
  */
 async function expireHitlRequests(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
-  const expired = await expireStaleHitlRequests(now);
+  const expired = await expireStaleHitlForms(now);
   for (const row of expired) {
     try {
       await markHitlPromptResolved(
@@ -34,7 +34,7 @@ async function expireHitlRequests(): Promise<void> {
       });
     }
   }
-  await sweepStaleHitlRequests();
+  await sweepStaleHitlForms();
 }
 
 export class MaintenanceWorkflow extends WorkflowEntrypoint<
