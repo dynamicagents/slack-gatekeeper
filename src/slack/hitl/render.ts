@@ -91,11 +91,39 @@ function isOpenFence(text: string): boolean {
   return (text.split(FENCE).length - 1) % 2 === 1;
 }
 
+/** `text` cut to `max` with a mark, and any code block it leaves open closed. */
+function clipMrkdwn(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = clip(text, Math.max(1, max - `\n${FENCE}`.length));
+  return isOpenFence(cut) ? `${cut}\n${FENCE}` : cut;
+}
+
+/**
+ * Where a cut at `at` may fall instead, so it breaks no markup: before a
+ * `<…>` token it would land in — a link or a mention; Slack escapes a literal
+ * `<` as `&lt;`, so an unescaped one opens a token — and before a ``` it would
+ * land one or two characters into. `0` when the token starts the text, which
+ * then cannot stay whole in any piece.
+ */
+function outsideMarkup(text: string, at: number): number {
+  let cut = at;
+  const open = text.lastIndexOf("<", cut - 1);
+  if (open !== -1 && text.lastIndexOf(">", cut - 1) < open) cut = open;
+  for (const k of [cut - 2, cut - 1]) {
+    if (k >= 0 && text.startsWith(FENCE, k)) return k;
+  }
+  return cut;
+}
+
 /**
  * Split mrkdwn into pieces of at most `max` characters, at a paragraph break,
- * then a line break, then a space. A code block split across pieces is closed
- * at the end of one and reopened at the start of the next, so neither piece
- * renders the rest of the message as code.
+ * then a line break, then a space — never inside a link, a mention or a code
+ * fence. A code block split across pieces is closed at the end of one and
+ * reopened at the start of the next, so neither piece renders the rest of the
+ * message as code.
+ *
+ * A link or mention longer than a whole piece cannot stay whole in any, so it
+ * is cut like prose: the link stops working, and its text still reads.
  */
 export function splitMrkdwn(text: string, max = SECTION_TEXT): string[] {
   const pieces: string[] = [];
@@ -104,6 +132,13 @@ export function splitMrkdwn(text: string, max = SECTION_TEXT): string[] {
   let rest = text;
   let reopen = false;
   while (rest.length > 0) {
+    // The block the last piece closed ends right here: reopening it would
+    // leave an empty one.
+    if (reopen && rest.startsWith(FENCE)) {
+      rest = rest.slice(FENCE.length).replace(/^\n/, "");
+      reopen = false;
+      continue;
+    }
     const prefix = reopen ? `${FENCE}\n` : "";
     let piece: string;
     if (prefix.length + rest.length <= max - reserve) {
@@ -124,6 +159,11 @@ export function splitMrkdwn(text: string, max = SECTION_TEXT): string[] {
       }
       if (cut < floor) {
         cut = room;
+        skip = 0;
+      }
+      const safe = outsideMarkup(rest, cut);
+      if (safe > 0 && safe !== cut) {
+        cut = safe;
         skip = 0;
       }
       piece = prefix + rest.slice(0, cut);
@@ -176,21 +216,29 @@ function listsOptions(options: readonly SlackInputOption[]): boolean {
   );
 }
 
-function optionListBlocks(
+/**
+ * The options as a numbered list in at most `budget` characters, or `undefined`
+ * when not even their headings fit. Every heading is kept whatever it costs the
+ * descriptions — a button showing "2" means nothing once the line naming 2 is
+ * gone — and the descriptions share what room is left.
+ */
+function optionList(
   options: readonly SlackInputOption[],
   budget: number
-): SectionBlock[] {
-  const list = options
-    .map((o, i) => {
-      const head = `*${i + 1}.* ${toMrkdwn(o.label)}`;
-      return o.description ? `${head}\n${toMrkdwn(o.description)}` : head;
-    })
-    .join("\n\n");
-  return sections(
-    list,
-    budget,
-    "The options are cut here: they run past what one Slack message holds."
+): string | undefined {
+  const heads = options.map((o, i) => `*${i + 1}.* ${toMrkdwn(o.label)}`);
+  const details = options.map((o) =>
+    o.description ? toMrkdwn(o.description) : ""
   );
+  const list = (shown: readonly string[]) =>
+    heads.map((h, i) => (shown[i] ? `${h}\n${shown[i]}` : h)).join("\n\n");
+  const whole = list(details);
+  if (whole.length <= budget) return whole;
+  const described = details.filter(Boolean).length;
+  const room = budget - list([]).length - described;
+  if (room < 0) return undefined;
+  const share = Math.floor(room / described);
+  return list(details.map((d) => (d && share > 0 ? clipMrkdwn(d, share) : "")));
 }
 
 function numberedLabel(
@@ -207,21 +255,24 @@ function numberedLabel(
 export function requestBlocks(req: SlackInputRequest): unknown[] {
   const options = req.options ?? [];
   const prompt = promptBlocks(req.prompt);
-  const listed = listsOptions(options);
-  const list = listed
-    ? optionListBlocks(options, MESSAGE_TEXT - textLength(prompt))
-    : [];
+  const list = listsOptions(options)
+    ? optionList(options, MESSAGE_TEXT - textLength(prompt))
+    : undefined;
   const controls = inputRequestToSlackBlocks({
     ...req,
-    options: listed
-      ? options.map((o, i) => ({
-          ...o,
-          label: numberedLabel(i, o.label, req.display)
-        }))
-      : options
+    // Numbered only beside the list that names each number. Without one, a
+    // label is cut where the reader can see it, not where the adapter would.
+    options: options.map((o, i) => ({
+      ...o,
+      label:
+        list !== undefined
+          ? numberedLabel(i, o.label, req.display)
+          : clip(o.label, OPTION_TEXT)
+    }))
   });
+  const listBlocks = list ? splitMrkdwn(list).map(section) : [];
   // The adapter leads with its own prompt section, cut at 3,000 without a mark.
-  return [...prompt, ...list, ...controls.slice(1)];
+  return [...prompt, ...listBlocks, ...controls.slice(1)];
 }
 
 /** A prompt closed without an answer — expired, or its task over — under `note`. */
@@ -259,7 +310,11 @@ export function answeredFallbackBlocks(answeredBy: string): unknown[] {
   return [section(`:white_check_mark: Answered by <@${answeredBy}>.`)];
 }
 
-/** The modal a typed answer is written in, with the question above it. */
+/**
+ * The modal a typed answer is written in, with the whole question above it —
+ * not cut to a message's budget, which a modal does not share: a prompt as long
+ * as one can be stored is a handful of sections, well inside a view's 100.
+ */
 export function freeformView(input: {
   requestId: string;
   prompt: string;
@@ -272,7 +327,7 @@ export function freeformView(input: {
     submit: { type: "plain_text", text: "Submit" },
     close: { type: "plain_text", text: "Cancel" },
     blocks: [
-      ...promptBlocks(input.prompt),
+      ...splitMrkdwn(toMrkdwn(input.prompt)).map(section),
       {
         type: "input",
         block_id: SLACK_FREEFORM_BLOCK_ID,

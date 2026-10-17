@@ -253,3 +253,75 @@ describe("fallbackText", () => {
     expect(fallbackText("short")).toBe("short");
   });
 });
+
+describe("what a cut may not lose", () => {
+  it("keeps a Slack link whole when the last space before the cut is inside it", () => {
+    const link = `<https://example.com/${"p".repeat(30)}|a label ${"with words ".repeat(7)}to end on>`;
+    const pieces = splitMrkdwn(`${"word ".repeat(576)}${link} after`);
+    expect(pieces.some((p) => p.includes(link))).toBe(true);
+    for (const p of pieces) {
+      expect(p.split("<").length).toBe(p.split(">").length);
+    }
+  });
+
+  it("keeps a closing fence whole when a hard cut lands on it", () => {
+    const pieces = splitMrkdwn(`\`\`\`\n${"x".repeat(2987)}\`\`\`After`);
+    const last = pieces.find((p) => p.includes("After"))!;
+    const before = last.slice(0, last.indexOf("After"));
+    expect((before.split("```").length - 1) % 2).toBe(0);
+    expect(pieces.join("")).toContain("x".repeat(2987)); // The block closed at the cut is not reopened only to close again.
+    expect(pieces.some((p) => p.startsWith("```\n```"))).toBe(false);
+  });
+
+  it("cuts a link longer than a whole section like prose, every piece within the limit", () => {
+    const link = `<https://example.com/${"p".repeat(4_000)}|label>`;
+    const pieces = splitMrkdwn(`Before ${link} after`);
+    for (const p of pieces) expect(p.length).toBeLessThanOrEqual(3_000);
+    expect(pieces.join("")).toContain("p".repeat(2_000));
+  });
+
+  it("names every numbered option, however long the prompt and descriptions", () => {
+    const blocks = requestBlocks({
+      requestId: "req-budget",
+      prompt: "p ".repeat(4_500),
+      display: "buttons",
+      options: [
+        { id: "a", label: "First choice", description: "d ".repeat(4_500) },
+        { id: "b", label: "Second choice" }
+      ]
+    });
+    expect(messageViolations(blocks)).toEqual([]);
+    const text = blocksText(blocks);
+    expect(text).toContain("*1.* First choice");
+    expect(text).toContain("*2.* Second choice");
+  });
+
+  it("keeps labels on the buttons when not even the options' headings fit", () => {
+    const blocks = requestBlocks({
+      requestId: "req-heads",
+      prompt: "p ".repeat(4_500),
+      display: "buttons",
+      options: Array.from({ length: 5 }, (_, i) => ({
+        id: `o${i}`,
+        label: `${i} ${"long label ".repeat(100)}`
+      }))
+    });
+    expect(messageViolations(blocks)).toEqual([]);
+    const labels = (
+      blocks.find((b) => (b as { type?: string }).type === "actions") as {
+        elements: { text: { text: string } }[];
+      }
+    ).elements.map((e) => e.text.text);
+    expect(labels[0]).toMatch(/^0 long label .*…$/);
+    expect(labels.every((l) => l.length <= 75)).toBe(true);
+  });
+
+  it("shows the modal the whole question, past what a message holds", () => {
+    const view = freeformView({
+      requestId: "req-modal",
+      prompt: `${"Context. ".repeat(1_000)}\n\nFinal question?`
+    });
+    expect(viewViolations(view)).toEqual([]);
+    expect(blocksText(view.blocks)).toContain("Final question?");
+  });
+});
