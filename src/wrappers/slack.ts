@@ -3,7 +3,8 @@ import {
   assertSlackOk,
   postSlackEphemeral,
   updateSlackMessage,
-  openSlackView
+  openSlackView,
+  SlackApiError
 } from "@chat-adapter/slack/api";
 import type { SlackApiResponse } from "@chat-adapter/slack/api";
 import { env } from "cloudflare:workers";
@@ -211,9 +212,8 @@ export async function postReply(
 
 // ---------------------------------------------------------------------------
 // Block Kit — interactive messages for human-in-the-loop prompts. postReply is
-// text-only; these carry `blocks`. Prompt/label text must already be sanitized
-// by the caller (as with agent replies), since blocks are structured and never
-// pass through slackifyMarkdown.
+// text-only; these carry `blocks`, built and sanitized by the caller
+// (`src/slack/hitl/render.ts`).
 // ---------------------------------------------------------------------------
 
 /**
@@ -245,6 +245,23 @@ export async function postBlocks(input: {
   );
   assertSlackOk("chat.postMessage", res);
   return res.ts ?? null;
+}
+
+/**
+ * A failed Slack call as log fields: the error, plus Slack's own account of it
+ * when it gave one. `invalid_blocks` alone does not say which block broke which
+ * limit; `response_metadata.messages` does.
+ */
+export function slackErrorFields(err: unknown): {
+  err: string;
+  slack?: string[];
+} {
+  const message = err instanceof Error ? err.message : String(err);
+  const detail =
+    err instanceof SlackApiError
+      ? err.response?.response_metadata?.messages
+      : undefined;
+  return detail?.length ? { err: message, slack: detail } : { err: message };
 }
 
 /**

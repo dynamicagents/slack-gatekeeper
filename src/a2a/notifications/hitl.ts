@@ -1,4 +1,3 @@
-import { inputRequestToSlackBlocks } from "@chat-adapter/slack/blocks";
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import { suspendForInput, type AgentTaskRow } from "@/db/models/agent-tasks";
@@ -17,7 +16,17 @@ import {
   type HitlOption
 } from "@/a2a/hitl";
 import type { TaskSnapshot } from "@/a2a/snapshot";
-import { postBlocks, postReply, updateBlocks } from "@/wrappers/slack";
+import {
+  fallbackText,
+  requestBlocks,
+  resolvedBlocks
+} from "@/slack/hitl/render";
+import {
+  postBlocks,
+  postReply,
+  slackErrorFields,
+  updateBlocks
+} from "@/wrappers/slack";
 
 /** Sanitize an agent-authored option (label/description are untrusted output). */
 function sanitizeOption(option: HitlOption): HitlOption {
@@ -34,8 +43,8 @@ function sanitizeOption(option: HitlOption): HitlOption {
  * Render a human-in-the-loop prompt to Slack and park the task.
  *
  * Called from the delivery boundary when an `input-required` snapshot carries a
- * HITL request data part. Sanitizes the agent's prompt/options (Block Kit text never
- * passes through slackifyMarkdown), persists the request keyed by `requestId`
+ * HITL request data part. Sanitizes the agent's prompt/options before they are
+ * stored or shown, persists the request keyed by `requestId`
  * (idempotent — a redelivered push does not double-post), suspends the paired
  * `agent_tasks` row (so the fan-out stays undrained and stray callbacks no-op),
  * then posts the interactive message and records its ts for later updates.
@@ -112,20 +121,12 @@ export async function deliverHitlRequest(
   const ts = await postBlocks({
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
-    blocks: inputRequestToSlackBlocks(slackReq),
-    text: sanitized.prompt,
+    blocks: requestBlocks(slackReq),
+    text: fallbackText(sanitized.prompt),
     username: displayName,
     iconUrl
   });
   if (ts) await setHitlSlackMessageTs(req.requestId, ts);
-}
-
-/** Blocks that show a prompt in a resolved (expired/canceled) state under a note. */
-function resolvedHitlBlocks(promptText: string, note: string): unknown[] {
-  return [
-    { type: "section", text: { type: "mrkdwn", text: promptText } },
-    { type: "context", elements: [{ type: "mrkdwn", text: note }] }
-  ];
 }
 
 /**
@@ -143,13 +144,13 @@ export async function markHitlPromptResolved(
     await updateBlocks({
       channelId: row.channelId,
       ts: row.slackMessageTs,
-      blocks: resolvedHitlBlocks(row.promptText, note),
+      blocks: resolvedBlocks(row.promptText, note),
       text: note
     });
   } catch (err) {
     console.error("[hitl] failed to update resolved prompt", {
       requestId: row.requestId,
-      err: err instanceof Error ? err.message : String(err)
+      ...slackErrorFields(err)
     });
   }
 }
