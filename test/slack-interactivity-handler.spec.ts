@@ -41,6 +41,7 @@ import { dataOf, partsText } from "@/a2a/parts";
 import { agentMessage, makeTask } from "./helpers/a2a";
 import { handleSlackInteractivity } from "@/slack-interactivity-handler";
 import { slackHeaders } from "./helpers/slack";
+import { blocksText, messageViolations } from "./helpers/slack-limits";
 import { useStorageReset } from "./helpers/storage";
 
 useStorageReset();
@@ -70,6 +71,11 @@ function stub(
     failResume?: number;
     /** Runs before each `chat.update` is answered, to hold or interleave it. */
     onUpdate?: (params: URLSearchParams) => Promise<void>;
+    /**
+     * Refuse a `chat.update` the way Slack refuses one, even if its blocks fit:
+     * return the `response_metadata.messages` to refuse it with.
+     */
+    refuseUpdate?: (params: URLSearchParams) => string[] | undefined;
   } = {}
 ) {
   let failuresLeft = opts.failResume ?? 0;
@@ -88,6 +94,19 @@ function stub(
         const params = new URLSearchParams(await request.clone().text());
         captured.slackUpdates.push(params);
         await opts.onUpdate?.(params);
+        // Refuse what real Slack refuses, so an answered state that would not
+        // render cannot pass here as one that did.
+        const violations = messageViolations(blocksOf(params));
+        const refusal = violations.length
+          ? violations
+          : opts.refuseUpdate?.(params);
+        if (refusal) {
+          return Response.json({
+            ok: false,
+            error: "invalid_blocks",
+            response_metadata: { messages: refusal }
+          });
+        }
         return Response.json({ ok: true, ts: "1700.9" });
       }
       if (url.includes("chat.postEphemeral")) {
@@ -225,7 +244,7 @@ function buttonAction(
   };
 }
 
-async function seedParkedRequest(requestId: string) {
+async function seedParkedRequest(requestId: string, promptText = "Proceed?") {
   await createAgentTask({
     token: "tok-1",
     taskId: "task-1",
@@ -245,7 +264,7 @@ async function seedParkedRequest(requestId: string) {
     channelId: "C1",
     threadTs: "1700.1",
     requestKind: "approval",
-    promptText: "Proceed?",
+    promptText,
     optionsJson: JSON.stringify([
       { id: "approve", label: "Approve" },
       { id: "reject", label: "Reject" }
@@ -737,5 +756,77 @@ describe("an over-long freeform answer", () => {
       ((await res.json()) as { response_action?: string }).response_action
     ).toBe("errors");
     expect((await getHitlRequest("req-utf8"))?.status).toBe("awaiting");
+  });
+});
+
+/**
+ * The prompt once answered. It re-shows the question with the answer under it,
+ * so a long question and a long answer together must still fit one message —
+ * and the agent is sent the answer whole, however much of it Slack shows.
+ */
+describe("the answered state", () => {
+  const emptyCapture = (): Captured => ({
+    slackUpdates: [],
+    slackEphemerals: [],
+    slackReplies: [],
+    resumeMessages: []
+  });
+
+  async function submit(action: unknown): Promise<void> {
+    const ctx = createExecutionContext();
+    await handleSlackInteractivity(await interactivityRequest(action), ctx);
+    await waitOnExecutionContext(ctx);
+  }
+
+  const longQuestion = Array.from(
+    { length: 40 },
+    (_, i) => `Paragraph ${i + 1}: ${"some context. ".repeat(8)}`
+  ).join("\n\n");
+
+  it("shows a long typed answer under a long question, cut to fit", async () => {
+    await seedParkedRequest("req-essay", longQuestion);
+    const captured = emptyCapture();
+    stub(captured);
+
+    const answer = "I never merge work in progress. ".repeat(400);
+    await submit(freeformSubmission("req-essay", answer));
+
+    expect(partsText(captured.resumeMessages[0].parts)).toBe(answer.trim());
+    expect(captured.slackUpdates).toHaveLength(1);
+    const update = captured.slackUpdates[0];
+    expect(isAnswered(update)).toBe(true);
+    expect(update.get("text")?.length).toBeLessThanOrEqual(3_000);
+    const text = blocksText(blocksOf(update));
+    expect(text).toContain("Paragraph 40:");
+    expect(text).toContain("the agent has the full answer");
+  });
+
+  it("falls back to an 'answered by' line when Slack refuses the answered state, logging why", async () => {
+    await seedParkedRequest("req-refused-blocks");
+    const captured = emptyCapture();
+    const why =
+      "[ERROR] failed to match all allowed schemas [json-pointer:/blocks/1]";
+    let refused = false;
+    stub(captured, {
+      refuseUpdate: () => (refused ? undefined : ((refused = true), [why]))
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await submit(freeformSubmission("req-refused-blocks", "ship it"));
+
+    expect(captured.slackUpdates).toHaveLength(2);
+    const fallback = blocksOf(captured.slackUpdates[1]);
+    expect(fallback).not.toContainEqual(
+      expect.objectContaining({ type: "actions" })
+    );
+    expect(blocksText(fallback)).toContain("Answered by <@U1>");
+    expect(errors).toHaveBeenCalledWith(
+      "[hitl] failed to update answered prompt",
+      expect.objectContaining({
+        err: "Slack chat.update failed: invalid_blocks",
+        slack: [why]
+      })
+    );
+    errors.mockRestore();
   });
 });

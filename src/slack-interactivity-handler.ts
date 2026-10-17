@@ -9,8 +9,6 @@ import type {
 } from "@chat-adapter/slack/webhook";
 import {
   parseSlackInputResponse,
-  answeredSlackInputBlocks,
-  buildSlackFreeformView,
   parseSlackFreeformValue,
   SLACK_FREEFORM_ACTION_PREFIX,
   SLACK_FREEFORM_BLOCK_ID,
@@ -32,7 +30,18 @@ import {
   TASK_ENDED_NOTE
 } from "@/a2a/notifications/hitl";
 import { resumeAgentTask, type ResumeOutcome } from "@/a2a/dispatch";
-import { postEphemeral, updateBlocks, openView } from "@/wrappers/slack";
+import {
+  answeredBlocks,
+  answeredFallbackBlocks,
+  fallbackText,
+  freeformView
+} from "@/slack/hitl/render";
+import {
+  postEphemeral,
+  updateBlocks,
+  openView,
+  slackErrorFields
+} from "@/wrappers/slack";
 import { isRecord } from "@/util/json";
 
 const OK = () => new Response("ok", { status: 200 });
@@ -62,11 +71,6 @@ function alreadyResolvedText(row: HitlRequestRow): string {
     default:
       return "That prompt is no longer open.";
   }
-}
-
-/** Re-render the original prompt above the answered state, so context survives. */
-function promptSectionBlock(row: HitlRequestRow): unknown {
-  return { type: "section", text: { type: "mrkdwn", text: row.promptText } };
 }
 
 /**
@@ -189,7 +193,7 @@ async function answerHitl(
         }).catch((err: unknown) => {
           console.error("[hitl] failed to show the answer as sending", {
             requestId,
-            err: err instanceof Error ? err.message : String(err)
+            ...slackErrorFields(err)
           });
         })
       : undefined;
@@ -217,25 +221,48 @@ async function answerHitl(
   // Delivered, refused (the answer stands, and the thread has been told), or
   // never delivered to a task that has since ended. Either way someone answered,
   // and the prompt must stop offering controls.
-  if (ts) {
-    try {
-      await updateBlocks({
-        channelId: claimed.channelId,
-        ts,
-        blocks: answeredSlackInputBlocks({
-          answer: label,
-          promptBlock: promptSectionBlock(claimed),
-          userId: input.answeredBy
-        }),
-        text: `Answered: ${label}`
-      });
-    } catch (err) {
-      // Cosmetic — the answer is recorded whether or not the prompt says so.
-      console.error("[hitl] failed to update answered prompt", {
-        requestId,
-        err: err instanceof Error ? err.message : String(err)
-      });
-    }
+  if (ts) await showAnswered(claimed, ts, label, input.answeredBy);
+}
+
+/**
+ * Put a prompt in its answered state. Should Slack still refuse it, the prompt
+ * falls back to a bare "answered by" line rather than keep live controls that
+ * would claim an answer already sent.
+ */
+async function showAnswered(
+  row: HitlRequestRow,
+  ts: string,
+  answer: string,
+  answeredBy: string
+): Promise<void> {
+  const text = fallbackText(`Answered: ${answer}`);
+  try {
+    await updateBlocks({
+      channelId: row.channelId,
+      ts,
+      blocks: answeredBlocks({ prompt: row.promptText, answer, answeredBy }),
+      text
+    });
+    return;
+  } catch (err) {
+    // Cosmetic — the answer is recorded whether or not the prompt says so.
+    console.error("[hitl] failed to update answered prompt", {
+      requestId: row.requestId,
+      ...slackErrorFields(err)
+    });
+  }
+  try {
+    await updateBlocks({
+      channelId: row.channelId,
+      ts,
+      blocks: answeredFallbackBlocks(answeredBy),
+      text
+    });
+  } catch (err) {
+    console.error("[hitl] failed to mark the prompt answered", {
+      requestId: row.requestId,
+      ...slackErrorFields(err)
+    });
   }
 }
 
@@ -259,14 +286,14 @@ async function offerAnswerAgain(
           blocks,
           `⚠️ <@${input.answeredBy}>'s answer (*${noteLabel}*) didn't reach *${row.agentName}* — please answer again.`
         ),
-        text: row.promptText
+        text: fallbackText(row.promptText)
       });
       await closeIfEndedMeanwhile(row.requestId);
       return;
     } catch (err) {
       console.error("[hitl] failed to re-open prompt", {
         requestId: row.requestId,
-        err: err instanceof Error ? err.message : String(err)
+        ...slackErrorFields(err)
       });
     }
   }
@@ -341,16 +368,12 @@ async function handleBlockActions(
       try {
         await openView(
           payload.triggerId,
-          buildSlackFreeformView({
-            metadata: requestId,
-            prompt: row.promptText,
-            title: "Your answer"
-          })
+          freeformView({ requestId, prompt: row.promptText })
         );
       } catch (err) {
         console.error("[hitl] failed to open freeform modal", {
           requestId,
-          err: err instanceof Error ? err.message : String(err)
+          ...slackErrorFields(err)
         });
       }
     }
