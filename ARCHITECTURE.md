@@ -140,7 +140,7 @@ and migrations in `migrations/` (drizzle-generated; `npm run db:generate`).
 | `agents`            | The agent registry — kind (`local`/`remote`), tenant, endpoint, card signing pin, `notify_on`, `task_deadline_seconds` (per-agent reply budget, 1 hour by default) |
 | `agent_channels`    | Which agents are allowed on which channels                                                                                                                         |
 | `agent_tasks`       | Correlation rows tying an A2A task back to its Slack message                                                                                                       |
-| `hitl_forms`        | Human-in-the-loop prompts: the form asked, its answers, and its TTL                                                                                                |
+| `hitl_forms`        | Human-in-the-loop prompts: the form asked, its answers, each person's progress through a paged form, and its TTL                                                   |
 | `hitl_requests`     | Superseded by `hitl_forms` and no longer read; dropped by a later migration                                                                                        |
 | `workspace_configs` | Per-workspace key/value config (see `SystemConfigKeys` / `OperatorConfigKeys`)                                                                                     |
 

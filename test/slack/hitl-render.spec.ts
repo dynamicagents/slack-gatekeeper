@@ -9,16 +9,21 @@ import {
 import {
   answeredBlocks,
   fallbackText,
+  formPages,
   formView,
   requestBlocks,
   resolvedBlocks,
-  splitMrkdwn
+  splitMrkdwn,
+  wordsView
 } from "@/slack/hitl/render";
 import {
+  enteredAnswers,
   formAnswers,
   formErrors,
   pickAnswers,
-  readControl
+  readControl,
+  readViewMeta,
+  viewValues
 } from "@/slack/hitl/answer";
 import {
   blocksText,
@@ -61,6 +66,25 @@ function longForm(): HitlRequestData {
       prompt: `**Question ${n}:** ${"Which way should this go? ".repeat(3)}`
     })),
     preamble
+  );
+}
+
+/** A form of `n` short choices, past what one modal holds from about 33. */
+function manyQuestions(
+  n: number,
+  prompt = "Some context first."
+): HitlRequestData {
+  return form(
+    Array.from({ length: n }, (_, i) => ({
+      kind: "choice" as const,
+      id: `c${i}`,
+      prompt: `Question ${i}?`,
+      options: [
+        { id: "a", label: "A" },
+        { id: "b", label: "B" }
+      ]
+    })),
+    prompt
   );
 }
 
@@ -268,19 +292,10 @@ describe("the open prompt", () => {
     expect(text).not.toContain("@here");
   });
 
-  it("says a form too big for one modal cannot be answered here, rather than offer a button that fails", () => {
-    const blocks = requestBlocks(
-      form(
-        Array.from({ length: 40 }, (_, i) => ({
-          kind: "choice" as const,
-          id: `q${i}`,
-          prompt: `Question ${i}?`,
-          options: [{ id: "a", label: "A" }]
-        }))
-      )
-    );
-    expect(buttonsOf(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain("too large to answer in Slack");
+  it("answers a form too long for one modal from the same Answer button", () => {
+    const blocks = requestBlocks(manyQuestions(40));
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
   });
 });
 
@@ -317,6 +332,18 @@ describe("the controls", () => {
       readControl({ actionId: button!.action_id, value: button!.value })
         ?.requestId
     ).toBe(requestId);
+  });
+
+  it("go back a page from a paged form's later one", () => {
+    const view = formView(manyQuestions(40), 1);
+    const back = (view.blocks as Record<string, unknown>[]).find(
+      (b) => b.type === "actions"
+    ) as { elements: Button[] };
+    const [button] = back.elements;
+    expect(button!.text.text).toBe("← Back");
+    expect(
+      readControl({ actionId: button!.action_id, value: button!.value })
+    ).toEqual({ kind: "back", requestId: "req-1", page: 0 });
   });
 
   it("ignore anything that is not one of them", () => {
@@ -371,7 +398,16 @@ describe("the form's modal", () => {
   it("gives each question an input of its kind, within Slack's limits", () => {
     const view = formView(request);
     expect(viewViolations(view)).toEqual([]);
-    expect(view.private_metadata).toBe("req-1");
+    // One page: sent from it, with nothing to page back to.
+    expect(readViewMeta(view.private_metadata as string)).toEqual({
+      r: "req-1",
+      p: 0
+    });
+    expect(view.title).toEqual({ type: "plain_text", text: "Your answer" });
+    expect(view.submit).toEqual({ type: "plain_text", text: "Send" });
+    expect(
+      (view.blocks as { type: string }[]).some((b) => b.type === "actions")
+    ).toBe(false);
     expect(
       inputsOf(view).map((b) => [b.block_id, b.element.type, b.optional])
     ).toEqual([
@@ -391,12 +427,81 @@ describe("the form's modal", () => {
   });
 
   it("opens one question's words alone, for Other… and Comment…", () => {
-    const view = formView(request, 4);
+    const view = wordsView(request, 4);
     expect(viewViolations(view)).toEqual([]);
+    expect(readViewMeta(view.private_metadata as string)).toEqual({
+      r: "req-1"
+    });
     expect(inputsOf(view).map((b) => [b.block_id, b.optional])).toEqual([
       ["q4:other", false]
     ]);
     expect(blocksText(view.blocks)).toContain("Approve the plan?");
+  });
+
+  /** A page shown again — after Back, or reopened — holds what was entered. */
+  it("holds the answers already given in each input", () => {
+    const view = formView(request, 0, {
+      db: { optionIds: ["lite"], text: "for now" },
+      checks: { optionIds: ["lint", "test"] },
+      region: { optionIds: ["r11"] },
+      name: { text: "forms" },
+      plan: { optionIds: ["reject"], text: "smaller" }
+    });
+    expect(viewViolations(view)).toEqual([]);
+    const initial = inputsOf(view).map((b) => {
+      const e = b.element as Record<string, unknown>;
+      const one = e.initial_option as { value: string } | undefined;
+      const many = e.initial_options as { value: string }[] | undefined;
+      return [
+        b.block_id,
+        e.initial_value ?? one?.value ?? many?.map((o) => o.value)
+      ];
+    });
+    expect(initial).toEqual([
+      ["q0:choice", "1"],
+      ["q0:other", "for now"],
+      ["q1:choice+", ["0", "1"]],
+      ["q1:other", undefined],
+      ["q2:choice", "11"],
+      ["q2:other", undefined],
+      ["q3:text", "forms"],
+      ["q4:approval", "reject"],
+      ["q4:other", "smaller"]
+    ]);
+    // Slack takes an initial option only as one of the element's own.
+    const select = inputsOf(view)[4]!.element;
+    expect(select.options).toContainEqual(select.initial_option);
+  });
+
+  it("reads what is entered so far, unanswered questions left out", () => {
+    expect(
+      enteredAnswers(
+        request,
+        state(
+          ["q0:choice", { picks: [] }],
+          ["q0:other", { text: "" }],
+          ["q3:text", { text: "forms" }]
+        )
+      )
+    ).toEqual({ name: { text: "forms" } });
+  });
+
+  it("reads a modal's inputs from a click inside it, as a submission carries them", () => {
+    const values = viewValues({
+      state: {
+        values: {
+          "q0:choice": {
+            value: { type: "radio_buttons", selected_option: { value: "0" } }
+          },
+          "q3:text": { value: { type: "plain_text_input", value: "forms" } }
+        }
+      }
+    });
+    expect(enteredAnswers(request, values)).toEqual({
+      db: { optionIds: ["pg"] },
+      name: { text: "forms" }
+    });
+    expect(viewValues(undefined)).toEqual([]);
   });
 
   it("reads a submission back as answers keyed by question", () => {
@@ -498,6 +603,62 @@ describe("the form's modal", () => {
     expect(viewViolations(view)).toEqual([]);
     expect(inputsOf(view)[0]!.label.text).toHaveLength(2_000);
     expect(blocksText(view.blocks).replace(/\s/g, "")).toContain(header);
+  });
+});
+
+/**
+ * Past what one modal holds, the form is paged rather than refused: the agent
+ * asked one form, and the gate keeps each page's answers until the last sends
+ * them all.
+ */
+describe("a form too long for one modal", () => {
+  const request = manyQuestions(40);
+
+  it("is paged, every question whole on one page, in order", () => {
+    const pages = formPages(request);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flat()).toEqual(request.questions.map((_, i) => i));
+    pages.forEach((_, p) => {
+      expect(viewViolations(formView(request, p))).toEqual([]);
+    });
+  });
+
+  it("goes Next page by page, and is sent from its last", () => {
+    const pages = formPages(request);
+    const views = pages.map((_, p) => formView(request, p));
+    expect(views.map((v) => (v.title as { text: string }).text)).toEqual(
+      pages.map((_, p) => `Your answer · ${p + 1} of ${pages.length}`)
+    );
+    expect(views.map((v) => (v.submit as { text: string }).text)).toEqual(
+      pages.map((_, p) => (p === pages.length - 1 ? "Send" : "Next"))
+    );
+    expect(
+      views.map((v) => readViewMeta(v.private_metadata as string)?.p)
+    ).toEqual(pages.map((_, p) => p));
+    // The preamble opens the form, once.
+    expect(views.map((v) => blocksText(v.blocks as unknown[]))).toEqual(
+      pages.map((_, p) =>
+        p === 0
+          ? expect.stringContaining("Some context first.")
+          : expect.not.stringContaining("Some context first.")
+      )
+    );
+  });
+
+  it("offers Back on every page but the first", () => {
+    const pages = formPages(request);
+    const backs = pages.map((_, p) =>
+      (formView(request, p).blocks as { type: string }[]).some(
+        (b) => b.type === "actions"
+      )
+    );
+    expect(backs).toEqual(pages.map((_, p) => p > 0));
+  });
+
+  it("keeps a form that fits on one page whole", () => {
+    expect(formPages(manyQuestions(20))).toEqual([
+      Array.from({ length: 20 }, (_, i) => i)
+    ]);
   });
 });
 

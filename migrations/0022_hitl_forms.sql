@@ -21,6 +21,7 @@ CREATE TABLE `hitl_forms` (
 	`status` text DEFAULT 'awaiting' NOT NULL,
 	`answered_by` text,
 	`answers_json` text,
+	`drafts_json` text,
 	`created_at` integer DEFAULT (unixepoch()) NOT NULL,
 	`deadline_at` integer NOT NULL,
 	`answered_at` integer,

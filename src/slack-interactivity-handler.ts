@@ -9,13 +9,16 @@ import type {
 } from "@chat-adapter/slack/webhook";
 import { env } from "cloudflare:workers";
 import { guardTeamId } from "@/slack-webhook-handler";
+import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import {
   getHitlForm,
   claimHitlAnswer,
   reopenHitlForm,
+  hitlDraftOf,
+  saveHitlDraft,
   type HitlFormRow
 } from "@/db/models/hitl-forms";
-import { answersText } from "@/a2a/hitl";
+import { answersText, type HitlRequest } from "@/a2a/hitl";
 import {
   markHitlPromptResolved,
   TASK_ENDED_NOTE
@@ -29,20 +32,26 @@ import {
   answeredBlocks,
   answeredFallbackBlocks,
   fallbackText,
+  formPages,
   formView,
   FORM_CALLBACK_ID,
-  requestFallbackText
+  requestFallbackText,
+  wordsView
 } from "@/slack/hitl/render";
 import {
+  enteredAnswers,
   formAnswers,
   formErrors,
   pickAnswers,
-  readControl
+  readControl,
+  readViewMeta,
+  viewValues
 } from "@/slack/hitl/answer";
 import {
   postEphemeral,
   updateBlocks,
   openView,
+  updateView,
   slackErrorFields
 } from "@/wrappers/slack";
 import { isRecord } from "@/util/json";
@@ -343,16 +352,26 @@ async function handleBlockActions(
       continue;
     }
 
-    if (!payload.triggerId) continue;
     if (row.status !== "awaiting") {
       await tellClosed(row, payload.userId);
       continue;
     }
+
+    if (control.kind === "back") {
+      await goBack(row, payload, control.page);
+      continue;
+    }
+
+    if (!payload.triggerId) continue;
+    // The Answer button opens where this person left a paged form, with what
+    // they had entered; Other… and Comment… open one question's words.
+    const draft = hitlDraftOf(row, payload.userId);
+    const view =
+      control.question === undefined
+        ? formView(row.requestJson, draft?.page, draft?.answers)
+        : wordsView(row.requestJson, control.question);
     try {
-      await openView(
-        payload.triggerId,
-        formView(row.requestJson, control.question)
-      );
+      await openView(payload.triggerId, view);
     } catch (err) {
       console.error("[hitl] failed to open the form", {
         requestId: control.requestId,
@@ -362,29 +381,154 @@ async function handleBlockActions(
   }
 }
 
-/** Send a submitted form's answers, which `formErrors` has let through. */
-async function handleViewSubmission(
+/** The ids of the questions at `positions`. */
+function idsAt(request: HitlRequest, positions: readonly number[]): string[] {
+  return positions.flatMap((i) => {
+    const question = request.questions[i];
+    return question ? [question.id] : [];
+  });
+}
+
+/** `answers` with only the questions `ids` names, or all but them. */
+function answersFor(
+  answers: Record<string, HitlAnswer>,
+  ids: readonly string[],
+  keep: boolean
+): Record<string, HitlAnswer> {
+  const named = new Set(ids);
+  return Object.fromEntries(
+    Object.entries(answers).filter(([id]) => named.has(id) === keep)
+  );
+}
+
+/**
+ * Back, from a later page of a paged form: what the page being left holds is
+ * kept, finished or not, and the earlier page shown holding what was entered.
+ */
+async function goBack(
   row: HitlFormRow,
-  payload: SlackViewSubmissionPayload
+  payload: SlackBlockActionsPayload,
+  page: number
 ): Promise<void> {
-  const answers = formAnswers(row.requestJson, payload.values ?? []);
-  if (!answers) {
-    // `formErrors` refused this on the request path; reaching here means the
-    // modal and the stored form disagree, which a person cannot fix.
+  const view = payload.raw.view;
+  if (!isRecord(view) || typeof view.id !== "string") return;
+  const request = row.requestJson;
+  const leaving = readViewMeta(
+    typeof view.private_metadata === "string"
+      ? view.private_metadata
+      : undefined
+  );
+  const onPage = idsAt(request, formPages(request)[leaving?.p ?? -1] ?? []);
+  const answers = {
+    ...answersFor(
+      hitlDraftOf(row, payload.userId)?.answers ?? {},
+      onPage,
+      false
+    ),
+    ...enteredAnswers(request, viewValues(view))
+  };
+  await saveHitlDraft(row.requestId, payload.userId, { page, answers });
+  try {
+    await updateView(
+      view.id,
+      formView(request, page, answers),
+      typeof view.hash === "string" ? view.hash : undefined
+    );
+  } catch (err) {
+    console.error("[hitl] failed to go back a page", {
+      requestId: row.requestId,
+      ...slackErrorFields(err)
+    });
+  }
+}
+
+/**
+ * A submitted modal: one question's words, or a page of the form. Answered on
+ * the request path, while Slack is still listening — refused here, a mistake
+ * keeps the modal open with what was typed still in it, where refused by the
+ * agent after the claim the question would be spent on an answer nobody holds.
+ *
+ * A page before a paged form's last is kept and the next one shown. The last
+ * sends every page's answers at once, as the agent asked them: one form.
+ */
+async function submitForm(
+  payload: SlackViewSubmissionPayload,
+  ctx: ExecutionContext
+): Promise<Response> {
+  // An empty 200 tells Slack to close the modal.
+  const close = () => new Response(null, { status: 200 });
+  const meta = readViewMeta(payload.privateMetadata);
+  const row = meta ? await getHitlForm(meta.r) : null;
+  if (!meta || !row) return close();
+  const userId = payload.userId;
+  if (row.status !== "awaiting") {
+    ctx.waitUntil(tellClosed(row, userId));
+    return close();
+  }
+  const request = row.requestJson;
+  const values = payload.values ?? [];
+  const send = (answers: Record<string, HitlAnswer>) => {
+    ctx.waitUntil(answerHitl(row.requestId, { answers, answeredBy: userId }));
+    return close();
+  };
+
+  if (meta.p === undefined) {
+    const errors = formErrors(request, values);
+    if (errors) return Response.json({ response_action: "errors", errors });
+    const answers = formAnswers(request, values);
+    return answers ? send(answers) : close();
+  }
+
+  const pages = formPages(request);
+  const page = pages[meta.p];
+  if (!page) return close();
+  const onPage = idsAt(request, page);
+  const kept = hitlDraftOf(row, userId)?.answers ?? {};
+  const errors = formErrors(
+    request,
+    values,
+    answersFor(kept, idsAt(request, pages.slice(0, meta.p).flat()), true)
+  );
+  if (errors) return Response.json({ response_action: "errors", errors });
+  const entered = formAnswers(request, values);
+  if (!entered) {
+    // `formErrors` let it through, so the modal and the stored form disagree,
+    // which a person cannot fix.
     console.error("[hitl] a submitted form answers nothing it asked", {
       requestId: row.requestId
     });
-    return;
+    return close();
   }
-  await answerHitl(row.requestId, { answers, answeredBy: payload.userId });
+  const answers = { ...answersFor(kept, onPage, false), ...entered };
+  const unanswered = (p: number[]) =>
+    idsAt(request, p).some((id) => !Object.hasOwn(answers, id));
+  // On the last page, back to the first page left unanswered, should one be.
+  const next =
+    meta.p + 1 < pages.length ? meta.p + 1 : pages.findIndex(unanswered);
+  if (next === -1) {
+    return send(
+      Object.fromEntries(request.questions.map((q) => [q.id, answers[q.id]!]))
+    );
+  }
+  if (!(await saveHitlDraft(row.requestId, userId, { page: next, answers }))) {
+    ctx.waitUntil(
+      getHitlForm(row.requestId).then((now) => now && tellClosed(now, userId))
+    );
+    return close();
+  }
+  return Response.json({
+    response_action: "update",
+    view: formView(request, next, answers)
+  });
 }
 
 /**
  * Slack Interactivity ingress (Request URL → `/slack/interactivity`). Verifies
  * the signature and team anchor exactly like the events handler, then routes
  * HITL interactions. All work runs off-path in `ctx.waitUntil` so Slack gets its
- * ack inside the 3s budget; a `view_submission` returns an empty 200 to close the
- * modal. Non-HITL interactive payloads are acked and ignored.
+ * ack inside the 3s budget; a `view_submission` is answered on the path — an
+ * empty 200 to close the modal, its errors, or a paged form's next page. Non-HITL
+ * interactive payloads are acked and ignored.
  */
 export async function handleSlackInteractivity(
   request: Request,
@@ -417,20 +561,7 @@ export async function handleSlackInteractivity(
   ) {
     const guard = await guardTeamId(payload.teamId);
     if (guard) return guard;
-    // On the request path, while Slack is still listening: refused here, a
-    // mistake keeps the modal open with what was typed still in it. Refused by
-    // the agent after the claim, the question would be spent on an answer
-    // nobody holds. The form is read here because what the agent measures is
-    // the text the answers are sent with, its labels and headings included.
-    const row = payload.privateMetadata
-      ? await getHitlForm(payload.privateMetadata)
-      : null;
-    if (!row) return new Response(null, { status: 200 });
-    const errors = formErrors(row.requestJson, payload.values ?? []);
-    if (errors) return Response.json({ response_action: "errors", errors });
-    ctx.waitUntil(handleViewSubmission(row, payload));
-    // An empty 200 tells Slack to close the modal.
-    return new Response(null, { status: 200 });
+    return submitForm(payload, ctx);
   }
 
   // block_suggestion, view_closed, slash_command, etc. — acked and ignored.

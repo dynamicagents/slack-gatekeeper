@@ -4,7 +4,12 @@ import type {
   HitlQuestion
 } from "@dynamicagents/g2a-protocol";
 import { slackifyMarkdown } from "slackify-markdown";
-import { answeredQuestions, type HitlRequest } from "@/a2a/hitl";
+import {
+  answeredQuestions,
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID,
+  type HitlRequest
+} from "@/a2a/hitl";
 import { sanitizeSlackText } from "@/util/slack-text";
 
 /**
@@ -22,7 +27,8 @@ import { sanitizeSlackText } from "@/util/slack-text";
  *
  * One question picked from a short list is answered in the thread, by a button
  * per option. Anything else — several questions, several picks, words — opens a
- * modal with an input per question, from one "Answer" button.
+ * modal with an input per question, from one "Answer" button, paged when one
+ * modal cannot hold them all: see {@link formPages}.
  */
 
 /** Slack's cap on one section's text. */
@@ -63,15 +69,29 @@ export const FORM_CALLBACK_ID = "hitl-form";
 export const PICK_ACTION = "hitl-pick";
 export const OPEN_ACTION = "hitl-open";
 
+/** Action id of the Back button on a paged form's later pages. */
+export const BACK_ACTION = "hitl-back";
+
 /**
- * What a control's `value` carries: the request, and which question and option.
- * A control is found by its value rather than its action id, which Slack caps at
- * 255 characters — less than an agent's request id may be.
+ * What a control's `value` carries: the request, which question and option, and
+ * for Back the page it goes to. A control is found by its value rather than its
+ * action id, which Slack caps at 255 characters — less than an agent's request
+ * id may be.
  */
 export interface ControlValue {
   r: string;
   q?: number;
   o?: number | "approve" | "reject";
+  p?: number;
+}
+
+/**
+ * What a modal's `private_metadata` carries: the request, and the page of the
+ * form it shows — none for one question's words alone.
+ */
+export interface ViewMeta {
+  r: string;
+  p?: number;
 }
 
 /**
@@ -441,23 +461,13 @@ function controlBlocks(request: HitlRequest, numbered: boolean): unknown[] {
   return [{ type: "actions", block_id: "hitl-controls", elements }];
 }
 
-/**
- * The open prompt: why the agent asks, every question with its options in full,
- * then the controls. A form too big for one modal is shown, and says it cannot
- * be answered here, rather than offering a button that fails.
- */
+/** The open prompt: why the agent asks, every question with its options in full, then the controls. */
 export function requestBlocks(request: HitlRequest): unknown[] {
   const form = fittedForm(request, false);
-  const body = sections(form.text, MESSAGE_TEXT, CUT_FORM);
-  if (quickQuestion(request) === undefined && !formFits(request)) {
-    return [
-      ...body,
-      context(
-        "⚠️ This form is too large to answer in Slack. Ask the agent to split it."
-      )
-    ];
-  }
-  return [...body, ...controlBlocks(request, form.whole)];
+  return [
+    ...sections(form.text, MESSAGE_TEXT, CUT_FORM),
+    ...controlBlocks(request, form.whole)
+  ];
 }
 
 /** A prompt closed without an answer — expired, or its task over — under `note`. */
@@ -525,141 +535,246 @@ function choiceOption(
   };
 }
 
-/** The element a question is answered with: a group for a few options, a select for more. */
-function inputElement(question: HitlQuestion): unknown {
+/** Words already entered, put back in an input. */
+function initialText(text: string | undefined): { initial_value?: string } {
+  return text ? { initial_value: text } : {};
+}
+
+/**
+ * The element a question is answered with — a group for a few options, a select
+ * for more — holding `answer` when the person has already given one.
+ */
+function inputElement(question: HitlQuestion, answer?: HitlAnswer): unknown {
+  const picked = (value: string) => answer?.optionIds?.includes(value) ?? false;
   switch (question.kind) {
     case "text":
       return {
         type: "plain_text_input",
         action_id: "value",
-        multiline: true
+        multiline: true,
         // No `max_length`: answers past 3,000 characters reach the agent
         // without one, and setting it would cap them there.
+        ...initialText(answer?.text)
       };
-    case "approval":
+    case "approval": {
+      const options = [
+        { text: plain("Approve"), value: HITL_APPROVE_OPTION_ID },
+        { text: plain("Reject"), value: HITL_REJECT_OPTION_ID }
+      ];
+      const initial = options.find((o) => picked(o.value));
       return {
         type: "radio_buttons",
         action_id: "value",
-        options: [
-          { text: plain("Approve"), value: "approve" },
-          { text: plain("Reject"), value: "reject" }
-        ]
+        options,
+        ...(initial ? { initial_option: initial } : {})
       };
+    }
     case "choice": {
       const few = question.options.length <= GROUP_OPTIONS;
       const numbered = listsOptions(question, false);
       const options = question.options
         .slice(0, SELECT_OPTIONS)
         .map((o, j) => choiceOption(o, j, numbered, few));
+      const initial = options.filter((_, j) => picked(question.options[j]!.id));
       if (question.multiple) {
-        return few
-          ? { type: "checkboxes", action_id: "value", options }
-          : {
-              type: "multi_static_select",
-              action_id: "value",
-              placeholder: plain("Pick any"),
-              options
-            };
+        return {
+          ...(few
+            ? { type: "checkboxes" }
+            : { type: "multi_static_select", placeholder: plain("Pick any") }),
+          action_id: "value",
+          options,
+          ...(initial.length > 0 ? { initial_options: initial } : {})
+        };
       }
-      return few
-        ? { type: "radio_buttons", action_id: "value", options }
-        : {
-            type: "static_select",
-            action_id: "value",
-            placeholder: plain("Pick one"),
-            options
-          };
+      return {
+        ...(few
+          ? { type: "radio_buttons" }
+          : { type: "static_select", placeholder: plain("Pick one") }),
+        action_id: "value",
+        options,
+        ...(initial[0] ? { initial_option: initial[0] } : {})
+      };
     }
   }
 }
 
-function textInput(blockId: string, label: string, optional: boolean): unknown {
+function textInput(
+  blockId: string,
+  label: string,
+  optional: boolean,
+  initial?: string
+): unknown {
   return {
     type: "input",
     block_id: blockId,
     label: plain(label),
     optional,
-    element: { type: "plain_text_input", action_id: "value", multiline: true }
+    element: {
+      type: "plain_text_input",
+      action_id: "value",
+      multiline: true,
+      ...initialText(initial)
+    }
   };
 }
 
-/**
- * The modal's blocks: every question whole, not cut to a message's budget,
- * which a modal does not share. A form whose text needs more sections than a
- * view holds is caught by {@link formFits}.
- */
-function formViewBlocks(request: HitlRequest, only?: number): unknown[] {
-  const many = request.questions.length > 1;
-  const blocks: unknown[] = [];
-  const shown = (text: string) => {
-    blocks.push(...splitMrkdwn(text).map(section));
-  };
-  if (only === undefined && request.prompt) shown(toMrkdwn(request.prompt));
-  request.questions.forEach((q, i) => {
-    if (only !== undefined && i !== only) return;
-    shown(questionMrkdwn(q, i, many, q.kind === "choice"));
-    const label = q.header ?? (many ? `Question ${i + 1}` : "Your answer");
-    if (only !== undefined) {
-      blocks.push(
-        textInput(
-          otherBlockId(i),
-          q.kind === "approval" ? "Comment" : "Your answer",
-          false
-        )
-      );
-      return;
-    }
-    blocks.push({
+function preambleBlocks(request: HitlRequest): unknown[] {
+  return request.prompt
+    ? splitMrkdwn(toMrkdwn(request.prompt)).map(section)
+    : [];
+}
+
+/** One question in the modal, whole, with its inputs holding `answer` if given. */
+function questionBlocks(
+  question: HitlQuestion,
+  index: number,
+  many: boolean,
+  answer?: HitlAnswer
+): unknown[] {
+  const label =
+    question.header ?? (many ? `Question ${index + 1}` : "Your answer");
+  const blocks: unknown[] = [
+    ...splitMrkdwn(
+      questionMrkdwn(question, index, many, question.kind === "choice")
+    ).map(section),
+    {
       type: "input",
-      block_id: inputBlockId(i, q),
+      block_id: inputBlockId(index, question),
       // The section above shows the header whole.
       label: plain(clip(label, INPUT_LABEL)),
       // A pick may be left for words typed below instead; a text question has
       // only its words, which Slack then requires.
-      optional: q.kind !== "text",
-      element: inputElement(q)
-    });
-    if (q.kind === "choice") {
-      blocks.push(textInput(otherBlockId(i), "Or, in your own words", true));
+      optional: question.kind !== "text",
+      element: inputElement(question, answer)
     }
-    if (q.kind === "approval") {
-      blocks.push(textInput(otherBlockId(i), "Comment", true));
-    }
-  });
+  ];
+  if (question.kind === "choice") {
+    blocks.push(
+      textInput(
+        otherBlockId(index),
+        "Or, in your own words",
+        true,
+        answer?.text
+      )
+    );
+  }
+  if (question.kind === "approval") {
+    blocks.push(textInput(otherBlockId(index), "Comment", true, answer?.text));
+  }
   return blocks;
 }
 
 /**
- * The modal a form is answered in: every question with an input of its own. With
- * `only`, the one question's words alone — what "Other…" and "Comment…" open.
+ * The form's pages, as the positions of the questions on each. One page when the
+ * whole form fits a modal. Past that, each page holds as many questions as fit,
+ * whole and in order — the preamble on the first, and room for Back on every
+ * one — and the gate keeps each person's answers between pages until they send
+ * them all at once (see `saveHitlDraft` in `src/db/models/hitl-forms.ts`).
  */
-export function formView(
-  request: HitlRequest,
-  only?: number
-): Record<string, unknown> {
+export function formPages(request: HitlRequest): number[][] {
+  const many = request.questions.length > 1;
+  const sizes = request.questions.map(
+    (q, i) => questionBlocks(q, i, many).length
+  );
+  const preamble = preambleBlocks(request).length;
+  if (preamble + sizes.reduce((a, b) => a + b, 0) <= VIEW_BLOCKS) {
+    return [request.questions.map((_, i) => i)];
+  }
+  const room = VIEW_BLOCKS - 1;
+  const pages: number[][] = [[]];
+  let used = preamble;
+  sizes.forEach((size, i) => {
+    const page = pages[pages.length - 1]!;
+    if (page.length > 0 && used + size > room) {
+      pages.push([i]);
+      used = size;
+    } else {
+      page.push(i);
+      used += size;
+    }
+  });
+  return pages;
+}
+
+function backBlock(requestId: string, page: number): unknown {
   return {
-    type: "modal",
-    callback_id: FORM_CALLBACK_ID,
-    private_metadata: request.requestId,
-    title: plain("Your answer"),
-    submit: plain("Send"),
-    close: plain("Cancel"),
-    blocks: formViewBlocks(request, only)
+    type: "actions",
+    block_id: "hitl-back",
+    elements: [button("← Back", BACK_ACTION, { r: requestId, p: page })]
   };
 }
 
 /**
- * Whether a form fits one modal. One holds about 33 questions at three blocks
- * each, and a question with more options than a select holds cannot be asked;
- * past either, the form is shown but not answered here.
+ * A page of the modal a form is answered in: each of its questions whole, with
+ * an input of its own holding what `answers` has for it. A form of one page is
+ * sent from it; a longer one goes Next page by page, and is sent from its last.
  */
-export function formFits(request: HitlRequest): boolean {
-  return (
-    formViewBlocks(request).length <= VIEW_BLOCKS &&
-    request.questions.every(
-      (q) => q.kind !== "choice" || q.options.length <= SELECT_OPTIONS
-    )
-  );
+export function formView(
+  request: HitlRequest,
+  page = 0,
+  answers: Record<string, HitlAnswer> = {}
+): Record<string, unknown> {
+  const pages = formPages(request);
+  const at = Math.min(Math.max(page, 0), pages.length - 1);
+  const many = request.questions.length > 1;
+  const meta: ViewMeta = { r: request.requestId, p: at };
+  const blocks = [
+    ...(at === 0 ? preambleBlocks(request) : []),
+    ...pages[at]!.flatMap((i) => {
+      const question = request.questions[i]!;
+      const answer = Object.hasOwn(answers, question.id)
+        ? answers[question.id]
+        : undefined;
+      return questionBlocks(question, i, many, answer);
+    }),
+    ...(at > 0 ? [backBlock(request.requestId, at - 1)] : [])
+  ];
+  return {
+    type: "modal",
+    callback_id: FORM_CALLBACK_ID,
+    private_metadata: JSON.stringify(meta),
+    title: plain(
+      pages.length > 1
+        ? `Your answer · ${at + 1} of ${pages.length}`
+        : "Your answer"
+    ),
+    submit: plain(at === pages.length - 1 ? "Send" : "Next"),
+    close: plain("Cancel"),
+    blocks
+  };
+}
+
+/** One question's words alone — what "Other…" and "Comment…" open. */
+export function wordsView(
+  request: HitlRequest,
+  index: number
+): Record<string, unknown> {
+  const question = request.questions[index];
+  if (!question) return formView(request);
+  const meta: ViewMeta = { r: request.requestId };
+  return {
+    type: "modal",
+    callback_id: FORM_CALLBACK_ID,
+    private_metadata: JSON.stringify(meta),
+    title: plain("Your answer"),
+    submit: plain("Send"),
+    close: plain("Cancel"),
+    blocks: [
+      ...splitMrkdwn(
+        questionMrkdwn(
+          question,
+          index,
+          request.questions.length > 1,
+          question.kind === "choice"
+        )
+      ).map(section),
+      textInput(
+        otherBlockId(index),
+        question.kind === "approval" ? "Comment" : "Your answer",
+        false
+      )
+    ]
+  };
 }
 
 /** `text` for a Block Kit message: the notification fallback, cut to stay accepted. */

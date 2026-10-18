@@ -18,6 +18,8 @@ import {
   cancelHitlFormsByToken,
   expireStaleHitlForms,
   sweepStaleHitlForms,
+  saveHitlDraft,
+  hitlDraftOf,
   type CreateHitlFormInput
 } from "@/db/models/hitl-forms";
 import { choiceForm } from "../../helpers/hitl";
@@ -277,6 +279,28 @@ describe("hitl-forms model", () => {
       expect((await getHitlForm("req-past"))?.status).toBe("expired");
       expect((await getHitlForm("req-future"))?.status).toBe("awaiting");
     });
+  });
+
+  it("keeps each person's way through a paged form apart, while it is open", async () => {
+    await createHitlForm(input("req-d"));
+    const one = { page: 1, answers: { q1: { optionIds: ["a"] as [string] } } };
+    const two = { page: 0, answers: { q1: { text: "neither" } } };
+    expect(await saveHitlDraft("req-d", "U1", one)).toBe(true);
+    expect(await saveHitlDraft("req-d", "U2", two)).toBe(true);
+    expect(await saveHitlDraft("req-d", "U1", { ...one, page: 2 })).toBe(true);
+
+    const row = (await getHitlForm("req-d"))!;
+    expect(hitlDraftOf(row, "U1")).toEqual({ ...one, page: 2 });
+    expect(hitlDraftOf(row, "U2")).toEqual(two);
+    expect(hitlDraftOf(row, "U3")).toBeUndefined();
+    // Not a key a Slack user id could be.
+    expect(await saveHitlDraft("req-d", 'U1"]', one)).toBe(false);
+
+    await claimHitlAnswer("req-d", {
+      answeredBy: "U2",
+      answers: { q1: { text: "neither" } }
+    });
+    expect(await saveHitlDraft("req-d", "U1", one)).toBe(false);
   });
 
   it("sweeps only resolved rows older than the cutoff", async () => {

@@ -457,6 +457,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "drafts_json": {
+          "name": "drafts_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",

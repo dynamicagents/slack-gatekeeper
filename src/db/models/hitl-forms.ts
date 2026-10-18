@@ -6,6 +6,7 @@ import * as schema from "../schema";
 const ONE_MONTH_SECONDS = 30 * 24 * 60 * 60;
 
 export type HitlFormRow = typeof schema.hitlForms.$inferSelect;
+export type { HitlDraft } from "../schema";
 
 /** Everything captured when a HITL prompt is first rendered to Slack. */
 export interface CreateHitlFormInput {
@@ -73,6 +74,43 @@ export async function setHitlFormMessageTs(
     .update(schema.hitlForms)
     .set({ slackMessageTs })
     .where(eq(schema.hitlForms.requestId, requestId));
+}
+
+/**
+ * Keep where `userId` is in a paged form, and what they have entered, until
+ * they send it. One statement, so two people paging the same form at once each
+ * keep their own. Returns whether the form is still open to keep it on.
+ */
+export async function saveHitlDraft(
+  requestId: string,
+  userId: string,
+  draft: schema.HitlDraft
+): Promise<boolean> {
+  // A Slack user id is alphanumeric; anything else has no place in a JSON path.
+  if (!/^[A-Z0-9]+$/i.test(userId)) return false;
+  const db = getDb();
+  const rows = await db
+    .update(schema.hitlForms)
+    .set({
+      draftsJson: sql`json_set(coalesce(${schema.hitlForms.draftsJson}, '{}'), ${`$."${userId}"`}, json(${JSON.stringify(draft)}))`
+    })
+    .where(
+      and(
+        eq(schema.hitlForms.requestId, requestId),
+        eq(schema.hitlForms.status, "awaiting")
+      )
+    )
+    .returning({ requestId: schema.hitlForms.requestId });
+  return rows.length > 0;
+}
+
+/** Where `userId` is in a paged form, or `undefined` before they first page it. */
+export function hitlDraftOf(
+  row: HitlFormRow,
+  userId: string
+): schema.HitlDraft | undefined {
+  const drafts = row.draftsJson;
+  return drafts && Object.hasOwn(drafts, userId) ? drafts[userId] : undefined;
 }
 
 /** The answers a person supplied in Slack, one per question id. */

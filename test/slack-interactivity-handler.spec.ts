@@ -30,7 +30,10 @@ import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
 import { _resetIssuerCacheForTest } from "@/a2a/dispatch";
 import { buildAgentCard } from "@/a2a/card";
 import {
+  BACK_ACTION,
   FORM_CALLBACK_ID,
+  formPages,
+  OPEN_ACTION,
   otherBlockId,
   PICK_ACTION,
   requestBlocks
@@ -58,6 +61,12 @@ interface Captured {
   slackUpdates: URLSearchParams[];
   /** Views opened with `views.open`, decoded. */
   views?: Record<string, unknown>[];
+  /** `views.update` calls: the view replaced, its new content, and the hash. */
+  viewUpdates?: {
+    viewId: string;
+    view: Record<string, unknown>;
+    hash: string;
+  }[];
   slackEphemerals: URLSearchParams[];
   /** Plain `chat.postMessage` thread replies (e.g. the resume-failed notice). */
   slackReplies: URLSearchParams[];
@@ -115,6 +124,18 @@ function stub(
           });
         }
         return Response.json({ ok: true, ts: "1700.9" });
+      }
+      if (url.includes("views.update")) {
+        const params = new URLSearchParams(await request.clone().text());
+        captured.viewUpdates?.push({
+          viewId: params.get("view_id") ?? "",
+          view: JSON.parse(params.get("view") ?? "{}") as Record<
+            string,
+            unknown
+          >,
+          hash: params.get("hash") ?? ""
+        });
+        return Response.json({ ok: true, view: { id: "V1" } });
       }
       if (url.includes("views.open")) {
         const params = new URLSearchParams(await request.clone().text());
@@ -204,7 +225,7 @@ function freeformSubmission(requestId: string, text: string) {
     user: { id: "U1" },
     view: {
       callback_id: FORM_CALLBACK_ID,
-      private_metadata: requestId,
+      private_metadata: JSON.stringify({ r: requestId }),
       state: {
         values: {
           [otherBlockId(0)]: {
@@ -880,7 +901,7 @@ describe("a form of several questions", () => {
       user: { id: "U1" },
       view: {
         callback_id: FORM_CALLBACK_ID,
-        private_metadata: "req-form",
+        private_metadata: JSON.stringify({ r: "req-form", p: 0 }),
         state: { values }
       }
     };
@@ -908,7 +929,7 @@ describe("a form of several questions", () => {
     expect(captured.views).toHaveLength(1);
     expect(captured.views![0]).toMatchObject({
       callback_id: FORM_CALLBACK_ID,
-      private_metadata: "req-form"
+      private_metadata: JSON.stringify({ r: "req-form", p: 0 })
     });
   });
 
@@ -962,5 +983,241 @@ describe("a form of several questions", () => {
     });
     expect(captured.resumeMessages).toEqual([]);
     expect((await getHitlForm("req-form"))?.status).toBe("awaiting");
+  });
+});
+
+/**
+ * A form past what one modal holds, answered page by page: each page is checked
+ * and kept as the person goes, Back keeps what a page holds, and the last page
+ * sends every answer at once — the one form the agent asked.
+ */
+describe("a form too long for one modal", () => {
+  const form: HitlRequestData = {
+    type: HITL_REQUEST_TYPE,
+    requestId: "req-paged",
+    questions: Array.from({ length: 40 }, (_, i) => ({
+      kind: "choice" as const,
+      id: `c${i}`,
+      prompt: `Question ${i}?`,
+      options: [
+        { id: "a", label: "A" },
+        { id: "b", label: "B" }
+      ]
+    }))
+  };
+  const pages = formPages(form);
+
+  const emptyCapture = (): Captured => ({
+    slackUpdates: [],
+    slackEphemerals: [],
+    slackReplies: [],
+    resumeMessages: [],
+    views: [],
+    viewUpdates: []
+  });
+
+  async function send(payload: unknown): Promise<Response> {
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(payload),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+    return res;
+  }
+
+  /** Each question at `positions` picked `pick`, as a modal's state holds it. */
+  function picked(positions: readonly number[], pick: string | null = "0") {
+    return Object.fromEntries(
+      positions.flatMap((i) => [
+        [
+          `q${i}:choice`,
+          {
+            value: {
+              type: "radio_buttons",
+              selected_option: pick === null ? null : { value: pick }
+            }
+          }
+        ],
+        [`q${i}:other`, { value: { type: "plain_text_input", value: null } }]
+      ])
+    );
+  }
+
+  function submitPage(
+    page: number,
+    values: Record<string, unknown>,
+    user = "U1"
+  ) {
+    return {
+      type: "view_submission",
+      user: { id: user },
+      view: {
+        id: "V1",
+        callback_id: FORM_CALLBACK_ID,
+        private_metadata: JSON.stringify({ r: "req-paged", p: page }),
+        state: { values }
+      }
+    };
+  }
+
+  function openForm(user = "U1") {
+    return {
+      type: "block_actions",
+      user: { id: user },
+      trigger_id: "trig-1",
+      channel: { id: "C1" },
+      message: { ts: "1700.9", blocks: requestBlocks(form) },
+      actions: [
+        {
+          action_id: OPEN_ACTION,
+          value: JSON.stringify({ r: "req-paged" }),
+          type: "button"
+        }
+      ]
+    };
+  }
+
+  function back(from: number, values: Record<string, unknown>) {
+    return {
+      type: "block_actions",
+      user: { id: "U1" },
+      trigger_id: "trig-2",
+      container: { type: "view", view_id: "V1" },
+      view: {
+        id: "V1",
+        hash: "h-1",
+        callback_id: FORM_CALLBACK_ID,
+        private_metadata: JSON.stringify({ r: "req-paged", p: from }),
+        state: { values }
+      },
+      actions: [
+        {
+          action_id: BACK_ACTION,
+          value: JSON.stringify({ r: "req-paged", p: from - 1 }),
+          type: "button"
+        }
+      ]
+    };
+  }
+
+  /** What each input of a view holds, by block id. */
+  function held(view: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(
+      (view.blocks as Record<string, unknown>[])
+        .filter((b) => b.type === "input")
+        .map((b) => {
+          const e = b.element as Record<string, unknown>;
+          const one = e.initial_option as { value: string } | undefined;
+          return [b.block_id, e.initial_value ?? one?.value];
+        })
+    );
+  }
+
+  it("is paged, Next keeping each page, and the last sending every answer at once", async () => {
+    await seedParkedRequest("req-paged", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+    expect(pages.length).toBeGreaterThan(1);
+
+    await send(openForm());
+    expect(captured.views![0]).toMatchObject({
+      title: { text: `Your answer · 1 of ${pages.length}` }
+    });
+
+    for (let p = 0; p < pages.length - 1; p++) {
+      const res = await send(submitPage(p, picked(pages[p]!)));
+      const body = (await res.json()) as {
+        response_action: string;
+        view: Record<string, unknown>;
+      };
+      expect(body.response_action).toBe("update");
+      expect(body.view).toMatchObject({
+        private_metadata: JSON.stringify({ r: "req-paged", p: p + 1 })
+      });
+      expect(captured.resumeMessages).toEqual([]);
+    }
+
+    const last = pages.length - 1;
+    const res = await send(submitPage(last, picked(pages[last]!, "1")));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    const data = captured.resumeMessages[0]!.parts.map(dataOf).find(
+      (d) => d !== undefined
+    ) as { answers: Record<string, unknown> };
+    expect(Object.keys(data.answers)).toEqual(form.questions.map((q) => q.id));
+    expect(data.answers.c0).toEqual({ optionIds: ["a"] });
+    expect(data.answers[`c${pages[last]![0]}`]).toEqual({ optionIds: ["b"] });
+    expect((await getHitlForm("req-paged"))?.status).toBe("answered");
+  });
+
+  it("goes Back keeping what the page held, and shows each page again as answered", async () => {
+    await seedParkedRequest("req-paged", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+
+    await send(submitPage(0, picked(pages[0]!, "1")));
+    // Page 1 half done: its first question picked, the rest not yet.
+    const [first, ...rest] = pages[1]!;
+    await send(back(1, { ...picked([first!], "1"), ...picked(rest, null) }));
+
+    expect(captured.viewUpdates).toHaveLength(1);
+    const update = captured.viewUpdates![0]!;
+    expect(update).toMatchObject({ viewId: "V1", hash: "h-1" });
+    expect(held(update.view)[`q${pages[0]![0]}:choice`]).toBe("1");
+
+    // Next again: page 1 comes back holding the pick made before Back.
+    const res = await send(submitPage(0, picked(pages[0]!, "1")));
+    const { view } = (await res.json()) as { view: Record<string, unknown> };
+    expect(held(view)[`q${first}:choice`]).toBe("1");
+    expect(held(view)[`q${rest[0]}:choice`]).toBeUndefined();
+  });
+
+  it("reopens where the person left it, and keeps each person's answers apart", async () => {
+    await seedParkedRequest("req-paged", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+
+    await send(submitPage(0, picked(pages[0]!)));
+    await send(openForm("U1"));
+    await send(openForm("U2"));
+
+    expect(
+      captured.views!.map((v) => JSON.parse(v.private_metadata as string))
+    ).toEqual([
+      { r: "req-paged", p: 1 },
+      { r: "req-paged", p: 0 }
+    ]);
+    expect(
+      held(captured.views![1]!)[`q${pages[0]![0]}:choice`]
+    ).toBeUndefined();
+  });
+
+  it("keeps a page open on a question left unanswered, and moves on from nothing", async () => {
+    await seedParkedRequest("req-paged", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+
+    const [first, ...rest] = pages[0]!;
+    const res = await send(
+      submitPage(0, { ...picked([first!], null), ...picked(rest) })
+    );
+    expect(await res.json()).toEqual({
+      response_action: "errors",
+      errors: { [`q${first}:choice`]: expect.stringContaining("Pick one") }
+    });
+    expect((await getHitlForm("req-paged"))?.draftsJson).toBeNull();
+  });
+
+  it("closes a page submitted after someone else answered, and says so", async () => {
+    await seedParkedRequest("req-paged", "", form);
+    const captured = emptyCapture();
+    stub(captured);
+    await cancelHitlFormsByToken("tok-1");
+
+    const res = await send(submitPage(0, picked(pages[0]!)));
+    expect(await res.text()).toBe("");
+    expect(captured.slackEphemerals).toHaveLength(1);
+    expect(captured.resumeMessages).toEqual([]);
   });
 });

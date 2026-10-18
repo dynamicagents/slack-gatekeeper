@@ -292,6 +292,23 @@ export async function openView(
   await openSlackView({ token: env.SLACK_BOT_TOKEN, triggerId, view });
 }
 
+/**
+ * Replace an open modal's content via `views.update` — a paged form going Back.
+ * With `hash`, Slack refuses the update if the modal changed since it was read.
+ */
+export async function updateView(
+  viewId: string,
+  view: unknown,
+  hash?: string
+): Promise<void> {
+  const res = await callSlackApi<SlackApiResponse>(
+    "views.update",
+    { view_id: viewId, view, ...(hash ? { hash } : {}) },
+    { token: env.SLACK_BOT_TOKEN }
+  );
+  assertSlackOk("views.update", res);
+}
+
 /** Post an ephemeral notice (e.g. "already answered") visible only to one user. */
 export async function postEphemeral(input: {
   channelId: string;

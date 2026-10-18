@@ -320,6 +320,12 @@ export const hitlRequests = sqliteTable(
  * (a person decided) | `expired` (TTL swept) | `canceled` (the task ended first —
  * a 🛑 while parked, or the agent's own final status).
  */
+/** One person's way through a paged form: the page they are on, and their answers so far. */
+export interface HitlDraft {
+  page: number;
+  answers: Record<string, HitlAnswer>;
+}
+
 export const hitlForms = sqliteTable(
   "hitl_forms",
   {
@@ -360,6 +366,11 @@ export const hitlForms = sqliteTable(
     // One answer per question id, as sent to the agent.
     answersJson: text("answers_json", { mode: "json" }).$type<
       Record<string, HitlAnswer>
+    >(),
+    // A form paged across modals: what each person has entered so far, by Slack
+    // user id, kept between its pages until they send it.
+    draftsJson: text("drafts_json", { mode: "json" }).$type<
+      Record<string, HitlDraft>
     >(),
     createdAt: timestamp("created_at"),
     // Unix-seconds expiry (createdAt + HITL_REQUEST_TTL_SECONDS). The maintenance
