@@ -217,7 +217,8 @@ export function buildHitlRequestParts(req: HitlRequest): Part[] {
 
 const answerSchema = z.union([
   z.object({
-    optionIds: z.array(nonEmpty).min(1),
+    // A tuple of at least one, as the protocol types it.
+    optionIds: z.tuple([nonEmpty], nonEmpty),
     text: nonEmpty.optional()
   }),
   z.object({ text: nonEmpty })

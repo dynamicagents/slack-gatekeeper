@@ -5,6 +5,7 @@ import {
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
   type HitlQuestion,
+  type HitlAnswer,
   type HitlRequestData,
   type HitlResponseData
 } from "@dynamicagents/g2a-protocol";
@@ -83,7 +84,7 @@ describe("the validator, against the contract it restates", () => {
       requestId: "r-1",
       questions: [questionOf("choice", "q1"), questionOf("text", "q2")]
     };
-    const answers = {
+    const answers: Record<string, HitlAnswer> = {
       q1: { optionIds: ["q1.a", "q1.b"], text: "and C" },
       q2: { text: "forms" }
     };

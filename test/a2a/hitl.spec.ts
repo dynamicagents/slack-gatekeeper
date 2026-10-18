@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Role, type Message } from "@a2a-js/sdk";
+import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import {
   buildMessage,
   dataOf,
@@ -95,7 +96,7 @@ describe("parseHitlRequest", () => {
 });
 
 describe("the answers in words", () => {
-  const answers = {
+  const answers: Record<string, HitlAnswer> = {
     q1: { optionIds: ["q1.o1"], text: "with pgvector" },
     q2: { text: "forms" },
     q3: { optionIds: ["approve"] }
@@ -134,7 +135,9 @@ describe("the answers in words", () => {
 
 describe("buildHitlResponseParts", () => {
   it("builds the answers in words plus a structured response DataPart", () => {
-    const answers = { q1: { optionIds: ["reject"], text: "not yet" } };
+    const answers: Record<string, HitlAnswer> = {
+      q1: { optionIds: ["reject"], text: "not yet" }
+    };
     const parts = buildHitlResponseParts({
       request: choiceForm("req-1"),
       answeredBy: "U1",

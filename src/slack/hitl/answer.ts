@@ -192,9 +192,10 @@ export function formAnswers(
         : question.kind === "approval"
           ? entry.picks.filter((p) => p === "approve" || p === "reject")
           : [];
-    if (optionIds.length > 0) {
+    const [first, ...more] = optionIds;
+    if (first !== undefined) {
       answers[question.id] = {
-        optionIds,
+        optionIds: [first, ...more],
         ...(entry.text ? { text: entry.text } : {})
       };
     } else if (entry.text) {
