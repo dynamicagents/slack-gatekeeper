@@ -317,7 +317,7 @@ export async function updateAgent(
 
 /**
  * Delete an agent and everything that references it. `agents.name` is the FK
- * parent of `agent_channels`, `agent_tasks` and `hitl_requests`, all declared
+ * parent of `agent_channels`, `agent_tasks`, `hitl_forms` and `hitl_requests`, all declared
  * `ON DELETE no action` — and D1 *does* enforce foreign keys, so every child
  * has to go first or the parent delete is rejected outright.
  *
@@ -332,6 +332,7 @@ export async function unregisterAgent(name: string): Promise<void> {
       .delete(schema.agentChannels)
       .where(eq(schema.agentChannels.agentName, name)),
     db.delete(schema.agentTasks).where(eq(schema.agentTasks.agentName, name)),
+    db.delete(schema.hitlForms).where(eq(schema.hitlForms.agentName, name)),
     db
       .delete(schema.hitlRequests)
       .where(eq(schema.hitlRequests.agentName, name)),

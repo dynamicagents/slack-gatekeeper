@@ -1,14 +1,15 @@
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
-import type { HitlRequestKind } from "@dynamicagents/g2a-protocol";
+import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
 import { getDb } from "../client";
 import * as schema from "../schema";
 
 const ONE_MONTH_SECONDS = 30 * 24 * 60 * 60;
 
-export type HitlRequestRow = typeof schema.hitlRequests.$inferSelect;
+export type HitlFormRow = typeof schema.hitlForms.$inferSelect;
+export type { HitlDraft } from "../schema";
 
 /** Everything captured when a HITL prompt is first rendered to Slack. */
-export interface CreateHitlRequestInput {
+export interface CreateHitlFormInput {
   requestId: string;
   token: string;
   taskId: string | null;
@@ -16,11 +17,8 @@ export interface CreateHitlRequestInput {
   agentName: string;
   channelId: string;
   threadTs: string | null;
-  requestKind: HitlRequestKind;
-  promptText: string;
-  /** JSON-encoded SlackInputOption[] as rendered. */
-  optionsJson: string | null;
-  allowFreeform: boolean;
+  /** The form as received, sanitized. */
+  request: HitlRequestData;
   /** Unix-seconds expiry (createdAt + HITL_REQUEST_TTL_SECONDS). */
   deadlineAt: number;
 }
@@ -31,12 +29,12 @@ export interface CreateHitlRequestInput {
  * nothing and returns `false`, so the caller skips re-posting the Slack prompt.
  * Returns `true` only when this call created the row (the caller then posts).
  */
-export async function createHitlRequest(
-  input: CreateHitlRequestInput
+export async function createHitlForm(
+  input: CreateHitlFormInput
 ): Promise<boolean> {
   const db = getDb();
   const rows = await db
-    .insert(schema.hitlRequests)
+    .insert(schema.hitlForms)
     .values({
       requestId: input.requestId,
       token: input.token,
@@ -45,47 +43,80 @@ export async function createHitlRequest(
       agentName: input.agentName,
       channelId: input.channelId,
       threadTs: input.threadTs,
-      requestKind: input.requestKind,
-      promptText: input.promptText,
-      optionsJson: input.optionsJson,
-      allowFreeform: input.allowFreeform ? 1 : 0,
+      requestJson: input.request,
       deadlineAt: input.deadlineAt
     })
     .onConflictDoNothing()
-    .returning({ requestId: schema.hitlRequests.requestId });
+    .returning({ requestId: schema.hitlForms.requestId });
   return rows.length > 0;
 }
 
-/** Look up a HITL request by its id (the interaction correlation key). */
-export async function getHitlRequest(
+/** Look up a HITL prompt by its id (the interaction correlation key). */
+export async function getHitlForm(
   requestId: string
-): Promise<HitlRequestRow | null> {
+): Promise<HitlFormRow | null> {
   const db = getDb();
   const rows = await db
     .select()
-    .from(schema.hitlRequests)
-    .where(eq(schema.hitlRequests.requestId, requestId))
+    .from(schema.hitlForms)
+    .where(eq(schema.hitlForms.requestId, requestId))
     .limit(1);
   return rows[0] ?? null;
 }
 
 /** Record the ts of the posted Block Kit prompt, so it can be updated later. */
-export async function setHitlSlackMessageTs(
+export async function setHitlFormMessageTs(
   requestId: string,
   slackMessageTs: string
 ): Promise<void> {
   const db = getDb();
   await db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({ slackMessageTs })
-    .where(eq(schema.hitlRequests.requestId, requestId));
+    .where(eq(schema.hitlForms.requestId, requestId));
 }
 
-/** The answer a human supplied in Slack. */
+/**
+ * Keep where `userId` is in a paged form, and what they have entered, until
+ * they send it. One statement, so two people paging the same form at once each
+ * keep their own. Returns whether the form is still open to keep it on.
+ */
+export async function saveHitlDraft(
+  requestId: string,
+  userId: string,
+  draft: schema.HitlDraft
+): Promise<boolean> {
+  // A Slack user id is alphanumeric; anything else has no place in a JSON path.
+  if (!/^[A-Z0-9]+$/i.test(userId)) return false;
+  const db = getDb();
+  const rows = await db
+    .update(schema.hitlForms)
+    .set({
+      draftsJson: sql`json_set(coalesce(${schema.hitlForms.draftsJson}, '{}'), ${`$."${userId}"`}, json(${JSON.stringify(draft)}))`
+    })
+    .where(
+      and(
+        eq(schema.hitlForms.requestId, requestId),
+        eq(schema.hitlForms.status, "awaiting")
+      )
+    )
+    .returning({ requestId: schema.hitlForms.requestId });
+  return rows.length > 0;
+}
+
+/** Where `userId` is in a paged form, or `undefined` before they first page it. */
+export function hitlDraftOf(
+  row: HitlFormRow,
+  userId: string
+): schema.HitlDraft | undefined {
+  const drafts = row.draftsJson;
+  return drafts && Object.hasOwn(drafts, userId) ? drafts[userId] : undefined;
+}
+
+/** The answers a person supplied in Slack, one per question id. */
 export interface ClaimHitlAnswerInput {
   answeredBy: string;
-  optionId?: string;
-  text?: string;
+  answers: Record<string, HitlAnswer>;
 }
 
 /**
@@ -99,21 +130,20 @@ export interface ClaimHitlAnswerInput {
 export async function claimHitlAnswer(
   requestId: string,
   input: ClaimHitlAnswerInput
-): Promise<HitlRequestRow | null> {
+): Promise<HitlFormRow | null> {
   const db = getDb();
   const rows = await db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({
       status: "answered",
       answeredBy: input.answeredBy,
-      answeredOptionId: input.optionId ?? null,
-      answerText: input.text ?? null,
+      answersJson: input.answers,
       answeredAt: sql`(unixepoch())`
     })
     .where(
       and(
-        eq(schema.hitlRequests.requestId, requestId),
-        eq(schema.hitlRequests.status, "awaiting")
+        eq(schema.hitlForms.requestId, requestId),
+        eq(schema.hitlForms.status, "awaiting")
       )
     )
     .returning();
@@ -130,29 +160,28 @@ export async function claimHitlAnswer(
  * it afterwards would bring back a live prompt on a task that is over, which is
  * exactly what closing prompts on a final status exists to prevent.
  */
-export async function reopenHitlRequest(requestId: string): Promise<boolean> {
+export async function reopenHitlForm(requestId: string): Promise<boolean> {
   const db = getDb();
   const parked = db
     .select({ token: schema.agentTasks.token })
     .from(schema.agentTasks)
     .where(eq(schema.agentTasks.status, "awaiting-input"));
   const rows = await db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({
       status: "awaiting",
       answeredBy: null,
-      answeredOptionId: null,
-      answerText: null,
+      answersJson: null,
       answeredAt: null
     })
     .where(
       and(
-        eq(schema.hitlRequests.requestId, requestId),
-        eq(schema.hitlRequests.status, "answered"),
-        inArray(schema.hitlRequests.token, parked)
+        eq(schema.hitlForms.requestId, requestId),
+        eq(schema.hitlForms.status, "answered"),
+        inArray(schema.hitlForms.token, parked)
       )
     )
-    .returning({ requestId: schema.hitlRequests.requestId });
+    .returning({ requestId: schema.hitlForms.requestId });
   return rows.length > 0;
 }
 
@@ -161,18 +190,18 @@ export async function reopenHitlRequest(requestId: string): Promise<boolean> {
  * never be shown, so it has no Slack message to update. Returns whether it was
  * still `awaiting`.
  */
-export async function cancelHitlRequest(requestId: string): Promise<boolean> {
+export async function cancelHitlForm(requestId: string): Promise<boolean> {
   const db = getDb();
   const rows = await db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({ status: "canceled" })
     .where(
       and(
-        eq(schema.hitlRequests.requestId, requestId),
-        eq(schema.hitlRequests.status, "awaiting")
+        eq(schema.hitlForms.requestId, requestId),
+        eq(schema.hitlForms.status, "awaiting")
       )
     )
-    .returning({ requestId: schema.hitlRequests.requestId });
+    .returning({ requestId: schema.hitlForms.requestId });
   return rows.length > 0;
 }
 
@@ -182,17 +211,17 @@ export async function cancelHitlRequest(requestId: string): Promise<boolean> {
  * status without the answer. Returns the canceled rows so the caller can update
  * each Slack prompt to a closed state.
  */
-export async function cancelHitlRequestsByToken(
+export async function cancelHitlFormsByToken(
   token: string
-): Promise<HitlRequestRow[]> {
+): Promise<HitlFormRow[]> {
   const db = getDb();
   return db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({ status: "canceled" })
     .where(
       and(
-        eq(schema.hitlRequests.token, token),
-        eq(schema.hitlRequests.status, "awaiting")
+        eq(schema.hitlForms.token, token),
+        eq(schema.hitlForms.status, "awaiting")
       )
     )
     .returning();
@@ -203,17 +232,17 @@ export async function cancelHitlRequestsByToken(
  * rows so the maintenance sweep can update each Slack prompt and signal a
  * timeout back onto its A2A task.
  */
-export async function expireStaleHitlRequests(
+export async function expireStaleHitlForms(
   now: number
-): Promise<HitlRequestRow[]> {
+): Promise<HitlFormRow[]> {
   const db = getDb();
   return db
-    .update(schema.hitlRequests)
+    .update(schema.hitlForms)
     .set({ status: "expired" })
     .where(
       and(
-        eq(schema.hitlRequests.status, "awaiting"),
-        lt(schema.hitlRequests.deadlineAt, now)
+        eq(schema.hitlForms.status, "awaiting"),
+        lt(schema.hitlForms.deadlineAt, now)
       )
     )
     .returning();
@@ -222,17 +251,17 @@ export async function expireStaleHitlRequests(
 /**
  * Delete rows older than `olderThanSeconds` (default 30 days) regardless of
  * status, keeping the table bounded. In practice `awaiting` rows are resolved
- * long before the cutoff — they expire via {@link expireStaleHitlRequests},
+ * long before the cutoff — they expire via {@link expireStaleHitlForms},
  * bounded by the 7-day TTL — so this reaps only already-terminal rows.
  */
-export async function sweepStaleHitlRequests(
+export async function sweepStaleHitlForms(
   olderThanSeconds = ONE_MONTH_SECONDS
 ): Promise<number> {
   const db = getDb();
   const cutoff = sql`(unixepoch() - ${olderThanSeconds})`;
   const rows = await db
-    .delete(schema.hitlRequests)
-    .where(lt(schema.hitlRequests.createdAt, cutoff))
-    .returning({ requestId: schema.hitlRequests.requestId });
+    .delete(schema.hitlForms)
+    .where(lt(schema.hitlForms.createdAt, cutoff))
+    .returning({ requestId: schema.hitlForms.requestId });
   return rows.length;
 }

@@ -35,4 +35,4 @@ export const CONSTITUTION: readonly string[] = [
  */
 export const ASK_GUIDANCE = `## When only the person can tell you
 
-\`${ASK_USER_TOOL_NAME}\` puts one question to the person who made this request and stops; their answer arrives as their next message. Ask when you cannot go on well without something only they can give you: a choice between options that would each change what you do, or a fact that is nowhere you can look. Do not ask what you can look up, work out, or reasonably assume — say what you assumed instead. Ask one question with everything you need in it, and offer options when the possible answers are few.`;
+\`${ASK_USER_TOOL_NAME}\` puts your questions to the person who made this request and stops; their answers arrive as their next message. Ask when you cannot go on well without something only they can give you: a choice between options that would each change what you do, or a fact that is nowhere you can look. Do not ask what you can look up, work out, or reasonably assume — say what you assumed instead.`;

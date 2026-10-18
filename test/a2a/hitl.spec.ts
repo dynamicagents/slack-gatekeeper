@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Role, type Message } from "@a2a-js/sdk";
+import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import {
   buildMessage,
   dataOf,
@@ -8,43 +9,53 @@ import {
   textPart
 } from "@/a2a/parts";
 import {
+  answeredQuestions,
+  answersText,
+  buildHitlRequestParts,
+  buildHitlResponseParts,
+  buildHitlTimeoutParts,
   parseHitlRequest,
   parseHitlResponse,
   parseHitlTimeout,
   type HitlRequest,
-  toSlackInputRequest,
-  buildHitlRequestParts,
-  buildHitlResponseParts,
-  buildHitlTimeoutParts,
-  optionLabel,
-  approvalOptions,
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
-  HITL_TIMEOUT_TYPE,
-  HITL_APPROVE_OPTION_ID,
-  HITL_REJECT_OPTION_ID
+  HITL_TIMEOUT_TYPE
 } from "@/a2a/hitl";
+import { choiceForm } from "../helpers/hitl";
 
 function msg(parts: Message["parts"]): Message {
   return buildMessage({ messageId: "m1", role: Role.ROLE_AGENT, parts });
 }
 
+const form: HitlRequest = {
+  type: HITL_REQUEST_TYPE,
+  requestId: "req-form",
+  questions: [
+    {
+      kind: "choice",
+      id: "q1",
+      prompt: "Which database?",
+      header: "Database",
+      options: [
+        { id: "q1.o1", label: "Postgres" },
+        { id: "q1.o2", label: "SQLite" }
+      ]
+    },
+    { kind: "text", id: "q2", prompt: "What should it be called?" },
+    {
+      kind: "approval",
+      id: "q3",
+      prompt: "Approve the plan?",
+      artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+    }
+  ]
+};
+
 describe("parseHitlRequest", () => {
-  it("extracts a valid request data part", () => {
-    const req = parseHitlRequest(
-      msg([
-        textPart("Proceed?"),
-        dataPart({
-          type: HITL_REQUEST_TYPE,
-          requestId: "req-1",
-          requestKind: "approval",
-          prompt: "Proceed?"
-        })
-      ])
-    );
-    expect(req).not.toBeNull();
-    expect(req?.requestId).toBe("req-1");
-    expect(req?.requestKind).toBe("approval");
+  it("extracts a valid form", () => {
+    const req = parseHitlRequest(msg([textPart("Proceed?"), dataPart(form)]));
+    expect(req).toEqual(form);
   });
 
   it("returns null when no HITL data part is present", () => {
@@ -57,18 +68,19 @@ describe("parseHitlRequest", () => {
     ).toBeNull();
   });
 
-  it("returns null for a malformed request (missing requestId)", () => {
-    expect(
-      parseHitlRequest(
-        msg([
-          dataPart({
-            type: HITL_REQUEST_TYPE,
-            requestKind: "choice",
-            prompt: "?"
-          })
-        ])
-      )
-    ).toBeNull();
+  it("returns null for a form asking nothing, or one with no requestId", () => {
+    for (const bad of [
+      { type: HITL_REQUEST_TYPE, requestId: "r", questions: [] },
+      { type: HITL_REQUEST_TYPE, questions: form.questions },
+      // An approval with nothing to look at.
+      {
+        type: HITL_REQUEST_TYPE,
+        requestId: "r",
+        questions: [{ kind: "approval", id: "q1", prompt: "OK?" }]
+      }
+    ]) {
+      expect(parseHitlRequest(msg([dataPart(bad)]))).toBeNull();
+    }
   });
 
   it("returns null for an undefined message", () => {
@@ -77,196 +89,157 @@ describe("parseHitlRequest", () => {
 
   it("prefers the first valid data part and ignores non-HITL data", () => {
     const req = parseHitlRequest(
-      msg([
-        dataPart({ type: "noise" }),
-        dataPart({
-          type: HITL_REQUEST_TYPE,
-          requestId: "req-x",
-          requestKind: "choice",
-          prompt: "Pick",
-          options: [{ id: "a", label: "A" }]
-        })
-      ])
+      msg([dataPart({ type: "noise" }), dataPart(choiceForm("req-x"))])
     );
     expect(req?.requestId).toBe("req-x");
   });
 });
 
-describe("toSlackInputRequest", () => {
-  it("fills canonical Approve/Reject options for an approval with no options", () => {
-    const slack = toSlackInputRequest({
-      type: HITL_REQUEST_TYPE,
-      requestId: "r",
-      requestKind: "approval",
-      prompt: "OK to deploy?"
-    });
-    expect(slack.options).toEqual(approvalOptions());
-    expect(slack.options?.map((o) => o.id)).toEqual([
-      HITL_APPROVE_OPTION_ID,
-      HITL_REJECT_OPTION_ID
-    ]);
-    // Reject carries the danger accent.
+describe("the answers in words", () => {
+  const answers: Record<string, HitlAnswer> = {
+    q1: { optionIds: ["q1.o1"], text: "with pgvector" },
+    q2: { text: "forms" },
+    q3: { optionIds: ["approve"] }
+  };
+
+  it("names each picked option by its label, and an approval by its verdict", () => {
     expect(
-      slack.options?.find((o) => o.id === HITL_REJECT_OPTION_ID)?.style
-    ).toBe("danger");
-    expect(slack.display).toBe("buttons"); // default
+      answeredQuestions(form, answers).map((a) => [
+        a.question.id,
+        a.picked,
+        a.text
+      ])
+    ).toEqual([
+      ["q1", ["Postgres"], "with pgvector"],
+      ["q2", [], "forms"],
+      ["q3", ["Approved"], undefined]
+    ]);
   });
 
-  it("passes through explicit options and display", () => {
-    const slack = toSlackInputRequest({
-      type: HITL_REQUEST_TYPE,
-      requestId: "r",
-      requestKind: "choice",
-      prompt: "Which env?",
-      display: "select",
-      allowFreeform: true,
-      options: [
-        { id: "stg", label: "Staging" },
-        { id: "prod", label: "Production", style: "danger" }
-      ]
-    });
-    expect(slack.display).toBe("select");
-    expect(slack.allowFreeform).toBe(true);
-    expect(slack.options?.map((o) => o.id)).toEqual(["stg", "prod"]);
+  it("puts each answer under its question, by header where there is one", () => {
+    expect(answersText(form, answers)).toBe(
+      [
+        "Database\nPostgres\nwith pgvector",
+        "What should it be called?\nforms",
+        "Approve the plan?\nApproved"
+      ].join("\n\n")
+    );
   });
 
-  it("leaves options undefined for a choice with none (freeform-only prompt)", () => {
-    const slack = toSlackInputRequest({
-      type: HITL_REQUEST_TYPE,
-      requestId: "r",
-      requestKind: "choice",
-      prompt: "Tell me"
-    });
-    expect(slack.options).toBeUndefined();
-  });
-});
-
-describe("optionLabel", () => {
-  const opts = [
-    { id: "a", label: "Alpha" },
-    { id: "b", label: "Beta" }
-  ];
-  it("resolves a label by id", () => {
-    expect(optionLabel(opts, "b")).toBe("Beta");
-  });
-  it("returns undefined for an unknown or missing id", () => {
-    expect(optionLabel(opts, "z")).toBeUndefined();
-    expect(optionLabel(opts, undefined)).toBeUndefined();
+  it("gives one question's answer alone", () => {
+    expect(
+      answersText(choiceForm("r"), { q1: { optionIds: ["approve"] } })
+    ).toBe("Approve");
   });
 });
 
 describe("buildHitlResponseParts", () => {
-  it("builds a human TextPart plus a structured response DataPart", () => {
+  it("builds the answers in words plus a structured response DataPart", () => {
+    const answers: Record<string, HitlAnswer> = {
+      q1: { optionIds: ["reject"], text: "not yet" }
+    };
     const parts = buildHitlResponseParts({
-      requestId: "req-1",
-      optionId: "approve",
+      request: choiceForm("req-1"),
       answeredBy: "U1",
-      humanText: "Approve"
+      answers
     });
-    expect(parts[0]).toEqual(textPart("Approve"));
-    expect(parts[1]).toMatchObject(
-      dataPart({
-        type: HITL_RESPONSE_TYPE,
-        requestId: "req-1",
-        optionId: "approve",
-        answeredBy: "U1"
-      })
-    );
-  });
-
-  it("includes freeform text and omits optionId when absent", () => {
-    const parts = buildHitlResponseParts({
-      requestId: "req-2",
-      text: "do the other thing",
-      answeredBy: "U2",
-      humanText: "do the other thing"
+    expect(partsText(parts)).toBe("Reject\nnot yet");
+    expect(parts.map(dataOf).find((d) => d !== undefined)).toEqual({
+      type: HITL_RESPONSE_TYPE,
+      requestId: "req-1",
+      answeredBy: "U1",
+      answers
     });
-    const data = dataOf(parts[1]) as Record<string, unknown>;
-    expect(data.text).toBe("do the other thing");
-    expect(data.optionId).toBeUndefined();
   });
 });
 
 describe("buildHitlTimeoutParts", () => {
   it("carries the timeout data part and a human fallback", () => {
-    const parts = buildHitlTimeoutParts("req-9");
-    expect(partsText(parts)).toMatch(/no response was received/i);
-    expect(parts[1]).toEqual(
-      dataPart({ type: HITL_TIMEOUT_TYPE, requestId: "req-9" })
-    );
+    const parts = buildHitlTimeoutParts("req-3");
+    expect(parts.map(dataOf).find((d) => d !== undefined)).toEqual({
+      type: HITL_TIMEOUT_TYPE,
+      requestId: "req-3"
+    });
+    expect(partsText(parts)).toContain("No response");
   });
 });
 
 describe("buildHitlRequestParts", () => {
   it("carries a text-part fallback plus the request data part, and round-trips", () => {
-    const req = {
-      type: HITL_REQUEST_TYPE,
-      requestId: "req-42",
-      requestKind: "choice",
-      prompt: "Pick one",
-      options: [{ id: "opt_0", label: "A" }],
-      allowFreeform: true
-    } satisfies HitlRequest;
-    const parts = buildHitlRequestParts(req);
-    expect(parts[0]).toEqual(textPart("Pick one"));
-
-    // The data part is exactly what parseHitlRequest reads back.
-    const parsed = parseHitlRequest(msg(parts));
-    expect(parsed).toMatchObject({
-      requestId: "req-42",
-      requestKind: "choice",
-      prompt: "Pick one",
-      allowFreeform: true
-    });
+    const parts = buildHitlRequestParts(form);
+    expect(partsText(parts)).toContain("Which database?");
+    expect(parseHitlRequest(msg(parts))).toEqual(form);
   });
 });
 
 describe("parseHitlResponse", () => {
-  it("extracts a valid response DataPart (option answer)", () => {
-    const parts = buildHitlResponseParts({
-      requestId: "req-1",
-      optionId: HITL_APPROVE_OPTION_ID,
-      answeredBy: "U9",
-      humanText: "Approve"
+  it("extracts answers keyed by question", () => {
+    const res = parseHitlResponse(
+      msg([
+        dataPart({
+          type: HITL_RESPONSE_TYPE,
+          requestId: "req-1",
+          answeredBy: "U1",
+          answers: { q1: { optionIds: ["a"] }, q2: { text: "typed" } }
+        })
+      ])
+    );
+    expect(res?.answers).toEqual({
+      q1: { optionIds: ["a"] },
+      q2: { text: "typed" }
     });
-    const res = parseHitlResponse(msg(parts));
-    expect(res).toMatchObject({
-      requestId: "req-1",
-      optionId: HITL_APPROVE_OPTION_ID,
-      answeredBy: "U9"
-    });
-  });
-
-  it("extracts a freeform answer and returns null when absent", () => {
-    const parts = buildHitlResponseParts({
-      requestId: "req-2",
-      text: "something else",
-      answeredBy: "U9",
-      humanText: "something else"
-    });
-    expect(parseHitlResponse(msg(parts))?.text).toBe("something else");
     expect(parseHitlResponse(msg([textPart("hi")]))).toBeNull();
   });
 
-  it("returns null for a malformed response with neither optionId nor text", () => {
-    expect(
-      parseHitlResponse(
-        msg([
-          dataPart({
-            type: HITL_RESPONSE_TYPE,
-            requestId: "req-3",
-            answeredBy: "U9"
-          })
-        ])
-      )
-    ).toBeNull();
+  it("returns null for an empty or malformed pick, even beside words", () => {
+    for (const optionIds of [[], [""], "approve", null]) {
+      expect(
+        parseHitlResponse(
+          msg([
+            dataPart({
+              type: HITL_RESPONSE_TYPE,
+              requestId: "req-1",
+              answeredBy: "U1",
+              answers: { q1: { optionIds, text: "ship it" } }
+            })
+          ])
+        )
+      ).toBeNull();
+    }
+  });
+
+  it("reads only an answer's own keys, whatever the question is called", () => {
+    const request: HitlRequest = {
+      type: HITL_REQUEST_TYPE,
+      requestId: "r-proto",
+      questions: [{ kind: "text", id: "constructor", prompt: "Name it?" }]
+    };
+    expect(answeredQuestions(request, {})).toEqual([]);
+  });
+
+  it("returns null for an answer with neither options nor text", () => {
+    for (const answers of [{ q1: {} }, { q1: { optionIds: [] } }, undefined]) {
+      expect(
+        parseHitlResponse(
+          msg([
+            dataPart({
+              type: HITL_RESPONSE_TYPE,
+              requestId: "req-1",
+              answeredBy: "U1",
+              answers
+            })
+          ])
+        )
+      ).toBeNull();
+    }
   });
 });
 
 describe("parseHitlTimeout", () => {
   it("extracts the requestId and returns null when absent", () => {
-    const parts = buildHitlTimeoutParts("req-7");
-    expect(parseHitlTimeout(msg(parts))).toEqual({ requestId: "req-7" });
+    expect(parseHitlTimeout(msg(buildHitlTimeoutParts("req-9")))).toEqual({
+      requestId: "req-9"
+    });
     expect(parseHitlTimeout(msg([textPart("hi")]))).toBeNull();
   });
 });

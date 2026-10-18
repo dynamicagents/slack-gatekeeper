@@ -1,43 +1,92 @@
 import { describe, it, expect } from "vitest";
+import type { SlackViewStateValue } from "@chat-adapter/slack/webhook";
 import {
-  SLACK_FREEFORM_ACTION_ID,
-  SLACK_FREEFORM_BLOCK_ID
-} from "@chat-adapter/slack/blocks";
+  HITL_REQUEST_TYPE,
+  MAX_MESSAGE_TEXT_BYTES,
+  type HitlQuestion,
+  type HitlRequestData
+} from "@dynamicagents/g2a-protocol";
 import {
   answeredBlocks,
+  clipMrkdwn,
   fallbackText,
-  freeformView,
-  promptBlocks,
+  formPages,
+  formView,
   requestBlocks,
   resolvedBlocks,
-  splitMrkdwn
+  splitMrkdwn,
+  wordsView
 } from "@/slack/hitl/render";
+import {
+  enteredAnswers,
+  formAnswers,
+  formErrors,
+  pickAnswers,
+  readControl,
+  readViewMeta,
+  viewValues
+} from "@/slack/hitl/answer";
 import {
   blocksText,
   messageViolations,
   viewViolations
 } from "../helpers/slack-limits";
+import { choiceForm } from "../helpers/hitl";
 
-// Pure rendering; no storage, so no `useStorageReset()` — see
+// Pure rendering and parsing; no storage, so no `useStorageReset()` — see
 // test/helpers/storage.ts.
+
+function form(
+  questions: HitlQuestion[],
+  prompt?: string,
+  requestId = "req-1"
+): HitlRequestData {
+  return {
+    type: HITL_REQUEST_TYPE,
+    requestId,
+    ...(prompt ? { prompt } : {}),
+    questions
+  };
+}
 
 /**
  * A prompt shaped like the one that lost its questions: a long preamble, then
- * numbered questions that all start past the 3,000th character.
+ * numbered questions that all start past the 3,000th character — now asked as
+ * the form they always were.
  */
-function longPrompt(): string {
+function longForm(): HitlRequestData {
   const preamble = Array.from(
     { length: 30 },
     (_, i) =>
       `Context paragraph ${i + 1}. ${"Detail about the plan. ".repeat(4)}`
   ).join("\n\n");
-  const questions = [1, 2, 3, 4, 5]
-    .map(
-      (n) =>
-        `${n}. **Question ${n}:** ${"Which way should this go? ".repeat(3)}`
-    )
-    .join("\n");
-  return `${preamble}\n\n${questions}`;
+  return form(
+    [1, 2, 3, 4, 5].map((n) => ({
+      kind: "text",
+      id: `q${n}`,
+      prompt: `**Question ${n}:** ${"Which way should this go? ".repeat(3)}`
+    })),
+    preamble
+  );
+}
+
+/** A form of `n` short choices, past what one modal holds from about 33. */
+function manyQuestions(
+  n: number,
+  prompt = "Some context first."
+): HitlRequestData {
+  return form(
+    Array.from({ length: n }, (_, i) => ({
+      kind: "choice" as const,
+      id: `c${i}`,
+      prompt: `Question ${i}?`,
+      options: [
+        { id: "a", label: "A" },
+        { id: "b", label: "B" }
+      ]
+    })),
+    prompt
+  );
 }
 
 const longLabels = [
@@ -47,13 +96,45 @@ const longLabels = [
   "y".repeat(93)
 ];
 
-function actionsOf(
-  blocks: unknown[]
-): { text: { text: string }; value?: string }[] {
+interface Button {
+  action_id: string;
+  text: { text: string };
+  value: string;
+  style?: string;
+}
+
+function buttonsOf(blocks: unknown[]): Button[] {
   const actions = blocks.find(
     (b) => (b as { type?: string }).type === "actions"
-  ) as { elements: { text: { text: string }; value?: string }[] } | undefined;
+  ) as { elements: Button[] } | undefined;
   return actions?.elements ?? [];
+}
+
+function inputsOf(view: Record<string, unknown>) {
+  return (view.blocks as Record<string, unknown>[]).filter(
+    (b) => b.type === "input"
+  ) as {
+    block_id: string;
+    optional: boolean;
+    label: { text: string };
+    element: Record<string, unknown> & { type: string; options?: unknown[] };
+  }[];
+}
+
+/** A modal's state as Slack reports it, one entry per input. */
+function state(
+  ...entries: [string, { picks?: string[]; text?: string }][]
+): SlackViewStateValue[] {
+  return entries.map(([blockId, v]) => ({
+    blockId,
+    actionId: "value",
+    raw: v.picks
+      ? v.picks.length === 1
+        ? { selected_option: { value: v.picks[0] } }
+        : { selected_options: v.picks.map((value) => ({ value })) }
+      : {},
+    ...(v.text !== undefined ? { value: v.text } : {})
+  }));
 }
 
 describe("splitMrkdwn", () => {
@@ -65,7 +146,6 @@ describe("splitMrkdwn", () => {
     const pieces = splitMrkdwn(text, 1_000);
     expect(pieces.length).toBeGreaterThan(1);
     for (const piece of pieces) expect(piece.length).toBeLessThanOrEqual(1_000);
-    // Nothing lost: every paragraph lands whole in some piece.
     for (let i = 0; i < 20; i++) {
       expect(pieces.some((p) => p.includes(`p${i} ${"a".repeat(300)}`))).toBe(
         true
@@ -83,167 +163,578 @@ describe("splitMrkdwn", () => {
   });
 });
 
-describe("requestBlocks", () => {
-  it("shows every question of a prompt past 3,000 characters", () => {
-    const blocks = requestBlocks({
-      requestId: "req-long",
-      prompt: longPrompt(),
-      display: "buttons",
-      allowFreeform: true
-    });
+describe("the open prompt", () => {
+  it("answers one short choice by its own buttons, with Other… beside them", () => {
+    const blocks = requestBlocks(
+      choiceForm("req-short", "Proceed?", [
+        { id: "yes", label: "Yes" },
+        { id: "no", label: "No" }
+      ])
+    );
     expect(messageViolations(blocks)).toEqual([]);
-    const text = blocksText(blocks);
-    for (const n of [1, 2, 3, 4, 5]) expect(text).toContain(`Question ${n}:`);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
+      "Yes",
+      "No",
+      "Other…"
+    ]);
+    // Short labels on their buttons: no list repeating them.
+    expect(blocksText(blocks)).not.toContain("*1.*");
   });
 
   it("lists long options in full above buttons that show their numbers", () => {
-    const blocks = requestBlocks({
-      requestId: "req-opts",
-      prompt: "Which merge?",
-      display: "buttons",
-      options: longLabels.map((label, i) => ({ id: `option_${i + 1}`, label }))
-    });
+    const blocks = requestBlocks(
+      choiceForm(
+        "req-opts",
+        "Which merge?",
+        longLabels.map((label, i) => ({ id: `o${i}`, label }))
+      )
+    );
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
     for (const label of longLabels) expect(text).toContain(label);
-    const buttons = actionsOf(blocks);
-    expect(buttons.map((b) => b.text.text)).toEqual(["1", "2", "3", "4"]);
-    // The value is still the option id, which is what comes back on a click.
-    expect(buttons.map((b) => b.value)).toEqual([
-      "option_1",
-      "option_2",
-      "option_3",
-      "option_4"
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
+      "1",
+      "2",
+      "3",
+      "4",
+      "Other…"
     ]);
   });
 
-  it("lists options that carry a description, even with short labels", () => {
-    const blocks = requestBlocks({
-      requestId: "req-desc",
-      prompt: "Which?",
-      display: "buttons",
-      options: [
-        { id: "a", label: "A", description: "The first way, explained." },
-        { id: "b", label: "B" }
-      ]
-    });
-    expect(blocksText(blocks)).toContain("The first way, explained.");
-    expect(actionsOf(blocks).map((b) => b.text.text)).toEqual(["1", "2"]);
+  it("shows each option's description, and its example as a code block", () => {
+    const text = blocksText(
+      requestBlocks(
+        choiceForm("req-ex", "How should it merge?", [
+          {
+            id: "squash",
+            label: "Squash",
+            description: "One commit on main.",
+            example: "feat: forms (#142)"
+          },
+          { id: "rebase", label: "Rebase" }
+        ])
+      )
+    );
+    expect(text).toContain(
+      "*1.* Squash\nOne commit on main.\n```\nfeat: forms (#142)\n```"
+    );
+    expect(text).toContain("*2.* Rebase");
   });
 
-  it("keeps short labels on their buttons, with no list", () => {
-    const blocks = requestBlocks({
-      requestId: "req-short",
-      prompt: "Proceed?",
-      display: "buttons",
-      options: [
-        { id: "approve", label: "Approve", style: "primary" },
-        { id: "reject", label: "Reject", style: "danger" }
-      ]
-    });
-    expect(blocks).toHaveLength(2);
-    expect(actionsOf(blocks).map((b) => b.text.text)).toEqual([
-      "Approve",
-      "Reject"
+  it("asks an approval by Approve, Reject and Comment…, with the link to look at", () => {
+    const blocks = requestBlocks(
+      form([
+        {
+          kind: "approval",
+          id: "q1",
+          prompt: "Approve the plan?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ])
+    );
+    expect(blocksText(blocks)).toContain("<https://agents.example/a/tok>");
+    expect(buttonsOf(blocks).map((b) => [b.text.text, b.style])).toEqual([
+      ["Approve", "primary"],
+      ["Reject", "danger"],
+      ["Comment…", undefined]
     ]);
   });
 
-  it("numbers radio options within Slack's 75 characters, marking the cut", () => {
-    const blocks = requestBlocks({
-      requestId: "req-radio",
-      prompt: "Which?",
-      display: "radio",
-      options: longLabels.map((label, i) => ({ id: `o${i}`, label }))
-    });
+  it("does not link an artifact that is not https", () => {
+    const text = blocksText(
+      requestBlocks(
+        form([
+          {
+            kind: "approval",
+            id: "q1",
+            prompt: "Approve?",
+            artifact: { id: "p", url: "javascript:alert(1)" }
+          }
+        ])
+      )
+    );
+    expect(text).not.toContain("<javascript:");
+  });
+
+  it("shows every question of a long form, and answers it from one button", () => {
+    const blocks = requestBlocks(longForm());
     expect(messageViolations(blocks)).toEqual([]);
-    const radio = (
-      blocks.find((b) => (b as { type?: string }).type === "actions") as {
-        elements: { options: { text: { text: string } }[] }[];
-      }
-    ).elements[0];
-    expect(radio.options[0].text.text).toMatch(/^1\. x+…$/);
-    expect(radio.options[2].text.text).toBe("3. Squash and merge");
+    const text = blocksText(blocks);
+    for (const n of [1, 2, 3, 4, 5]) expect(text).toContain(`Question ${n}:`);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+  });
+
+  it("numbers a form's questions, under their headers", () => {
+    const text = blocksText(
+      requestBlocks(
+        form([
+          {
+            kind: "choice",
+            id: "q1",
+            prompt: "Which database?",
+            header: "Database",
+            options: [{ id: "a", label: "Postgres" }]
+          },
+          { kind: "text", id: "q2", prompt: "Name it?" }
+        ])
+      )
+    );
+    expect(text).toContain("*1. Database*\nWhich database?");
+    expect(text).toContain("*1.* Postgres");
+    expect(text).toContain("*2.* Name it?");
   });
 
   it("converts the agent's Markdown and defuses channel-wide mentions", () => {
     const text = blocksText(
-      requestBlocks({
-        requestId: "req-md",
-        prompt: "**Bold** <!channel> and @here",
-        display: "buttons"
-      })
+      requestBlocks(choiceForm("req-md", "**Bold** <!channel> and @here"))
     );
     expect(text).toContain("*Bold*");
     expect(text).not.toContain("<!channel>");
     expect(text).not.toContain("@here");
   });
 
-  it("cuts a prompt past what a message holds, and says so", () => {
-    const blocks = promptBlocks("word ".repeat(4_000));
+  it("answers a form too long for one modal from the same Answer button", () => {
+    const blocks = requestBlocks(manyQuestions(40));
     expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain("The question is cut here");
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
   });
 });
 
-describe("answeredBlocks", () => {
-  it("fits a long answer under a long prompt, marking where it is cut", () => {
+describe("the controls", () => {
+  it("read back as the pick or the modal they stand for", () => {
+    const request = choiceForm("req-c", "Which?", [
+      { id: "first", label: "First" },
+      { id: "second", label: "Second" }
+    ]);
+    const [, second, other] = buttonsOf(requestBlocks(request));
+    const pick = readControl({
+      actionId: second!.action_id,
+      value: second!.value
+    });
+    expect(pick).toEqual({
+      kind: "pick",
+      requestId: "req-c",
+      question: 0,
+      option: 1
+    });
+    expect(
+      pickAnswers(request, pick as Extract<typeof pick, { kind: "pick" }>)
+    ).toEqual({ q1: { optionIds: ["second"] } });
+    expect(
+      readControl({ actionId: other!.action_id, value: other!.value })
+    ).toEqual({ kind: "open", requestId: "req-c", question: 0 });
+  });
+
+  it("carry an agent's long request id in the value, not the capped action id", () => {
+    const requestId = "r".repeat(400);
+    const [button] = buttonsOf(requestBlocks(choiceForm(requestId)));
+    expect(button!.action_id.length).toBeLessThan(255);
+    expect(
+      readControl({ actionId: button!.action_id, value: button!.value })
+        ?.requestId
+    ).toBe(requestId);
+  });
+
+  it("go back a page from a paged form's later one", () => {
+    const view = formView(manyQuestions(40), 1);
+    const back = (view.blocks as Record<string, unknown>[]).find(
+      (b) => b.type === "actions"
+    ) as { elements: Button[] };
+    const [button] = back.elements;
+    expect(button!.text.text).toBe("← Back");
+    expect(
+      readControl({ actionId: button!.action_id, value: button!.value })
+    ).toEqual({ kind: "back", requestId: "req-1", page: 0 });
+  });
+
+  it("ignore anything that is not one of them", () => {
+    expect(readControl({ actionId: "something", value: "x" })).toBeNull();
+    expect(readControl({ actionId: "hitl-open", value: "{}" })).toBeNull();
+  });
+});
+
+describe("the form's modal", () => {
+  const request = form(
+    [
+      {
+        kind: "choice",
+        id: "db",
+        prompt: "Which database?",
+        header: "Database",
+        options: [
+          { id: "pg", label: "Postgres", description: "In production." },
+          { id: "lite", label: "SQLite" }
+        ]
+      },
+      {
+        kind: "choice",
+        id: "checks",
+        prompt: "Which checks?",
+        multiple: true,
+        options: [
+          { id: "lint", label: "lint" },
+          { id: "test", label: "test" }
+        ]
+      },
+      {
+        kind: "choice",
+        id: "region",
+        prompt: "Which region?",
+        options: Array.from({ length: 12 }, (_, i) => ({
+          id: `r${i}`,
+          label: `Region ${i}`
+        }))
+      },
+      { kind: "text", id: "name", prompt: "Name it?" },
+      {
+        kind: "approval",
+        id: "plan",
+        prompt: "Approve the plan?",
+        artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+      }
+    ],
+    "Before I start:"
+  );
+
+  it("gives each question an input of its kind, within Slack's limits", () => {
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    // One page: sent from it, with nothing to page back to.
+    expect(readViewMeta(view.private_metadata as string)).toEqual({
+      r: "req-1",
+      p: 0
+    });
+    expect(view.title).toEqual({ type: "plain_text", text: "Your answer" });
+    expect(view.submit).toEqual({ type: "plain_text", text: "Send" });
+    expect(
+      (view.blocks as { type: string }[]).some((b) => b.type === "actions")
+    ).toBe(false);
+    expect(
+      inputsOf(view).map((b) => [b.block_id, b.element.type, b.optional])
+    ).toEqual([
+      ["q0:choice", "radio_buttons", true],
+      ["q0:other", "plain_text_input", true],
+      ["q1:choice+", "checkboxes", true],
+      ["q1:other", "plain_text_input", true],
+      ["q2:choice", "static_select", true],
+      ["q2:other", "plain_text_input", true],
+      ["q3:text", "plain_text_input", false],
+      ["q4:approval", "radio_buttons", true],
+      ["q4:other", "plain_text_input", true]
+    ]);
+    expect(inputsOf(view)[0]!.label.text).toBe("Database");
+    // Answers past 3,000 characters reach the agent without a cap.
+    expect(inputsOf(view)[6]!.element).not.toHaveProperty("max_length");
+  });
+
+  it("opens one question's words alone, for Other… and Comment…", () => {
+    const view = wordsView(request, 4);
+    expect(viewViolations(view)).toEqual([]);
+    expect(readViewMeta(view.private_metadata as string)).toEqual({
+      r: "req-1"
+    });
+    expect(inputsOf(view).map((b) => [b.block_id, b.optional])).toEqual([
+      ["q4:other", false]
+    ]);
+    expect(blocksText(view.blocks)).toContain("Approve the plan?");
+  });
+
+  /** A page shown again — after Back, or reopened — holds what was entered. */
+  it("holds the answers already given in each input", () => {
+    const view = formView(request, 0, {
+      db: { optionIds: ["lite"], text: "for now" },
+      checks: { optionIds: ["lint", "test"] },
+      region: { optionIds: ["r11"] },
+      name: { text: "forms" },
+      plan: { optionIds: ["reject"], text: "smaller" }
+    });
+    expect(viewViolations(view)).toEqual([]);
+    const initial = inputsOf(view).map((b) => {
+      const e = b.element as Record<string, unknown>;
+      const one = e.initial_option as { value: string } | undefined;
+      const many = e.initial_options as { value: string }[] | undefined;
+      return [
+        b.block_id,
+        e.initial_value ?? one?.value ?? many?.map((o) => o.value)
+      ];
+    });
+    expect(initial).toEqual([
+      ["q0:choice", "1"],
+      ["q0:other", "for now"],
+      ["q1:choice+", ["0", "1"]],
+      ["q1:other", undefined],
+      ["q2:choice", "11"],
+      ["q2:other", undefined],
+      ["q3:text", "forms"],
+      ["q4:approval", "reject"],
+      ["q4:other", "smaller"]
+    ]);
+    // Slack takes an initial option only as one of the element's own.
+    const select = inputsOf(view)[4]!.element;
+    expect(select.options).toContainEqual(select.initial_option);
+  });
+
+  it("reads what is entered so far, unanswered questions left out", () => {
+    expect(
+      enteredAnswers(
+        request,
+        state(
+          ["q0:choice", { picks: [] }],
+          ["q0:other", { text: "" }],
+          ["q3:text", { text: "forms" }]
+        )
+      )
+    ).toEqual({ name: { text: "forms" } });
+  });
+
+  it("reads a modal's inputs from a click inside it, as a submission carries them", () => {
+    const values = viewValues({
+      state: {
+        values: {
+          "q0:choice": {
+            value: { type: "radio_buttons", selected_option: { value: "0" } }
+          },
+          "q3:text": { value: { type: "plain_text_input", value: "forms" } }
+        }
+      }
+    });
+    expect(enteredAnswers(request, values)).toEqual({
+      db: { optionIds: ["pg"] },
+      name: { text: "forms" }
+    });
+    expect(viewValues(undefined)).toEqual([]);
+  });
+
+  it("reads a submission back as answers keyed by question", () => {
+    const values = state(
+      ["q0:choice", { picks: ["0"] }],
+      ["q0:other", { text: "" }],
+      ["q1:choice+", { picks: ["0", "1"] }],
+      ["q1:other", { text: "and typecheck" }],
+      ["q2:choice", { picks: [] }],
+      ["q2:other", { text: "wherever is cheapest" }],
+      ["q3:text", { text: "  forms  " }],
+      ["q4:approval", { picks: ["approve"] }],
+      ["q4:other", { text: "" }]
+    );
+    expect(formErrors(request, values)).toBeUndefined();
+    expect(formAnswers(request, values)).toEqual({
+      db: { optionIds: ["pg"] },
+      checks: { optionIds: ["lint", "test"], text: "and typecheck" },
+      region: { text: "wherever is cheapest" },
+      name: { text: "forms" },
+      plan: { optionIds: ["approve"] }
+    });
+  });
+
+  it("refuses a question left without a pick or words, under that question", () => {
+    expect(
+      formErrors(
+        request,
+        state(
+          ["q0:choice", { picks: [] }],
+          ["q0:other", { text: "   " }],
+          ["q3:text", { text: "   " }],
+          ["q4:approval", { picks: [] }]
+        )
+      )
+    ).toEqual({
+      "q0:choice": "Pick one, or answer in your own words below.",
+      "q3:text": "Write an answer.",
+      "q4:approval": "Approve, reject, or leave a comment below."
+    });
+  });
+
+  it("refuses words longer together than the agent takes", () => {
+    const half = "x".repeat(MAX_MESSAGE_TEXT_BYTES / 2 + 1);
+    expect(
+      formErrors(
+        request,
+        state(["q0:other", { text: half }], ["q3:text", { text: half }])
+      )
+    ).toEqual({
+      "q3:text": "These answers are too long to send — please shorten them."
+    });
+  });
+
+  /**
+   * The agent measures the text part the answers go in, and that names each
+   * question beside its words: words that fit on their own can still make a
+   * message it refuses, after the question is spent.
+   */
+  it("measures the text the answers are sent with, headings included", () => {
+    const two = form([
+      { kind: "text", id: "a", prompt: "First?", header: "First" },
+      { kind: "text", id: "b", prompt: "Second?", header: "Second" }
+    ]);
+    const half = "x".repeat(MAX_MESSAGE_TEXT_BYTES / 2 - 1);
+    expect(
+      formErrors(
+        two,
+        state(["q0:text", { text: half }], ["q1:text", { text: half }])
+      )
+    ).toEqual({
+      "q1:text": "These answers are too long to send — please shorten them."
+    });
+  });
+
+  it("keeps the answer to a question whatever its id", () => {
+    const odd = form([
+      { kind: "text", id: "__proto__", prompt: "First?" },
+      { kind: "text", id: "constructor", prompt: "Second?" }
+    ]);
+    const answers = formAnswers(
+      odd,
+      state(["q0:text", { text: "one" }], ["q1:text", { text: "two" }])
+    );
+    expect(Object.keys(answers ?? {})).toEqual(["__proto__", "constructor"]);
+    expect(JSON.parse(JSON.stringify(answers))).toEqual(
+      JSON.parse('{"__proto__":{"text":"one"},"constructor":{"text":"two"}}')
+    );
+  });
+
+  it("caps an input's label, the header above it shown whole", () => {
+    const header = "h".repeat(2_001);
+    const view = formView(
+      form([
+        { kind: "text", id: "a", prompt: "First?", header },
+        { kind: "text", id: "b", prompt: "Second?" }
+      ])
+    );
+    expect(viewViolations(view)).toEqual([]);
+    expect(inputsOf(view)[0]!.label.text).toHaveLength(2_000);
+    expect(blocksText(view.blocks).replace(/\s/g, "")).toContain(header);
+  });
+});
+
+/**
+ * Past what one modal holds, the form is paged rather than refused: the agent
+ * asked one form, and the gate keeps each page's answers until the last sends
+ * them all.
+ */
+describe("a form too long for one modal", () => {
+  const request = manyQuestions(40);
+
+  it("is paged, every question whole on one page, in order", () => {
+    const pages = formPages(request);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flat()).toEqual(request.questions.map((_, i) => i));
+    pages.forEach((_, p) => {
+      expect(viewViolations(formView(request, p))).toEqual([]);
+    });
+  });
+
+  it("goes Next page by page, and is sent from its last", () => {
+    const pages = formPages(request);
+    const views = pages.map((_, p) => formView(request, p));
+    expect(views.map((v) => (v.title as { text: string }).text)).toEqual(
+      pages.map((_, p) => `Your answer · ${p + 1} of ${pages.length}`)
+    );
+    expect(views.map((v) => (v.submit as { text: string }).text)).toEqual(
+      pages.map((_, p) => (p === pages.length - 1 ? "Send" : "Next"))
+    );
+    expect(
+      views.map((v) => readViewMeta(v.private_metadata as string)?.p)
+    ).toEqual(pages.map((_, p) => p));
+    // The preamble opens the form, once.
+    expect(views.map((v) => blocksText(v.blocks as unknown[]))).toEqual(
+      pages.map((_, p) =>
+        p === 0
+          ? expect.stringContaining("Some context first.")
+          : expect.not.stringContaining("Some context first.")
+      )
+    );
+  });
+
+  it("offers Back on every page but the first", () => {
+    const pages = formPages(request);
+    const backs = pages.map((_, p) =>
+      (formView(request, p).blocks as { type: string }[]).some(
+        (b) => b.type === "actions"
+      )
+    );
+    expect(backs).toEqual(pages.map((_, p) => p > 0));
+  });
+
+  it("keeps a form that fits on one page whole", () => {
+    expect(formPages(manyQuestions(20))).toEqual([
+      Array.from({ length: 20 }, (_, i) => i)
+    ]);
+  });
+});
+
+describe("the answered prompt", () => {
+  it("shortens a long preamble rather than lose the answers under it", () => {
+    const request = form(
+      [
+        { kind: "text", id: "a", prompt: "First question?" },
+        { kind: "text", id: "b", prompt: "Final question?" }
+      ],
+      "Context. ".repeat(1_500)
+    );
     const blocks = answeredBlocks({
-      prompt: longPrompt(),
-      answer: "I never merge work in progress. ".repeat(320),
+      request,
+      answers: { a: { text: "first answer" }, b: { text: "final answer" } },
       answeredBy: "U1"
     });
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
-    expect(text).toContain("Question 5:");
+    expect(text).toContain("first answer");
+    expect(text).toContain("final answer");
+    expect(text).not.toContain("the agent has the full answer");
+    // Shortened, visibly.
+    expect(text).toMatch(/^Context\. [^…]*…/);
+  });
+
+  it("fits a long answer under a long form, marking where it is cut", () => {
+    const request = longForm();
+    const blocks = answeredBlocks({
+      request,
+      answers: Object.fromEntries(
+        request.questions.map((q) => [
+          q.id,
+          { text: "I never merge work in progress. ".repeat(80) }
+        ])
+      ),
+      answeredBy: "U1"
+    });
+    expect(messageViolations(blocks)).toEqual([]);
+    const text = blocksText(blocks);
     expect(text).toContain("the agent has the full answer");
     expect(text).toContain("Answered by <@U1>");
   });
 
-  it("shows a typed answer as written, not as Slack markup", () => {
+  it("shows picks by label and words as written, each under its question", () => {
     const text = blocksText(
       answeredBlocks({
-        prompt: "Name it",
-        answer: "<@U2> & <!here>\nsecond line",
+        request: form([
+          {
+            kind: "choice",
+            id: "db",
+            prompt: "Which database?",
+            options: [{ id: "pg", label: "Postgres" }]
+          },
+          { kind: "text", id: "name", prompt: "Name it?" }
+        ]),
+        answers: {
+          db: { optionIds: ["pg"] },
+          name: { text: "<@U2> & <!here>" }
+        },
         answeredBy: "U1"
       })
     );
+    expect(text).toContain("Which database?\n:white_check_mark: *Postgres*");
     expect(text).toContain("&lt;@U2&gt; &amp;");
     expect(text).not.toContain("<!here>");
   });
-
-  it("bolds a short one-line answer", () => {
-    expect(
-      blocksText(
-        answeredBlocks({
-          prompt: "Proceed?",
-          answer: "Approve",
-          answeredBy: "U1"
-        })
-      )
-    ).toContain(":white_check_mark: *Approve*");
-  });
 });
 
-describe("resolvedBlocks", () => {
-  it("re-renders a long prompt within the limits", () => {
-    const blocks = resolvedBlocks(longPrompt(), "⏳ This prompt expired.");
+describe("a closed prompt", () => {
+  it("re-renders a long form within the limits", () => {
+    const blocks = resolvedBlocks(longForm(), "⏳ This prompt expired.");
     expect(messageViolations(blocks)).toEqual([]);
     expect(blocksText(blocks)).toContain("Question 5:");
-  });
-});
-
-describe("freeformView", () => {
-  it("shows the whole question and leaves the answer's length to the agent", () => {
-    const view = freeformView({ requestId: "req-1", prompt: longPrompt() });
-    expect(viewViolations(view)).toEqual([]);
-    expect(blocksText(view.blocks)).toContain("Question 5:");
-    const input = (view.blocks as Record<string, unknown>[]).find(
-      (b) => b.type === "input"
-    ) as { block_id: string; element: Record<string, unknown> };
-    expect(input.block_id).toBe(SLACK_FREEFORM_BLOCK_ID);
-    expect(input.element.action_id).toBe(SLACK_FREEFORM_ACTION_ID);
-    expect(input.element).not.toHaveProperty("max_length");
-    expect(view.private_metadata).toBe("req-1");
+    expect(buttonsOf(blocks)).toEqual([]);
   });
 });
 
@@ -255,6 +746,27 @@ describe("fallbackText", () => {
 });
 
 describe("what a cut may not lose", () => {
+  /**
+   * A cut shares out what room is left, and a share can be a character or
+   * two: a cut that overruns its share pushes the end of the message — an
+   * option's heading — past where Slack keeps it.
+   */
+  it("keeps every cut within its room, however little", () => {
+    const texts = [
+      "word ".repeat(40),
+      `see ${"<https://example.com/x|a link> ".repeat(5)}`,
+      `${"```"}\n${"code ".repeat(40)}`
+    ];
+    for (const text of texts) {
+      for (let max = 0; max <= 40; max++) {
+        expect(clipMrkdwn(text, max).length).toBeLessThanOrEqual(max);
+      }
+    }
+    expect(clipMrkdwn("short", 5)).toBe("short");
+    expect(clipMrkdwn("longer", 1)).toBe("…");
+    expect(clipMrkdwn("longer", 0)).toBe("");
+  });
+
   it("keeps a Slack link whole when the last space before the cut is inside it", () => {
     const link = `<https://example.com/${"p".repeat(30)}|a label ${"with words ".repeat(7)}to end on>`;
     const pieces = splitMrkdwn(`${"word ".repeat(576)}${link} after`);
@@ -269,7 +781,8 @@ describe("what a cut may not lose", () => {
     const last = pieces.find((p) => p.includes("After"))!;
     const before = last.slice(0, last.indexOf("After"));
     expect((before.split("```").length - 1) % 2).toBe(0);
-    expect(pieces.join("")).toContain("x".repeat(2987)); // The block closed at the cut is not reopened only to close again.
+    expect(pieces.join("")).toContain("x".repeat(2987));
+    // The block closed at the cut is not reopened only to close again.
     expect(pieces.some((p) => p.startsWith("```\n```"))).toBe(false);
   });
 
@@ -281,46 +794,91 @@ describe("what a cut may not lose", () => {
   });
 
   it("names every numbered option, however long the prompt and descriptions", () => {
-    const blocks = requestBlocks({
-      requestId: "req-budget",
-      prompt: "p ".repeat(4_500),
-      display: "buttons",
-      options: [
-        { id: "a", label: "First choice", description: "d ".repeat(4_500) },
-        { id: "b", label: "Second choice" }
-      ]
-    });
+    const blocks = requestBlocks(
+      form(
+        [
+          {
+            kind: "choice",
+            id: "q1",
+            prompt: "Which?",
+            options: [
+              {
+                id: "a",
+                label: "First choice",
+                description: "d ".repeat(4_500)
+              },
+              { id: "b", label: "Second choice" }
+            ]
+          }
+        ],
+        "p ".repeat(4_500)
+      )
+    );
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
     expect(text).toContain("*1.* First choice");
     expect(text).toContain("*2.* Second choice");
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
+      "1",
+      "2",
+      "Other…"
+    ]);
   });
 
   it("keeps labels on the buttons when not even the options' headings fit", () => {
-    const blocks = requestBlocks({
-      requestId: "req-heads",
-      prompt: "p ".repeat(4_500),
-      display: "buttons",
-      options: Array.from({ length: 5 }, (_, i) => ({
-        id: `o${i}`,
-        label: `${i} ${"long label ".repeat(100)}`
-      }))
-    });
+    const blocks = requestBlocks(
+      form(
+        [
+          {
+            kind: "choice",
+            id: "q1",
+            prompt: "Which?",
+            // Headings past a message on their own: a preamble alone is
+            // shortened instead.
+            options: Array.from({ length: 5 }, (_, i) => ({
+              id: `o${i}`,
+              label: `${i} ${"long label ".repeat(250)}`
+            }))
+          }
+        ],
+        "p ".repeat(6_500)
+      )
+    );
     expect(messageViolations(blocks)).toEqual([]);
-    const labels = (
-      blocks.find((b) => (b as { type?: string }).type === "actions") as {
-        elements: { text: { text: string } }[];
-      }
-    ).elements.map((e) => e.text.text);
+    const labels = buttonsOf(blocks).map((b) => b.text.text);
     expect(labels[0]).toMatch(/^0 long label .*…$/);
     expect(labels.every((l) => l.length <= 75)).toBe(true);
   });
 
-  it("shows the modal the whole question, past what a message holds", () => {
-    const view = freeformView({
-      requestId: "req-modal",
-      prompt: `${"Context. ".repeat(1_000)}\n\nFinal question?`
-    });
+  it("shortens a preamble that leaves the questions no room, rather than lose them", () => {
+    const blocks = requestBlocks(
+      form(
+        [
+          { kind: "text", id: "q1", prompt: "First question?" },
+          { kind: "text", id: "q2", prompt: "Final question?" }
+        ],
+        `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}`
+      )
+    );
+    expect(messageViolations(blocks)).toEqual([]);
+    const text = blocksText(blocks);
+    expect(text).toContain("*1.* First question?");
+    expect(text).toContain("*2.* Final question?");
+    expect(text).not.toContain("Cut here");
+    // Shortened visibly, and between links rather than inside one.
+    const preamble = text.slice(0, text.indexOf("*1.*"));
+    expect(preamble).toMatch(/\|a link>\s+…\s*$/);
+  });
+
+  it("shows the modal every question, past what a message holds", () => {
+    const request = form(
+      [
+        { kind: "text", id: "q1", prompt: "First question?" },
+        { kind: "text", id: "q2", prompt: "Final question?" }
+      ],
+      "Context. ".repeat(1_500)
+    );
+    const view = formView(request);
     expect(viewViolations(view)).toEqual([]);
     expect(blocksText(view.blocks)).toContain("Final question?");
   });

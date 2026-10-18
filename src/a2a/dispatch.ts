@@ -13,12 +13,9 @@ import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import { resumeFromInput } from "@/db/models/agent-tasks";
 import { signalReactionSync } from "@/workflows/reaction-helpers";
-import type { HitlRequestRow } from "@/db/models/hitl-requests";
-import {
-  buildHitlResponseParts,
-  buildHitlTimeoutParts,
-  type HitlAnswerChoice
-} from "@/a2a/hitl";
+import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
+import type { HitlFormRow } from "@/db/models/hitl-forms";
+import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
 import { buildMessage, textPart } from "@/a2a/parts";
 import { NOTIFICATIONS_PATH } from "@/a2a/notifications/remote";
 import { notifyHitlContinuationFailed } from "@/a2a/notifications/hitl";
@@ -469,19 +466,13 @@ export async function dispatchToAgent(
   return dispatchResultFor(accept, agent, dispatchId);
 }
 
-/**
- * A human's answer to a HITL prompt, as captured from Slack.
- *
- * The picked option and the typed text come from {@link HitlAnswerChoice}, which
- * requires at least one of them — an answer with neither is a resume the agent
- * cannot act on, and the type is the cheapest place to refuse it.
- */
-export type HitlAnswer = HitlAnswerChoice & {
+/** A person's answers to a HITL prompt, as captured from Slack. */
+export interface HitlSubmission {
   /** Slack user id of whoever answered. */
   answeredBy: string;
-  /** Human-readable answer for the resume TextPart (option label or freeform). */
-  humanText: string;
-};
+  /** One per question id. */
+  answers: Record<string, HitlAnswer>;
+}
 
 /**
  * Whether a parked task was successfully handed back to its agent. `failed`
@@ -539,7 +530,7 @@ async function markResumed(token: string): Promise<void> {
  * continuation dedupes at the agent.
  */
 async function sendTaskContinuation(
-  row: HitlRequestRow,
+  row: HitlFormRow,
   input: {
     parts: Message["parts"];
     messageId: string;
@@ -661,13 +652,13 @@ export type ResumeOutcome = "resumed" | "refused" | "undelivered";
  * nothing. A refusal is not retried: the same request earns the same verdict.
  */
 export async function resumeAgentTask(
-  row: HitlRequestRow,
-  answer: HitlAnswer
+  row: HitlFormRow,
+  submission: HitlSubmission
 ): Promise<ResumeOutcome> {
-  // Spread, not a field-by-field rebuild: listing `optionId` and `text`
-  // separately widens both back to `string | undefined` and loses the
-  // guarantee that one of them is present.
-  const parts = buildHitlResponseParts({ ...answer, requestId: row.requestId });
+  const parts = buildHitlResponseParts({
+    request: row.requestJson,
+    ...submission
+  });
   const messageId = `${row.token}:r:${row.requestId}`;
 
   for (let attempt = 1; ; attempt++) {
@@ -703,7 +694,7 @@ export async function resumeAgentTask(
  * delivered (the agent is unreachable), post a thread notice so the user learns
  * the agent is down and can fix it — the expiry note alone wouldn't reveal that.
  */
-export async function timeoutAgentTask(row: HitlRequestRow): Promise<void> {
+export async function timeoutAgentTask(row: HitlFormRow): Promise<void> {
   const outcome = await sendTaskContinuation(row, {
     parts: buildHitlTimeoutParts(row.requestId),
     messageId: `${row.token}:t:${row.requestId}`

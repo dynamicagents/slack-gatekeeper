@@ -7,7 +7,7 @@ import {
   index,
   check
 } from "drizzle-orm/sqlite-core";
-import { HITL_REQUEST_KINDS } from "@dynamicagents/g2a-protocol";
+import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
 
 // Unix-seconds timestamp column with a SQLite-side default. Reused across tables.
 const timestamp = (name: string) =>
@@ -266,25 +266,72 @@ export const agentTasks = sqliteTable(
 );
 
 /**
- * Human-in-the-loop (HITL) prompts — one row per open approval/question an agent
- * raised by transitioning its task to `input-required`. This is the correlation
- * store between a Slack interactive message and the paused A2A task: when a human
- * clicks a button (or submits the freeform modal), the interactivity handler
- * looks the row up by `requestId` (the value encoded into the Slack action id),
- * records the answer atomically (first-click-wins), and resumes the task on the
- * same `token` (so continued callbacks land on the paired `agent_tasks` row).
- *
- * Keyed by the agent-chosen `requestId`. Lifecycle: `awaiting` → `answered`
- * (a human decided) | `expired` (TTL swept) | `canceled` (the task ended first —
- * a 🛑 while parked, or the agent's own final status).
+ * The table HITL prompts lived in before a prompt held a form. Nothing reads or
+ * writes it: the Worker live while the migration that created `hitl_forms` runs
+ * still does, so it is dropped by a later migration, not that one.
  */
 export const hitlRequests = sqliteTable(
   "hitl_requests",
   {
-    // Agent-chosen unique id for this prompt (PK). Encoded into the Slack action
-    // ids by inputRequestToSlackBlocks, echoed back on the interaction, and used
-    // to correlate the answer to this row. `createHitlRequest` is idempotent on
-    // it so an at-least-once push redelivery does not double-post the prompt.
+    requestId: text("request_id").primaryKey(),
+    token: text("token").notNull(),
+    taskId: text("task_id"),
+    contextId: text("context_id").notNull(),
+    agentName: text("agent_name")
+      .notNull()
+      .references(() => agents.name),
+    channelId: text("channel_id").notNull(),
+    threadTs: text("thread_ts"),
+    slackMessageTs: text("slack_message_ts"),
+    requestKind: text("request_kind", {
+      enum: ["approval", "choice"]
+    }).notNull(),
+    promptText: text("prompt_text").notNull(),
+    optionsJson: text("options_json"),
+    allowFreeform: integer("allow_freeform").notNull().default(0),
+    status: text("status", {
+      enum: ["awaiting", "answered", "expired", "canceled"]
+    })
+      .notNull()
+      .default("awaiting"),
+    answeredBy: text("answered_by"),
+    answeredOptionId: text("answered_option_id"),
+    answerText: text("answer_text"),
+    createdAt: timestamp("created_at"),
+    deadlineAt: integer("deadline_at").notNull(),
+    answeredAt: integer("answered_at")
+  },
+  (t) => [
+    index("idx_hitl_requests_token").on(t.token),
+    index("idx_hitl_requests_status_deadline").on(t.status, t.deadlineAt),
+    index("idx_hitl_requests_created_at").on(t.createdAt)
+  ]
+);
+
+/**
+ * Human-in-the-loop (HITL) prompts — one row per form an agent raised by
+ * transitioning its task to `input-required`. This is the correlation store
+ * between a Slack prompt and the paused A2A task: when a person answers, the
+ * interactivity handler looks the row up by `requestId`, records the answers
+ * atomically (first-answer-wins), and resumes the task on the same `token` (so
+ * continued callbacks land on the paired `agent_tasks` row).
+ *
+ * Keyed by the agent-chosen `requestId`. Lifecycle: `awaiting` → `answered`
+ * (a person decided) | `expired` (TTL swept) | `canceled` (the task ended first —
+ * a 🛑 while parked, or the agent's own final status).
+ */
+/** One person's way through a paged form: the page they are on, and their answers so far. */
+export interface HitlDraft {
+  page: number;
+  answers: Record<string, HitlAnswer>;
+}
+
+export const hitlForms = sqliteTable(
+  "hitl_forms",
+  {
+    // Agent-chosen unique id for this prompt (PK), carried in the Slack controls
+    // and echoed back on the interaction. `createHitlForm` is idempotent on it
+    // so an at-least-once push redelivery does not double-post the prompt.
     requestId: text("request_id").primaryKey(),
     // The paired agent_tasks correlation token (= A2A push token). Resume reuses
     // it so the continued task's callbacks land on the same agent_tasks row.
@@ -300,26 +347,15 @@ export const hitlRequests = sqliteTable(
     channelId: text("channel_id").notNull(),
     // Thread the prompt was posted into; null = channel top-level.
     threadTs: text("thread_ts"),
-    // ts of the posted Block Kit prompt — used to chat.update it to an answered /
-    // expired / canceled state (a Slack response_url expires after ~30 min, and a
-    // 7-day TTL far outlives that, so we always update by ts, never response_url).
+    // ts of the posted prompt — used to chat.update it to an answered / expired /
+    // canceled state (a Slack response_url expires after ~30 min, and a 7-day TTL
+    // far outlives that, so we always update by ts, never response_url).
     slackMessageTs: text("slack_message_ts"),
-    // The contract's own tuple, spread because drizzle wants a mutable one.
-    //
-    // This aligns the column's type with the wire rather than guarding it. A kind
-    // added upstream widens the column on the next install and still compiles,
-    // which is what you want: D1 should accept anything the wire permits. What
-    // it rules out is the column drifting *narrower* than the contract — spell
-    // these members by hand and miss one, and `createHitlRequest` stops
-    // accepting a `HitlRequestKind` the far side can legitimately send.
-    requestKind: text("request_kind", {
-      enum: [...HITL_REQUEST_KINDS]
-    }).notNull(),
-    promptText: text("prompt_text").notNull(),
-    // JSON-encoded SlackInputOption[] as rendered — the source of truth for the
-    // answered-state label and for validating/looking up the chosen optionId.
-    optionsJson: text("options_json"),
-    allowFreeform: integer("allow_freeform").notNull().default(0),
+    // The form as received, sanitized: what every rendering is built from, and
+    // what an answer's question and option ids are read back against.
+    requestJson: text("request_json", { mode: "json" })
+      .$type<HitlRequestData>()
+      .notNull(),
     status: text("status", {
       enum: ["awaiting", "answered", "expired", "canceled"]
     })
@@ -327,8 +363,15 @@ export const hitlRequests = sqliteTable(
       .default("awaiting"),
     // Slack user id of whoever answered (anyone in the thread may).
     answeredBy: text("answered_by"),
-    answeredOptionId: text("answered_option_id"),
-    answerText: text("answer_text"),
+    // One answer per question id, as sent to the agent.
+    answersJson: text("answers_json", { mode: "json" }).$type<
+      Record<string, HitlAnswer>
+    >(),
+    // A form paged across modals: what each person has entered so far, by Slack
+    // user id, kept between its pages until they send it.
+    draftsJson: text("drafts_json", { mode: "json" }).$type<
+      Record<string, HitlDraft>
+    >(),
     createdAt: timestamp("created_at"),
     // Unix-seconds expiry (createdAt + HITL_REQUEST_TTL_SECONDS). The maintenance
     // sweep expires any `awaiting` row past this.
@@ -338,11 +381,11 @@ export const hitlRequests = sqliteTable(
   (t) => [
     // Cancel/expire-by-task: a 🛑 on the trigger message resolves the whole
     // fan-out's open prompts by their shared token.
-    index("idx_hitl_requests_token").on(t.token),
+    index("idx_hitl_forms_token").on(t.token),
     // Expiry sweep: scan open prompts by deadline.
-    index("idx_hitl_requests_status_deadline").on(t.status, t.deadlineAt),
+    index("idx_hitl_forms_status_deadline").on(t.status, t.deadlineAt),
     // Retention sweep: delete resolved rows older than the cutoff by createdAt.
-    index("idx_hitl_requests_created_at").on(t.createdAt)
+    index("idx_hitl_forms_created_at").on(t.createdAt)
   ]
 );
 

@@ -1,17 +1,13 @@
 import { z } from "zod";
 import type { Message, Part } from "@a2a-js/sdk";
-import type {
-  SlackInputOption,
-  SlackInputRequest
-} from "@chat-adapter/slack/blocks";
 import {
   HITL_APPROVE_OPTION_ID,
   HITL_REJECT_OPTION_ID,
-  HITL_REQUEST_KINDS,
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
-  type HitlOption,
+  type HitlAnswer,
+  type HitlQuestion,
   type HitlRequestData,
   type HitlResponseData,
   type HitlTimeoutData
@@ -21,28 +17,26 @@ import { dataOf, dataPart, textPart } from "@/a2a/parts";
 
 /**
  * Human-in-the-loop (HITL) over A2A: how an agent asks a person something
- * through this gatekeeper, and how the answer gets back.
+ * through this gatekeeper, and how the answers get back.
  *
  * A2A carries the exchange but standardizes nothing inside it — a part's `data`
  * is arbitrary JSON — so the two sides must agree on what a `data` part holds and
  * what its `type` is called. That agreement is not ours to make alone: the names
- * live in `@dynamicagents/g2a-protocol` and are re-exported here unchanged, which
- * is the only thing a gatekeeper and the agent runtime can both hold.
+ * and shapes live in `@dynamicagents/g2a-protocol`, the only thing a gatekeeper
+ * and the agent runtime can both hold.
  *
- * What stays here is everything either side *enforces*. The protocol declares
- * the shapes as types only; this module validates them with the schema library
- * this side already carries, and maps them onto Slack.
+ * What stays here is everything this side *enforces*, and nothing about Slack:
+ * the protocol declares the shapes as types only, so this module validates them
+ * with the schema library this side already carries. How a form looks is
+ * `src/slack/hitl/`'s.
  *
  * Flow:
- * - An agent that needs a human decision transitions its task to
- *   `input-required` and emits a status update whose `status.message.parts`
- *   include a {@link HITL_REQUEST_TYPE} data part (plus a human-readable text part).
- * - The gatekeeper renders it in Slack, captures the answer, and resumes the task
- *   with a new message carrying a {@link HITL_RESPONSE_TYPE} data part.
+ * - An agent that needs a person transitions its task to `input-required` and
+ *   emits a status update whose `status.message.parts` include a
+ *   {@link HITL_REQUEST_TYPE} data part: a form of one or more questions.
+ * - The gatekeeper renders it, captures the answers, and resumes the task with
+ *   a new message carrying a {@link HITL_RESPONSE_TYPE} data part.
  * - On TTL expiry the gatekeeper sends a {@link HITL_TIMEOUT_TYPE} data part instead.
- *
- * An "approval" is just a two-option "choice" (Approve/Reject), so one shape
- * covers both.
  */
 
 export {
@@ -50,33 +44,62 @@ export {
   HITL_REJECT_OPTION_ID,
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
-  HITL_TIMEOUT_TYPE,
-  type HitlOption
+  HITL_TIMEOUT_TYPE
 };
 
+const nonEmpty = z.string().min(1);
+
 const optionSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  description: z.string().optional(),
-  // Maps to Slack's button/option style; "danger" is the natural Reject accent.
-  style: z.enum(["primary", "danger", "default"]).optional()
+  id: nonEmpty,
+  label: nonEmpty,
+  description: nonEmpty.optional(),
+  example: nonEmpty.optional()
 });
 
-/** An agent → gatekeeper request to ask a human to approve or choose. */
-export const hitlRequestSchema = z.object({
-  type: z.literal(HITL_REQUEST_TYPE),
-  /** Agent-chosen, unique per request — the Slack action + gatekeeper correlation key. */
-  requestId: z.string().min(1),
-  // Built from the protocol's tuple rather than spelled again: a kind added
-  // upstream widens this enum on the next install, instead of parsing as invalid.
-  requestKind: z.enum(HITL_REQUEST_KINDS),
-  prompt: z.string().min(1),
-  /** Omit for `approval` to accept the canonical Approve/Reject pair. */
-  options: z.array(optionSchema).optional(),
-  display: z.enum(["buttons", "radio", "select"]).optional(),
-  /** Allow a typed "Something else…" answer alongside the fixed options. */
-  allowFreeform: z.boolean().optional()
-});
+const questionBase = {
+  id: nonEmpty,
+  prompt: nonEmpty,
+  header: nonEmpty.optional()
+};
+
+const questionSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("choice"),
+    ...questionBase,
+    options: z.array(optionSchema).min(1),
+    multiple: z.boolean().optional()
+  }),
+  z.object({ kind: z.literal("text"), ...questionBase }),
+  z.object({
+    kind: z.literal("approval"),
+    ...questionBase,
+    artifact: z.object({ id: nonEmpty, url: nonEmpty })
+  })
+]);
+
+function distinct(ids: string[]): boolean {
+  return new Set(ids).size === ids.length;
+}
+
+/** An agent → gatekeeper form: why it asks, and the questions to answer together. */
+export const hitlRequestSchema = z
+  .object({
+    type: z.literal(HITL_REQUEST_TYPE),
+    /** Agent-chosen, unique per request — the gatekeeper's correlation key. */
+    requestId: nonEmpty,
+    prompt: nonEmpty.optional(),
+    questions: z.array(questionSchema).min(1)
+  })
+  // An answer is keyed by question id and names options by id: two the same
+  // and the answer cannot say which it means.
+  .refine(
+    (r) =>
+      distinct(r.questions.map((q) => q.id)) &&
+      r.questions.every(
+        (q) => q.kind !== "choice" || distinct(q.options.map((o) => o.id))
+      ),
+    { message: "question ids, and each question's option ids, are distinct" }
+  );
 
 /**
  * The protocol's own shape, not `z.infer` of the schema above.
@@ -91,7 +114,8 @@ export type HitlRequest = HitlRequestData;
 /**
  * Find and validate a HITL request in an A2A message's parts. Returns `null`
  * when the message carries no (valid) HITL request data part — the caller then
- * falls back to treating the `input-required` update as plain text.
+ * falls back to treating the `input-required` update as plain text, which the
+ * agent writes as the form in words.
  */
 export function parseHitlRequest(
   message: Message | undefined
@@ -99,117 +123,78 @@ export function parseHitlRequest(
   return parseDataPart(message, HITL_REQUEST_TYPE, hitlRequestSchema);
 }
 
-/** The canonical two options for an `approval` request that supplies none. */
-export function approvalOptions(): SlackInputOption[] {
-  return [
-    { id: HITL_APPROVE_OPTION_ID, label: "Approve", style: "primary" },
-    { id: HITL_REJECT_OPTION_ID, label: "Reject", style: "danger" }
-  ];
+/** One question with its answer, in words: what a person picked and typed. */
+export interface AnsweredQuestion {
+  question: HitlQuestion;
+  /** The picked options' labels; an approval's verdict as "Approved"/"Rejected". */
+  picked: string[];
+  text?: string;
 }
 
-/**
- * Map a validated {@link HitlRequest} onto the Slack SDK's `SlackInputRequest`,
- * filling the canonical Approve/Reject options when an `approval` omits its own.
- * The shapes are intentionally close, so this is mostly a rename plus defaulting.
- *
- * ## When there is nothing to click
- *
- * A `choice` can arrive with `options: []`, or with no `options` at all — both
- * protocol-legal, and neither gets the Approve/Reject fill, which is for
- * `approval` only. What reaches Slack then has an empty option set, and the
- * adapter renders a freeform button for it **whether or not `allowFreeform` is
- * set**.
- *
- * So the gatekeeper never posts a question nobody can answer, and the price is
- * that `allowFreeform: false` is not honoured when there is nothing to offer
- * instead. That is the right way round for a gatekeeper — the alternative is a
- * prompt a person can only watch expire, and an agent that waits out the full
- * TTL to learn nothing — but it is a decision, not an accident, which is why it
- * is written down here.
- *
- * Nothing sends this shape today. If something does, the fix belongs in the
- * contract — a request must offer at least one way to answer — rather than in a
- * local refusal that leaves the other side guessing why its question vanished.
- */
-export function toSlackInputRequest(req: HitlRequest): SlackInputRequest {
-  const options: SlackInputOption[] | undefined = req.options
-    ? req.options.map((o) => ({
-        id: o.id,
-        label: o.label,
-        description: o.description,
-        style: o.style
-      }))
-    : req.requestKind === "approval"
-      ? approvalOptions()
+/** Each question of `request` with its answer from `answers`, in question order. */
+export function answeredQuestions(
+  request: HitlRequest,
+  answers: Record<string, HitlAnswer>
+): AnsweredQuestion[] {
+  return request.questions.flatMap((question) => {
+    // Own keys only: an agent picks its question ids, and `constructor` would
+    // otherwise find `Object.prototype`'s.
+    const answer = Object.hasOwn(answers, question.id)
+      ? answers[question.id]
       : undefined;
-
-  return {
-    prompt: req.prompt,
-    requestId: req.requestId,
-    display: req.display ?? "buttons",
-    allowFreeform: req.allowFreeform,
-    options
-  };
-}
-
-/** Look up an option's human label by id, for the resume TextPart / answered UI. */
-export function optionLabel(
-  options: readonly SlackInputOption[],
-  optionId: string | undefined
-): string | undefined {
-  if (!optionId) return undefined;
-  return options.find((o) => o.id === optionId)?.label;
+    if (!answer) return [];
+    const picked = (answer.optionIds ?? []).map((id) => {
+      if (question.kind === "approval") {
+        return id === HITL_APPROVE_OPTION_ID ? "Approved" : "Rejected";
+      }
+      if (question.kind === "choice") {
+        return question.options.find((o) => o.id === id)?.label ?? id;
+      }
+      return id;
+    });
+    return [
+      { question, picked, ...(answer.text ? { text: answer.text } : {}) }
+    ];
+  });
 }
 
 /**
- * What a person actually gave back: a picked option, typed text, or an option
- * with text alongside it — but never neither.
- *
- * The protocol says the same thing, and this is not a second copy of it: it is
- * the protocol's union with `optionId?: undefined` in place of
- * `optionId?: string` on the text-only member. That narrower spelling is what
- * makes `input.optionId !== undefined` discriminate, so a builder can take the
- * branch the compiler already proved instead of casting. It stays assignable to
- * the protocol's union, which is the direction that matters.
- *
- * Carried from the Slack handler down to the resume, so the "one of the two is
- * present" invariant holds at every step rather than being re-checked or
- * papered over with an empty string at the end.
+ * The answers in plain words, for the text part beside the data — what a client
+ * that knows none of this reads. One question's answer stands alone; several
+ * each follow their question.
  */
-export type HitlAnswerChoice =
-  { optionId: string; text?: string } | { optionId?: undefined; text: string };
-
-/**
- * Build the parts of the resume message the gatekeeper sends back onto the task.
- * `humanText` (the chosen option's label, or the freeform text) is the text
- * part a non-HITL client sees; the data part carries the structured answer.
- */
-export function buildHitlResponseParts(
-  input: HitlAnswerChoice & {
-    requestId: string;
-    answeredBy: string;
-    humanText: string;
+export function answersText(
+  request: HitlRequest,
+  answers: Record<string, HitlAnswer>
+): string {
+  const answered = answeredQuestions(request, answers);
+  const words = (a: AnsweredQuestion) =>
+    [a.picked.join(", "), a.text].filter(Boolean).join("\n");
+  if (request.questions.length === 1) {
+    return answered[0] ? words(answered[0]) : "";
   }
-): Part[] {
-  // Annotated as the protocol's own type, so the compiler checks the outbound
-  // direction: the union below refuses an answer carrying neither an `optionId`
-  // nor a `text`, which is a part no conformant agent could act on.
-  const data: HitlResponseData =
-    input.optionId !== undefined
-      ? {
-          type: HITL_RESPONSE_TYPE,
-          requestId: input.requestId,
-          optionId: input.optionId,
-          ...(input.text ? { text: input.text } : {}),
-          answeredBy: input.answeredBy
-        }
-      : {
-          type: HITL_RESPONSE_TYPE,
-          requestId: input.requestId,
-          text: input.text,
-          answeredBy: input.answeredBy
-        };
-  return [textPart(input.humanText), dataPart(data)];
+  return answered
+    .map((a) => `${a.question.header ?? a.question.prompt}\n${words(a)}`)
+    .join("\n\n");
+}
+
+/**
+ * Build the parts of the resume message the gatekeeper sends back onto the task:
+ * the answers in words, which a non-HITL client sees and the agent's size bound
+ * measures, and the structured answers.
+ */
+export function buildHitlResponseParts(input: {
+  request: HitlRequest;
+  answeredBy: string;
+  answers: Record<string, HitlAnswer>;
+}): Part[] {
+  const data: HitlResponseData = {
+    type: HITL_RESPONSE_TYPE,
+    requestId: input.request.requestId,
+    answeredBy: input.answeredBy,
+    answers: input.answers
+  };
+  return [textPart(answersText(input.request, input.answers)), dataPart(data)];
 }
 
 /** Build the parts of the timeout message sent when a HITL prompt expires. */
@@ -223,25 +208,33 @@ export function buildHitlTimeoutParts(requestId: string): Part[] {
 
 /**
  * Build the parts of the `input-required` status message an agent emits to raise
- * a HITL prompt: a human-readable text part fallback plus the structured request
- * data part the gatekeeper renders in Slack. Symmetric to {@link buildHitlResponseParts};
- * the data part round-trips through {@link parseHitlRequest}.
+ * a HITL prompt: a text part fallback plus the structured request data part.
+ * Symmetric to {@link buildHitlResponseParts}; the data part round-trips through
+ * {@link parseHitlRequest}.
  */
 export function buildHitlRequestParts(req: HitlRequest): Part[] {
-  return [textPart(req.prompt), dataPart({ ...req, type: HITL_REQUEST_TYPE })];
+  const text = [req.prompt, ...req.questions.map((q) => q.prompt)]
+    .filter(Boolean)
+    .join("\n\n");
+  return [textPart(text), dataPart({ ...req, type: HITL_REQUEST_TYPE })];
 }
 
-const hitlResponseSchema = z
-  .object({
-    type: z.literal(HITL_RESPONSE_TYPE),
-    requestId: z.string().min(1),
-    optionId: z.string().min(1).optional(),
-    text: z.string().min(1).optional(),
-    answeredBy: z.string().min(1)
-  })
-  .refine((data) => data.optionId !== undefined || data.text !== undefined, {
-    message: "HITL response must include optionId or text"
-  });
+const answerSchema = z.union([
+  z.object({
+    // A tuple of at least one, as the protocol types it.
+    optionIds: z.tuple([nonEmpty], nonEmpty),
+    text: nonEmpty.optional()
+  }),
+  // `optionIds` refused outright rather than stripped, as core reads it.
+  z.object({ optionIds: z.undefined().optional(), text: nonEmpty })
+]);
+
+const hitlResponseSchema = z.object({
+  type: z.literal(HITL_RESPONSE_TYPE),
+  requestId: nonEmpty,
+  answeredBy: nonEmpty,
+  answers: z.record(nonEmpty, answerSchema)
+});
 
 export type HitlResponse = z.infer<typeof hitlResponseSchema>;
 
@@ -262,7 +255,7 @@ function parseDataPart<T>(
 }
 
 /**
- * Find and validate the gatekeeper → agent answer that resumes a parked task.
+ * Find and validate the gatekeeper → agent answers that resume a parked task.
  * Returns `null` when the message carries no HITL response data part.
  */
 export function parseHitlResponse(
@@ -273,7 +266,7 @@ export function parseHitlResponse(
 
 const hitlTimeoutSchema = z.object({
   type: z.literal(HITL_TIMEOUT_TYPE),
-  requestId: z.string().min(1)
+  requestId: nonEmpty
 });
 
 /**

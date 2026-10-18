@@ -11,14 +11,15 @@ import {
   suspendForInput
 } from "@/db/models/agent-tasks";
 import {
-  createHitlRequest,
-  getHitlRequest,
-  setHitlSlackMessageTs
-} from "@/db/models/hitl-requests";
+  createHitlForm,
+  getHitlForm,
+  setHitlFormMessageTs
+} from "@/db/models/hitl-forms";
 import { cancelTaskRow } from "@/workflows/message-helpers";
 import { buildAgentCard } from "@/a2a/card";
 import { makeTask } from "../helpers/a2a";
 import { useStorageReset } from "../helpers/storage";
+import { choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -128,7 +129,7 @@ describe("cancelTaskRow", () => {
       slackUpdates
     );
     await seedTask("t7", "task-9");
-    await createHitlRequest({
+    await createHitlForm({
       requestId: "req-stop",
       token: "t7",
       taskId: "task-9",
@@ -136,19 +137,16 @@ describe("cancelTaskRow", () => {
       agentName: "remoteagent",
       channelId: "C1",
       threadTs: null,
-      requestKind: "approval",
-      promptText: "Proceed?",
-      optionsJson: null,
-      allowFreeform: false,
+      request: choiceForm("req-stop"),
       deadlineAt: Math.floor(Date.now() / 1000) + 600
     });
-    await setHitlSlackMessageTs("req-stop", "1700.5");
+    await setHitlFormMessageTs("req-stop", "1700.5");
     await suspendForInput("t7");
     const row = await getAgentTaskByToken("t7");
 
     await cancelTaskRow(row!, USER_ORIGIN);
 
-    expect((await getHitlRequest("req-stop"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-stop"))?.status).toBe("canceled");
     expect(slackUpdates).toHaveLength(1);
     expect(slackUpdates[0].get("ts")).toBe("1700.5");
     expect(slackUpdates[0].get("text")).toBe("🛑 Canceled.");
