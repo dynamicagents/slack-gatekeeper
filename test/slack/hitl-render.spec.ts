@@ -846,7 +846,42 @@ describe("what a cut may not lose", () => {
     expect(pieces.join("")).toContain("p".repeat(2_000));
   });
 
-  it("names every numbered option, however long the prompt and descriptions", () => {
+  /**
+   * A message shortened to fit would show buttons beside options nobody can
+   * read in full, so a question too long for one is answered in the modal,
+   * which shows it whole.
+   */
+  it("answers in the modal a question too long for one message, shown whole there", () => {
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which?",
+          options: [
+            {
+              id: "a",
+              label: "First choice",
+              description: `${"d ".repeat(4_500)}the end of it.`
+            },
+            { id: "b", label: "Second choice" }
+          ]
+        }
+      ],
+      "p ".repeat(4_500)
+    );
+    const blocks = requestBlocks(request);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    expect(blocksText(blocks)).not.toContain("First choice");
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    const text = blocksText(view.blocks as unknown[]);
+    expect(text).toContain("*1.* First choice");
+    expect(text).toContain("the end of it.");
+  });
+
+  it("answers a question in the thread when it fits one message whole", () => {
     const blocks = requestBlocks(
       form(
         [
@@ -858,19 +893,17 @@ describe("what a cut may not lose", () => {
               {
                 id: "a",
                 label: "First choice",
-                description: "d ".repeat(4_500)
+                description: "d ".repeat(2_000)
               },
               { id: "b", label: "Second choice" }
             ]
           }
         ],
-        "p ".repeat(4_500)
+        "p ".repeat(2_000)
       )
     );
     expect(messageViolations(blocks)).toEqual([]);
-    const text = blocksText(blocks);
-    expect(text).toContain("*1.* First choice");
-    expect(text).toContain("*2.* Second choice");
+    expect(blocksText(blocks)).toContain("*2.* Second choice");
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
       "1",
       "2",
@@ -878,60 +911,31 @@ describe("what a cut may not lose", () => {
     ]);
   });
 
-  it("keeps labels on the buttons when not even the options' headings fit", () => {
-    const blocks = requestBlocks(
-      form(
-        [
-          {
-            kind: "choice",
-            id: "q1",
-            prompt: "Which?",
-            // Headings past a message on their own: a preamble alone is
-            // shortened instead.
-            options: Array.from({ length: 5 }, (_, i) => ({
-              id: `o${i}`,
-              label: `${i} ${"long label ".repeat(250)}`
-            }))
-          }
-        ],
-        "p ".repeat(6_500)
-      )
+  it("cuts agent words past the message between links, and opens the modal with them whole", () => {
+    const words = `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}The end.`;
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which side?",
+          options: [
+            { id: "l", label: "Left" },
+            { id: "r", label: "Right" }
+          ]
+        }
+      ],
+      words
     );
-    expect(messageViolations(blocks)).toEqual([]);
-    const labels = buttonsOf(blocks).map((b) => b.text.text);
-    expect(labels[0]).toMatch(/^0 long label .*…$/);
-    expect(labels.every((l) => l.length <= 75)).toBe(true);
-  });
-
-  it("shortens a preamble that leaves a question in the thread no room, rather than lose it", () => {
-    const blocks = requestBlocks(
-      form(
-        [
-          {
-            kind: "choice",
-            id: "q1",
-            prompt: "Which side?",
-            options: [
-              { id: "l", label: "Left" },
-              { id: "r", label: "Right" }
-            ]
-          }
-        ],
-        `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}`
-      )
-    );
+    const blocks = requestBlocks(request);
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
-    expect(text).toContain("Which side?");
-    expect(text).not.toContain("Cut here");
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
-      "Left",
-      "Right",
-      "Other…"
-    ]);
-    // Shortened visibly, and between links rather than inside one.
-    const preamble = text.slice(0, text.indexOf("Which side?"));
-    expect(preamble).toMatch(/\|a link>\s+…\s*$/);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    // Cut visibly, between links rather than inside one.
+    expect(text).toMatch(/\|a link>\s*…\s+_Cut here/);
+    const modal = blocksText(formView(request).blocks as unknown[]);
+    expect(modal).toContain("The end.");
+    expect(modal).toContain("Which side?");
   });
 
   /**

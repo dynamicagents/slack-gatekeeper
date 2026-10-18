@@ -256,13 +256,11 @@ function sections(
   const note = `\n\n_${cutNote}_`;
   const text =
     mrkdwn.length > budget
-      ? `${mrkdwn.slice(0, Math.max(0, budget - note.length))}…${note}`
+      ? `${clipMrkdwn(mrkdwn, Math.max(0, budget - note.length))}${note}`
       : mrkdwn;
   return text ? splitMrkdwn(text).map(section) : [];
 }
 
-const CUT_QUESTION =
-  "Cut here: the question runs past what one Slack message holds.";
 const CUT_PROMPT = "Cut here to fit Slack; the rest opens with the questions.";
 
 /** The longest a question's words run where the message names it in a line. */
@@ -276,23 +274,21 @@ function exampleMrkdwn(example: string): string {
     : `${FENCE}\n${escapeMrkdwn(example)}\n${FENCE}`;
 }
 
-/** What shows under an option's heading: "" for nothing. */
-type Detail = (option: HitlOption) => string;
-
 /** An option's description, and its example as a code block. */
-const fullDetail: Detail = (o) =>
-  [
+function optionDetail(o: HitlOption): string {
+  return [
     o.description ? toMrkdwn(o.description) : "",
     o.example ? exampleMrkdwn(o.example) : ""
   ]
     .filter(Boolean)
     .join("\n");
+}
 
-function optionList(options: readonly HitlOption[], detail: Detail): string {
+function optionList(options: readonly HitlOption[]): string {
   return options
     .map((o, j) => {
       const head = `*${j + 1}.* ${toMrkdwn(o.label)}`;
-      const shown = detail(o);
+      const shown = optionDetail(o);
       return shown ? `${head}\n${shown}` : head;
     })
     .join("\n\n");
@@ -324,18 +320,14 @@ function listsOptions(question: HitlQuestion, shown: number): boolean {
  * A question as it reads: its header over its words. Not numbered — the
  * numbers are its options'.
  */
-function questionMrkdwn(
-  question: HitlQuestion,
-  withOptions: boolean,
-  detail: Detail = fullDetail
-): string {
+function questionMrkdwn(question: HitlQuestion, withOptions: boolean): string {
   const prompt = toMrkdwn(question.prompt);
   const head = question.header
     ? `*${toMrkdwn(question.header)}*\n${prompt}`
     : prompt;
   const lines = [head];
   if (question.kind === "choice" && withOptions) {
-    lines.push(optionList(question.options, detail));
+    lines.push(optionList(question.options));
   }
   if (question.kind === "approval") {
     lines.push(artifactLink(question.artifact.url));
@@ -343,78 +335,33 @@ function questionMrkdwn(
   return lines.join("\n\n");
 }
 
-/** The one question answered by buttons in the thread, when the form is that. */
-function quickQuestion(request: HitlRequest): HitlQuestion | undefined {
-  if (request.questions.length !== 1) return undefined;
-  const [question] = request.questions;
-  if (question.kind === "approval") return question;
-  if (
-    question.kind === "choice" &&
-    !question.multiple &&
-    question.options.length <= GROUP_OPTIONS
-  ) {
-    return question;
-  }
-  return undefined;
-}
-
-function quickMrkdwn(
-  request: HitlRequest,
-  question: HitlQuestion,
-  detail: Detail = fullDetail,
-  preamble = request.prompt ? toMrkdwn(request.prompt) : ""
-): string {
+/** A question answered in the thread as its message shows it: the agent's words over it. */
+function quickMrkdwn(request: HitlRequest, question: HitlQuestion): string {
   return [
-    preamble,
-    questionMrkdwn(
-      question,
-      listsOptions(question, VISIBLE_BUTTON_LABEL),
-      detail
-    )
+    request.prompt ? toMrkdwn(request.prompt) : "",
+    questionMrkdwn(question, listsOptions(question, VISIBLE_BUTTON_LABEL))
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
 /**
- * A question answered in the thread, in what one message holds. Its words and
- * every option's heading are kept whatever it costs the preamble, the
- * descriptions and the examples — a button showing "2" means nothing once the
- * line naming 2 is gone. A preamble that leaves the headings no room is
- * shortened into what they leave; otherwise descriptions and examples share
- * what room is left. `whole` is whether that held: when even the headings do
- * not fit, the text is cut, and buttons keep their labels.
+ * The one question answered by buttons in the thread: when the form is that,
+ * and it fits one message whole. One that does not is answered in the modal,
+ * which shows it whole — a message shortened to fit would show buttons beside
+ * options nobody can read in full.
  */
-function fittedQuestion(
-  request: HitlRequest,
-  question: HitlQuestion
-): { text: string; whole: boolean } {
-  const full = quickMrkdwn(request, question);
-  if (full.length <= MESSAGE_TEXT) return { text: full, whole: true };
-  const none: Detail = () => "";
-  const bare = quickMrkdwn(request, question, none);
-  if (bare.length > MESSAGE_TEXT && request.prompt) {
-    const headings = quickMrkdwn(request, question, none, "");
-    const room = MESSAGE_TEXT - headings.length - "\n\n".length;
-    const preamble = clipMrkdwn(toMrkdwn(request.prompt), room);
-    if (room > 0 && preamble.length <= room) {
-      return {
-        text: quickMrkdwn(request, question, none, preamble),
-        whole: true
-      };
-    }
-  }
-  const details = (question.kind === "choice" ? question.options : [])
-    .map(fullDetail)
-    .filter(Boolean);
-  const room = MESSAGE_TEXT - bare.length - details.length;
-  if (room < 0 || details.length === 0) return { text: bare, whole: false };
-  const share = Math.floor(room / details.length);
-  const clipped: Detail = (o) => {
-    const shown = fullDetail(o);
-    return shown && share > 0 ? clipMrkdwn(shown, share) : "";
-  };
-  return { text: quickMrkdwn(request, question, clipped), whole: true };
+function quickQuestion(request: HitlRequest): HitlQuestion | undefined {
+  if (request.questions.length !== 1) return undefined;
+  const [question] = request.questions;
+  const answeredHere =
+    question.kind === "approval" ||
+    (question.kind === "choice" &&
+      !question.multiple &&
+      question.options.length <= GROUP_OPTIONS);
+  return answeredHere && quickMrkdwn(request, question).length <= MESSAGE_TEXT
+    ? question
+    : undefined;
 }
 
 /**
@@ -441,24 +388,15 @@ function promptCut(request: HitlRequest): boolean {
 }
 
 /**
- * What the message says above its controls, and the note marking where it is
- * cut. A question answered in the thread is in it, with its options, since its
- * buttons answer it there. A form answered in the modal is not: the message
- * holds only the agent's words, and the modal the questions.
+ * What the message says above its controls. A question answered in the thread
+ * is in it, with its options, since its buttons answer it there. A form answered
+ * in the modal is not: the message holds only the agent's words, and the modal
+ * the questions.
  */
-function messageText(request: HitlRequest): {
-  text: string;
-  whole: boolean;
-  cutNote: string;
-} {
+function messageText(request: HitlRequest): string {
   const quick = quickQuestion(request);
-  if (quick)
-    return { ...fittedQuestion(request, quick), cutNote: CUT_QUESTION };
-  return {
-    text: request.prompt ? toMrkdwn(request.prompt) : glance(request),
-    whole: true,
-    cutNote: CUT_PROMPT
-  };
+  if (quick) return quickMrkdwn(request, quick);
+  return request.prompt ? toMrkdwn(request.prompt) : glance(request);
 }
 
 function button(
@@ -476,8 +414,8 @@ function button(
   };
 }
 
-/** The prompt's controls. `numbered` is whether the message names every number. */
-function controlBlocks(request: HitlRequest, numbered: boolean): unknown[] {
+/** The prompt's controls. */
+function controlBlocks(request: HitlRequest): unknown[] {
   const r = request.requestId;
   const question = quickQuestion(request);
   let elements: unknown[];
@@ -495,7 +433,8 @@ function controlBlocks(request: HitlRequest, numbered: boolean): unknown[] {
       button("Comment…", OPEN_ACTION, { r, q: 0 })
     ];
   } else if (question.kind === "choice") {
-    const numbers = numbered && listsOptions(question, VISIBLE_BUTTON_LABEL);
+    // Numbers, when the message lists the options they stand for.
+    const numbers = listsOptions(question, VISIBLE_BUTTON_LABEL);
     elements = [
       ...question.options.map((o, j) =>
         button(numbers ? String(j + 1) : o.label, `${PICK_ACTION}-${j}`, {
@@ -514,18 +453,16 @@ function controlBlocks(request: HitlRequest, numbered: boolean): unknown[] {
 
 /** The open prompt: what {@link messageText} says, then the controls. */
 export function requestBlocks(request: HitlRequest): unknown[] {
-  const message = messageText(request);
   return [
-    ...sections(message.text, MESSAGE_TEXT, message.cutNote),
-    ...controlBlocks(request, message.whole)
+    ...sections(messageText(request), MESSAGE_TEXT, CUT_PROMPT),
+    ...controlBlocks(request)
   ];
 }
 
 /** A prompt closed without an answer — expired, or its task over — under `note`. */
 export function resolvedBlocks(request: HitlRequest, note: string): unknown[] {
-  const message = messageText(request);
   return [
-    ...sections(message.text, MESSAGE_TEXT, message.cutNote),
+    ...sections(messageText(request), MESSAGE_TEXT, CUT_PROMPT),
     context(note)
   ];
 }
