@@ -8,6 +8,7 @@ import {
 } from "@dynamicagents/g2a-protocol";
 import {
   answeredBlocks,
+  clipMrkdwn,
   fallbackText,
   formPages,
   formView,
@@ -663,6 +664,28 @@ describe("a form too long for one modal", () => {
 });
 
 describe("the answered prompt", () => {
+  it("shortens a long preamble rather than lose the answers under it", () => {
+    const request = form(
+      [
+        { kind: "text", id: "a", prompt: "First question?" },
+        { kind: "text", id: "b", prompt: "Final question?" }
+      ],
+      "Context. ".repeat(1_500)
+    );
+    const blocks = answeredBlocks({
+      request,
+      answers: { a: { text: "first answer" }, b: { text: "final answer" } },
+      answeredBy: "U1"
+    });
+    expect(messageViolations(blocks)).toEqual([]);
+    const text = blocksText(blocks);
+    expect(text).toContain("first answer");
+    expect(text).toContain("final answer");
+    expect(text).not.toContain("the agent has the full answer");
+    // Shortened, visibly.
+    expect(text).toMatch(/^Context\. [^…]*…/);
+  });
+
   it("fits a long answer under a long form, marking where it is cut", () => {
     const request = longForm();
     const blocks = answeredBlocks({
@@ -723,6 +746,27 @@ describe("fallbackText", () => {
 });
 
 describe("what a cut may not lose", () => {
+  /**
+   * A cut shares out what room is left, and a share can be a character or
+   * two: a cut that overruns its share pushes the end of the message — an
+   * option's heading — past where Slack keeps it.
+   */
+  it("keeps every cut within its room, however little", () => {
+    const texts = [
+      "word ".repeat(40),
+      `see ${"<https://example.com/x|a link> ".repeat(5)}`,
+      `${"```"}\n${"code ".repeat(40)}`
+    ];
+    for (const text of texts) {
+      for (let max = 0; max <= 40; max++) {
+        expect(clipMrkdwn(text, max).length).toBeLessThanOrEqual(max);
+      }
+    }
+    expect(clipMrkdwn("short", 5)).toBe("short");
+    expect(clipMrkdwn("longer", 1)).toBe("…");
+    expect(clipMrkdwn("longer", 0)).toBe("");
+  });
+
   it("keeps a Slack link whole when the last space before the cut is inside it", () => {
     const link = `<https://example.com/${"p".repeat(30)}|a label ${"with words ".repeat(7)}to end on>`;
     const pieces = splitMrkdwn(`${"word ".repeat(576)}${link} after`);

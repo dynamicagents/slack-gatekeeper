@@ -155,12 +155,14 @@ function isOpenFence(text: string): boolean {
 }
 
 /**
- * `text` cut to `max` with a mark, outside any link or mention it would land
- * in, and any code block it leaves open closed.
+ * `text` cut to at most `max` with a mark, outside any link or mention it would
+ * land in, and any code block it leaves open closed. Too little room for any of
+ * the text leaves the mark alone, or nothing.
  */
-function clipMrkdwn(text: string, max: number): string {
+export function clipMrkdwn(text: string, max: number): string {
   if (text.length <= max) return text;
-  const at = Math.max(1, max - `\n${FENCE}`.length - 1);
+  const at = max - `\n${FENCE}`.length - 1;
+  if (at < 1) return max >= 1 ? "…" : "";
   const safe = outsideMarkup(text, at);
   const cut = `${text.slice(0, safe > 0 ? safe : at)}…`;
   return isOpenFence(cut) ? `${cut}\n${FENCE}` : cut;
@@ -480,8 +482,8 @@ export function resolvedBlocks(request: HitlRequest, note: string): unknown[] {
 
 /**
  * The answered prompt: each question as it was asked, its answer under it, in
- * what room the message has. A long typed answer is cut here only — the agent
- * was sent all of it.
+ * what room the message has — the preamble giving way first. A long typed
+ * answer is cut here only — the agent was sent all of it.
  */
 export function answeredBlocks(input: {
   request: HitlRequest;
@@ -501,9 +503,15 @@ export function answeredBlocks(input: {
       .join("\n");
     return `${questionMrkdwn(q, i, many, false)}\n:white_check_mark: ${words}`;
   });
-  const text = [request.prompt ? toMrkdwn(request.prompt) : "", ...body]
-    .filter(Boolean)
-    .join("\n\n");
+  // The answers before the preamble: it is shortened into what they leave.
+  const answered = body.join("\n\n");
+  const preamble = request.prompt
+    ? clipMrkdwn(
+        toMrkdwn(request.prompt),
+        Math.max(1, MESSAGE_TEXT - answered.length - "\n\n".length)
+      )
+    : "";
+  const text = [preamble, answered].filter(Boolean).join("\n\n");
   return [
     ...sections(text, MESSAGE_TEXT, CUT_ANSWER),
     context(`Answered by <@${input.answeredBy}>`)
