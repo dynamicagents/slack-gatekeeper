@@ -411,7 +411,7 @@ describe("the form's modal", () => {
       ["q4:approval", { picks: ["approve"] }],
       ["q4:other", { text: "" }]
     );
-    expect(formErrors(values)).toBeUndefined();
+    expect(formErrors(request, values)).toBeUndefined();
     expect(formAnswers(request, values)).toEqual({
       db: { optionIds: ["pg"] },
       checks: { optionIds: ["lint", "test"], text: "and typecheck" },
@@ -424,6 +424,7 @@ describe("the form's modal", () => {
   it("refuses a question left without a pick or words, under that question", () => {
     expect(
       formErrors(
+        request,
         state(
           ["q0:choice", { picks: [] }],
           ["q0:other", { text: "   " }],
@@ -442,11 +443,61 @@ describe("the form's modal", () => {
     const half = "x".repeat(MAX_MESSAGE_TEXT_BYTES / 2 + 1);
     expect(
       formErrors(
+        request,
         state(["q0:other", { text: half }], ["q3:text", { text: half }])
       )
     ).toEqual({
       "q3:text": "These answers are too long to send — please shorten them."
     });
+  });
+
+  /**
+   * The agent measures the text part the answers go in, and that names each
+   * question beside its words: words that fit on their own can still make a
+   * message it refuses, after the question is spent.
+   */
+  it("measures the text the answers are sent with, headings included", () => {
+    const two = form([
+      { kind: "text", id: "a", prompt: "First?", header: "First" },
+      { kind: "text", id: "b", prompt: "Second?", header: "Second" }
+    ]);
+    const half = "x".repeat(MAX_MESSAGE_TEXT_BYTES / 2 - 1);
+    expect(
+      formErrors(
+        two,
+        state(["q0:text", { text: half }], ["q1:text", { text: half }])
+      )
+    ).toEqual({
+      "q1:text": "These answers are too long to send — please shorten them."
+    });
+  });
+
+  it("keeps the answer to a question whatever its id", () => {
+    const odd = form([
+      { kind: "text", id: "__proto__", prompt: "First?" },
+      { kind: "text", id: "constructor", prompt: "Second?" }
+    ]);
+    const answers = formAnswers(
+      odd,
+      state(["q0:text", { text: "one" }], ["q1:text", { text: "two" }])
+    );
+    expect(Object.keys(answers ?? {})).toEqual(["__proto__", "constructor"]);
+    expect(JSON.parse(JSON.stringify(answers))).toEqual(
+      JSON.parse('{"__proto__":{"text":"one"},"constructor":{"text":"two"}}')
+    );
+  });
+
+  it("caps an input's label, the header above it shown whole", () => {
+    const header = "h".repeat(2_001);
+    const view = formView(
+      form([
+        { kind: "text", id: "a", prompt: "First?", header },
+        { kind: "text", id: "b", prompt: "Second?" }
+      ])
+    );
+    expect(viewViolations(view)).toEqual([]);
+    expect(inputsOf(view)[0]!.label.text).toHaveLength(2_000);
+    expect(blocksText(view.blocks).replace(/\s/g, "")).toContain(header);
   });
 });
 
@@ -577,9 +628,11 @@ describe("what a cut may not lose", () => {
             kind: "choice",
             id: "q1",
             prompt: "Which?",
+            // Headings past a message on their own: a preamble alone is
+            // shortened instead.
             options: Array.from({ length: 5 }, (_, i) => ({
               id: `o${i}`,
-              label: `${i} ${"long label ".repeat(100)}`
+              label: `${i} ${"long label ".repeat(250)}`
             }))
           }
         ],
@@ -590,6 +643,26 @@ describe("what a cut may not lose", () => {
     const labels = buttonsOf(blocks).map((b) => b.text.text);
     expect(labels[0]).toMatch(/^0 long label .*…$/);
     expect(labels.every((l) => l.length <= 75)).toBe(true);
+  });
+
+  it("shortens a preamble that leaves the questions no room, rather than lose them", () => {
+    const blocks = requestBlocks(
+      form(
+        [
+          { kind: "text", id: "q1", prompt: "First question?" },
+          { kind: "text", id: "q2", prompt: "Final question?" }
+        ],
+        `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}`
+      )
+    );
+    expect(messageViolations(blocks)).toEqual([]);
+    const text = blocksText(blocks);
+    expect(text).toContain("*1.* First question?");
+    expect(text).toContain("*2.* Final question?");
+    expect(text).not.toContain("Cut here");
+    // Shortened visibly, and between links rather than inside one.
+    const preamble = text.slice(0, text.indexOf("*1.*"));
+    expect(preamble).toMatch(/\|a link>\s+…\s*$/);
   });
 
   it("shows the modal every question, past what a message holds", () => {

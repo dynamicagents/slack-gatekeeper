@@ -362,24 +362,21 @@ async function handleBlockActions(
   }
 }
 
-/** Handle a submitted form: read its answers against the questions, and send them. */
+/** Send a submitted form's answers, which `formErrors` has let through. */
 async function handleViewSubmission(
+  row: HitlFormRow,
   payload: SlackViewSubmissionPayload
 ): Promise<void> {
-  const requestId = payload.privateMetadata;
-  if (!requestId) return;
-  const row = await getHitlForm(requestId);
-  if (!row) return;
   const answers = formAnswers(row.requestJson, payload.values ?? []);
   if (!answers) {
     // `formErrors` refused this on the request path; reaching here means the
     // modal and the stored form disagree, which a person cannot fix.
     console.error("[hitl] a submitted form answers nothing it asked", {
-      requestId
+      requestId: row.requestId
     });
     return;
   }
-  await answerHitl(requestId, { answers, answeredBy: payload.userId });
+  await answerHitl(row.requestId, { answers, answeredBy: payload.userId });
 }
 
 /**
@@ -423,10 +420,15 @@ export async function handleSlackInteractivity(
     // On the request path, while Slack is still listening: refused here, a
     // mistake keeps the modal open with what was typed still in it. Refused by
     // the agent after the claim, the question would be spent on an answer
-    // nobody holds.
-    const errors = formErrors(payload.values ?? []);
+    // nobody holds. The form is read here because what the agent measures is
+    // the text the answers are sent with, its labels and headings included.
+    const row = payload.privateMetadata
+      ? await getHitlForm(payload.privateMetadata)
+      : null;
+    if (!row) return new Response(null, { status: 200 });
+    const errors = formErrors(row.requestJson, payload.values ?? []);
     if (errors) return Response.json({ response_action: "errors", errors });
-    ctx.waitUntil(handleViewSubmission(payload));
+    ctx.waitUntil(handleViewSubmission(row, payload));
     // An empty 200 tells Slack to close the modal.
     return new Response(null, { status: 200 });
   }

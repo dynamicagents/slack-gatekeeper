@@ -41,6 +41,9 @@ const VISIBLE_BUTTON_LABEL = 30;
 /** Slack's cap on a button's, or a radio or select option's, text. */
 const CONTROL_TEXT = 75;
 
+/** Slack's cap on an input block's label. */
+const INPUT_LABEL = 2_000;
+
 /** Slack's caps on a radio group's or checkbox group's options, and a select's. */
 const GROUP_OPTIONS = 10;
 const SELECT_OPTIONS = 100;
@@ -131,10 +134,15 @@ function isOpenFence(text: string): boolean {
   return (text.split(FENCE).length - 1) % 2 === 1;
 }
 
-/** `text` cut to `max` with a mark, and any code block it leaves open closed. */
+/**
+ * `text` cut to `max` with a mark, outside any link or mention it would land
+ * in, and any code block it leaves open closed.
+ */
 function clipMrkdwn(text: string, max: number): string {
   if (text.length <= max) return text;
-  const cut = clip(text, Math.max(1, max - `\n${FENCE}`.length));
+  const at = Math.max(1, max - `\n${FENCE}`.length - 1);
+  const safe = outsideMarkup(text, at);
+  const cut = `${text.slice(0, safe > 0 ? safe : at)}…`;
   return isOpenFence(cut) ? `${cut}\n${FENCE}` : cut;
 }
 
@@ -329,24 +337,25 @@ function quickQuestion(request: HitlRequest): HitlQuestion | undefined {
 function formMrkdwn(
   request: HitlRequest,
   listAll: boolean,
-  detail: Detail = fullDetail
+  detail: Detail = fullDetail,
+  preamble = request.prompt ? toMrkdwn(request.prompt) : ""
 ): string {
   const quick = !listAll && quickQuestion(request) !== undefined;
   const many = request.questions.length > 1;
   const body = request.questions.map((q, i) =>
     questionMrkdwn(q, i, many, listsOptions(q, quick), detail)
   );
-  return [request.prompt ? toMrkdwn(request.prompt) : "", ...body]
-    .filter(Boolean)
-    .join("\n\n");
+  return [preamble, ...body].filter(Boolean).join("\n\n");
 }
 
 /**
  * The form as the message shows it, in what one message holds. Every question
- * and every option's heading is kept whatever it costs the descriptions and
- * examples — a button showing "2" means nothing once the line naming 2 is gone
- * — and those share what room is left. `whole` is whether that held: when even
- * the headings do not fit, the text is cut, and buttons keep their labels.
+ * and every option's heading is kept whatever it costs the preamble, the
+ * descriptions and the examples — a button showing "2" means nothing once the
+ * line naming 2 is gone. A preamble that leaves the headings no room is
+ * shortened into what they leave; otherwise descriptions and examples share
+ * what room is left. `whole` is whether that held: when even the headings do
+ * not fit, the text is cut, and buttons keep their labels.
  */
 function fittedForm(
   request: HitlRequest,
@@ -354,7 +363,19 @@ function fittedForm(
 ): { text: string; whole: boolean } {
   const full = formMrkdwn(request, listAll);
   if (full.length <= MESSAGE_TEXT) return { text: full, whole: true };
-  const bare = formMrkdwn(request, listAll, () => "");
+  const none: Detail = () => "";
+  const bare = formMrkdwn(request, listAll, none);
+  if (bare.length > MESSAGE_TEXT && request.prompt) {
+    const headings = formMrkdwn(request, listAll, none, "");
+    const room = MESSAGE_TEXT - headings.length - "\n\n".length;
+    const preamble = clipMrkdwn(toMrkdwn(request.prompt), room);
+    if (room > 0 && preamble.length <= room) {
+      return {
+        text: formMrkdwn(request, listAll, none, preamble),
+        whole: true
+      };
+    }
+  }
   const details = request.questions
     .flatMap((q) => (q.kind === "choice" ? q.options : []))
     .map(fullDetail)
@@ -591,7 +612,8 @@ function formViewBlocks(request: HitlRequest, only?: number): unknown[] {
     blocks.push({
       type: "input",
       block_id: inputBlockId(i, q),
-      label: plain(label),
+      // The section above shows the header whole.
+      label: plain(clip(label, INPUT_LABEL)),
       // A pick may be left for words typed below instead; a text question has
       // only its words, which Slack then requires.
       optional: q.kind !== "text",

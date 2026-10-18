@@ -3,7 +3,7 @@ import {
   MAX_MESSAGE_TEXT_BYTES,
   type HitlAnswer
 } from "@dynamicagents/g2a-protocol";
-import type { HitlRequest } from "@/a2a/hitl";
+import { answersText, type HitlRequest } from "@/a2a/hitl";
 import { isRecord } from "@/util/json";
 import { OPEN_ACTION, PICK_ACTION, type ControlValue } from "./render";
 
@@ -139,21 +139,22 @@ const encoder = new TextEncoder();
  *
  * Every question needs an answer: a pick, or words. Slack enforces a required
  * input only by its being empty, so words that are only whitespace are caught
- * here. The words together are held to the bound the agent holds a message to.
+ * here. Then the text part the answers are sent with — {@link answersText}, the
+ * labels and headings beside the words — is held to the bound the agent holds
+ * a message's text to.
  */
 export function formErrors(
+  request: HitlRequest,
   values: readonly SlackViewStateValue[]
 ): Record<string, string> | undefined {
   const errors: Record<string, string> = {};
-  let bytes = 0;
+  let first: string | undefined;
   let lastText: string | undefined;
   for (const entry of entries(values).values()) {
-    if (entry.text) {
-      bytes += encoder.encode(entry.text).byteLength;
-      lastText = entry.textBlockId;
-    }
-    if (entry.picks.length > 0 || entry.text) continue;
     const where = entry.blockId ?? entry.textBlockId;
+    first ??= where;
+    if (entry.text) lastText = entry.textBlockId;
+    if (entry.picks.length > 0 || entry.text) continue;
     if (!where) continue;
     errors[where] =
       entry.kind === "choice"
@@ -162,11 +163,20 @@ export function formErrors(
           ? "Approve, reject, or leave a comment below."
           : "Write an answer.";
   }
-  if (bytes > MAX_MESSAGE_TEXT_BYTES && lastText) {
-    errors[lastText] =
-      "These answers are too long to send — please shorten them.";
+  if (Object.keys(errors).length > 0) return errors;
+  const answers = formAnswers(request, values);
+  const where = lastText ?? first;
+  if (
+    answers &&
+    where &&
+    encoder.encode(answersText(request, answers)).byteLength >
+      MAX_MESSAGE_TEXT_BYTES
+  ) {
+    return {
+      [where]: "These answers are too long to send — please shorten them."
+    };
   }
-  return Object.keys(errors).length > 0 ? errors : undefined;
+  return undefined;
 }
 
 /**
@@ -179,7 +189,7 @@ export function formAnswers(
   values: readonly SlackViewStateValue[]
 ): Record<string, HitlAnswer> | null {
   const byIndex = entries(values);
-  const answers: Record<string, HitlAnswer> = {};
+  const answers: [string, HitlAnswer][] = [];
   for (const [index, entry] of byIndex) {
     const question = request.questions[index];
     if (!question) return null;
@@ -194,15 +204,20 @@ export function formAnswers(
           : [];
     const [first, ...more] = optionIds;
     if (first !== undefined) {
-      answers[question.id] = {
-        optionIds: [first, ...more],
-        ...(entry.text ? { text: entry.text } : {})
-      };
+      answers.push([
+        question.id,
+        {
+          optionIds: [first, ...more],
+          ...(entry.text ? { text: entry.text } : {})
+        }
+      ]);
     } else if (entry.text) {
-      answers[question.id] = { text: entry.text };
+      answers.push([question.id, { text: entry.text }]);
     } else {
       return null;
     }
   }
-  return Object.keys(answers).length > 0 ? answers : null;
+  // Collected as entries, not assigned: an agent picks its question ids, and
+  // assigning `__proto__` would set the object's prototype rather than a key.
+  return answers.length > 0 ? Object.fromEntries(answers) : null;
 }
