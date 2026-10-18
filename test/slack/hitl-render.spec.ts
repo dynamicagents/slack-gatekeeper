@@ -256,32 +256,70 @@ describe("the open prompt", () => {
     expect(text).not.toContain("<javascript:");
   });
 
-  it("shows every question of a long form, and answers it from one button", () => {
-    const blocks = requestBlocks(longForm());
+  /**
+   * The questions are the modal's: said in the message too, a person reads
+   * them twice. What the message holds is what the agent said around them.
+   */
+  it("shows a form's Answer button under the agent's words alone", () => {
+    const request = longForm();
+    const blocks = requestBlocks(request);
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
-    for (const n of [1, 2, 3, 4, 5]) expect(text).toContain(`Question ${n}:`);
+    expect(text).toContain("Context paragraph 1.");
+    expect(text).toContain("Context paragraph 30.");
+    for (const n of [1, 2, 3, 4, 5]) {
+      expect(text).not.toContain(`Question ${n}:`);
+    }
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    // Nor are the agent's words said again in the modal.
+    expect(blocksText(formView(request).blocks as unknown[])).not.toContain(
+      "Context paragraph 1."
+    );
   });
 
-  it("numbers a form's questions, under their headers", () => {
+  it("names a form's questions in a line each when the agent said nothing around them", () => {
     const text = blocksText(
       requestBlocks(
+        form([
+          {
+            kind: "text",
+            id: "q1",
+            prompt: "Which database?\nWe run Postgres today.",
+            header: "Database"
+          },
+          { kind: "text", id: "q2", prompt: "Name it?\nShort, please." }
+        ])
+      )
+    );
+    expect(text).toBe("• *Database*\n• Name it?");
+  });
+
+  /**
+   * The only numbers are an option's: a question numbered too reads as one of
+   * them.
+   */
+  it("names a question by its header, unnumbered", () => {
+    const text = blocksText(
+      formView(
         form([
           {
             kind: "choice",
             id: "q1",
             prompt: "Which database?",
             header: "Database",
-            options: [{ id: "a", label: "Postgres" }]
+            options: [
+              { id: "a", label: "Postgres", description: "What we run." },
+              { id: "b", label: "SQLite" }
+            ]
           },
           { kind: "text", id: "q2", prompt: "Name it?" }
         ])
-      )
+      ).blocks as unknown[]
     );
-    expect(text).toContain("*1. Database*\nWhich database?");
-    expect(text).toContain("*1.* Postgres");
-    expect(text).toContain("*2.* Name it?");
+    expect(text).toContain("*Database*\nWhich database?");
+    expect(text).toContain("*1.* Postgres\nWhat we run.");
+    expect(text).toContain("Name it?");
+    expect(text).not.toMatch(/\*1\. Database|\*2\.\* Name it/);
   });
 
   it("converts the agent's Markdown and defuses channel-wide mentions", () => {
@@ -422,7 +460,18 @@ describe("the form's modal", () => {
       ["q4:approval", "radio_buttons", true],
       ["q4:other", "plain_text_input", true]
     ]);
-    expect(inputsOf(view)[0]!.label.text).toBe("Database");
+    // A description is in the list above its options, not again under each.
+    expect(
+      inputsOf(view).flatMap(
+        (b) => (b.element.options ?? []) as Record<string, unknown>[]
+      )
+    ).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ description: expect.anything() })
+      ])
+    );
+    // Short labels and nothing more to them: the controls carry them alone.
+    expect(blocksText(view.blocks as unknown[])).not.toContain("*1.* lint");
     // Answers past 3,000 characters reach the agent without a cap.
     expect(inputsOf(view)[6]!.element).not.toHaveProperty("max_length");
   });
@@ -539,7 +588,7 @@ describe("the form's modal", () => {
         )
       )
     ).toEqual({
-      "q0:choice": "Pick one, or answer in your own words below.",
+      "q0:choice": "Pick an option, or write yours in Other below.",
       "q3:text": "Write an answer.",
       "q4:approval": "Approve, reject, or leave a comment below."
     });
@@ -593,17 +642,20 @@ describe("the form's modal", () => {
     );
   });
 
-  it("caps an input's label, the header above it shown whole", () => {
-    const header = "h".repeat(2_001);
-    const view = formView(
-      form([
-        { kind: "text", id: "a", prompt: "First?", header },
-        { kind: "text", id: "b", prompt: "Second?" }
-      ])
-    );
-    expect(viewViolations(view)).toEqual([]);
-    expect(inputsOf(view)[0]!.label.text).toHaveLength(2_000);
-    expect(blocksText(view.blocks).replace(/\s/g, "")).toContain(header);
+  /** The question is right above its input: the label says what to do with it. */
+  it("labels each input with what to do, not with the question again", () => {
+    const view = formView(request);
+    expect(inputsOf(view).map((b) => [b.block_id, b.label.text])).toEqual([
+      ["q0:choice", "Pick one"],
+      ["q0:other", "Other"],
+      ["q1:choice+", "Pick any"],
+      ["q1:other", "Other"],
+      ["q2:choice", "Pick one"],
+      ["q2:other", "Other"],
+      ["q3:text", "Your answer"],
+      ["q4:approval", "Approve or reject"],
+      ["q4:other", "Comment"]
+    ]);
   });
 });
 
@@ -636,14 +688,12 @@ describe("a form too long for one modal", () => {
     expect(
       views.map((v) => readViewMeta(v.private_metadata as string)?.p)
     ).toEqual(pages.map((_, p) => p));
-    // The preamble opens the form, once.
-    expect(views.map((v) => blocksText(v.blocks as unknown[]))).toEqual(
-      pages.map((_, p) =>
-        p === 0
-          ? expect.stringContaining("Some context first.")
-          : expect.not.stringContaining("Some context first.")
-      )
-    );
+    // The agent's words are the message's, not said again on any page.
+    for (const v of views) {
+      expect(blocksText(v.blocks as unknown[])).not.toContain(
+        "Some context first."
+      );
+    }
   });
 
   it("offers Back on every page but the first", () => {
@@ -730,10 +780,13 @@ describe("the answered prompt", () => {
 });
 
 describe("a closed prompt", () => {
-  it("re-renders a long form within the limits", () => {
+  it("re-renders a long form within the limits, as the agent's words it was asked under", () => {
     const blocks = resolvedBlocks(longForm(), "⏳ This prompt expired.");
     expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain("Question 5:");
+    const text = blocksText(blocks);
+    expect(text).toContain("Context paragraph 30.");
+    expect(text).not.toContain("Question 5:");
+    expect(text).toContain("This prompt expired.");
     expect(buttonsOf(blocks)).toEqual([]);
   });
 });
@@ -793,7 +846,42 @@ describe("what a cut may not lose", () => {
     expect(pieces.join("")).toContain("p".repeat(2_000));
   });
 
-  it("names every numbered option, however long the prompt and descriptions", () => {
+  /**
+   * A message shortened to fit would show buttons beside options nobody can
+   * read in full, so a question too long for one is answered in the modal,
+   * which shows it whole.
+   */
+  it("answers in the modal a question too long for one message, shown whole there", () => {
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which?",
+          options: [
+            {
+              id: "a",
+              label: "First choice",
+              description: `${"d ".repeat(4_500)}the end of it.`
+            },
+            { id: "b", label: "Second choice" }
+          ]
+        }
+      ],
+      "p ".repeat(4_500)
+    );
+    const blocks = requestBlocks(request);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    expect(blocksText(blocks)).not.toContain("First choice");
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    const text = blocksText(view.blocks as unknown[]);
+    expect(text).toContain("*1.* First choice");
+    expect(text).toContain("the end of it.");
+  });
+
+  it("answers a question in the thread when it fits one message whole", () => {
     const blocks = requestBlocks(
       form(
         [
@@ -805,19 +893,17 @@ describe("what a cut may not lose", () => {
               {
                 id: "a",
                 label: "First choice",
-                description: "d ".repeat(4_500)
+                description: "d ".repeat(2_000)
               },
               { id: "b", label: "Second choice" }
             ]
           }
         ],
-        "p ".repeat(4_500)
+        "p ".repeat(2_000)
       )
     );
     expect(messageViolations(blocks)).toEqual([]);
-    const text = blocksText(blocks);
-    expect(text).toContain("*1.* First choice");
-    expect(text).toContain("*2.* Second choice");
+    expect(blocksText(blocks)).toContain("*2.* Second choice");
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
       "1",
       "2",
@@ -825,49 +911,52 @@ describe("what a cut may not lose", () => {
     ]);
   });
 
-  it("keeps labels on the buttons when not even the options' headings fit", () => {
-    const blocks = requestBlocks(
-      form(
-        [
-          {
-            kind: "choice",
-            id: "q1",
-            prompt: "Which?",
-            // Headings past a message on their own: a preamble alone is
-            // shortened instead.
-            options: Array.from({ length: 5 }, (_, i) => ({
-              id: `o${i}`,
-              label: `${i} ${"long label ".repeat(250)}`
-            }))
-          }
-        ],
-        "p ".repeat(6_500)
-      )
+  it("cuts agent words past the message between links, and opens the modal with them whole", () => {
+    const words = `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}The end.`;
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which side?",
+          options: [
+            { id: "l", label: "Left" },
+            { id: "r", label: "Right" }
+          ]
+        }
+      ],
+      words
     );
-    expect(messageViolations(blocks)).toEqual([]);
-    const labels = buttonsOf(blocks).map((b) => b.text.text);
-    expect(labels[0]).toMatch(/^0 long label .*…$/);
-    expect(labels.every((l) => l.length <= 75)).toBe(true);
-  });
-
-  it("shortens a preamble that leaves the questions no room, rather than lose them", () => {
-    const blocks = requestBlocks(
-      form(
-        [
-          { kind: "text", id: "q1", prompt: "First question?" },
-          { kind: "text", id: "q2", prompt: "Final question?" }
-        ],
-        `Context. ${"[a link](https://example.com/a-long-path) ".repeat(400)}`
-      )
-    );
+    const blocks = requestBlocks(request);
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
-    expect(text).toContain("*1.* First question?");
-    expect(text).toContain("*2.* Final question?");
-    expect(text).not.toContain("Cut here");
-    // Shortened visibly, and between links rather than inside one.
-    const preamble = text.slice(0, text.indexOf("*1.*"));
-    expect(preamble).toMatch(/\|a link>\s+…\s*$/);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    // Cut visibly, between links rather than inside one.
+    expect(text).toMatch(/\|a link>\s*…\s+_Cut here/);
+    const modal = blocksText(formView(request).blocks as unknown[]);
+    expect(modal).toContain("The end.");
+    expect(modal).toContain("Which side?");
+  });
+
+  /**
+   * The message is the one place a form's agent words are shown, so words
+   * past what it holds would be lost: the modal opens with them whole instead.
+   */
+  it("opens a form's modal with agent words the message had to cut", () => {
+    const words = `Context. ${"Some more of it. ".repeat(900)}The end.`;
+    const request = form(
+      [
+        { kind: "text", id: "q1", prompt: "First question?" },
+        { kind: "text", id: "q2", prompt: "Final question?" }
+      ],
+      words
+    );
+    const blocks = requestBlocks(request);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toContain("the rest opens with the questions");
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    expect(blocksText(view.blocks as unknown[])).toContain("The end.");
   });
 
   it("shows the modal every question, past what a message holds", () => {

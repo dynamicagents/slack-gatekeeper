@@ -218,7 +218,7 @@ export function formErrors(
     if (!where) continue;
     errors[where] =
       entry.kind === "choice"
-        ? "Pick one, or answer in your own words below."
+        ? "Pick an option, or write yours in Other below."
         : entry.kind === "approval"
           ? "Approve, reject, or leave a comment below."
           : "Write an answer.";

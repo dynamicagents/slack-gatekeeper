@@ -979,7 +979,7 @@ describe("a form of several questions", () => {
 
     expect(await res.json()).toEqual({
       response_action: "errors",
-      errors: { "q0:choice": expect.stringContaining("Pick one") }
+      errors: { "q0:choice": expect.stringContaining("Pick an option") }
     });
     expect(captured.resumeMessages).toEqual([]);
     expect((await getHitlForm("req-form"))?.status).toBe("awaiting");
@@ -1204,7 +1204,9 @@ describe("a form too long for one modal", () => {
     );
     expect(await res.json()).toEqual({
       response_action: "errors",
-      errors: { [`q${first}:choice`]: expect.stringContaining("Pick one") }
+      errors: {
+        [`q${first}:choice`]: expect.stringContaining("Pick an option")
+      }
     });
     expect((await getHitlForm("req-paged"))?.draftsJson).toBeNull();
   });
