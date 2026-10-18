@@ -137,7 +137,11 @@ export function answeredQuestions(
   answers: Record<string, HitlAnswer>
 ): AnsweredQuestion[] {
   return request.questions.flatMap((question) => {
-    const answer = answers[question.id];
+    // Own keys only: an agent picks its question ids, and `constructor` would
+    // otherwise find `Object.prototype`'s.
+    const answer = Object.hasOwn(answers, question.id)
+      ? answers[question.id]
+      : undefined;
     if (!answer) return [];
     const picked = (answer.optionIds ?? []).map((id) => {
       if (question.kind === "approval") {
@@ -221,7 +225,8 @@ const answerSchema = z.union([
     optionIds: z.tuple([nonEmpty], nonEmpty),
     text: nonEmpty.optional()
   }),
-  z.object({ text: nonEmpty })
+  // `optionIds` refused outright rather than stripped, as core reads it.
+  z.object({ optionIds: z.undefined().optional(), text: nonEmpty })
 ]);
 
 const hitlResponseSchema = z.object({
