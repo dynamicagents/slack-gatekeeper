@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "30389eae-b1de-4cf3-9d38-46f68e5d040f",
+  "id": "04aeba06-ee73-4ae8-a6c9-cfd0be9c777f",
   "prevId": "f80609c8-adf4-40e6-a5cf-cba886515994",
   "tables": {
     "agent_channels": {
@@ -143,8 +143,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "'unknown'"
+          "autoincrement": false
         },
         "status": {
           "name": "status",

@@ -34,10 +34,33 @@ const migrations = (env as unknown as { TEST_MIGRATIONS: D1Migration[] })
  *
  * `scripts/check-storage-reset.mjs` (part of `npm run check`) fails the build on
  * a spec that reaches storage without this call.
+ *
+ * `through` stops the replay after that migration tag, for the one kind of spec
+ * that wants an older schema: one that drives a migration over rows written
+ * before it. Seed onto what the reset leaves, then call
+ * {@link applyPendingMigrations} to run the rest.
  */
-export function useStorageReset(): void {
+export function useStorageReset(opts: { through?: string } = {}): void {
+  const upTo =
+    opts.through === undefined ? migrations : migrationsThrough(opts.through);
   beforeEach(async () => {
     await reset();
-    await applyD1Migrations(env.DB, migrations);
+    await applyD1Migrations(env.DB, upTo);
   });
+}
+
+/** The migrations up to and including `tag`, which must name one of them. */
+function migrationsThrough(tag: string): D1Migration[] {
+  const end = migrations.findIndex((m) => m.name === `${tag}.sql`);
+  if (end < 0) throw new Error(`no migration named ${tag}`);
+  return migrations.slice(0, end + 1);
+}
+
+/**
+ * Apply every migration not yet applied — the ones a `through` reset left out.
+ * `applyD1Migrations` skips what it has already recorded, so this runs exactly
+ * the remainder, in order, each as its own batch, the way D1 does.
+ */
+export async function applyPendingMigrations(): Promise<void> {
+  await applyD1Migrations(env.DB, migrations);
 }

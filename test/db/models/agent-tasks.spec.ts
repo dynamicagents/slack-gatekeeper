@@ -16,7 +16,6 @@ import {
   getPendingAgentTasksWithDeadlinesByEventId,
   deleteAgentTask,
   sweepStaleAgentTasks,
-  STARTED_BY_UNKNOWN,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
 import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
@@ -69,34 +68,33 @@ describe("agent-tasks model", () => {
   it("rejects a task row without a message_ts", async () => {
     await expect(
       env.DB.prepare(
-        "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1')"
+        "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id, started_by) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1', 'U1')"
       ).run()
-    ).rejects.toThrow(/NOT NULL/i);
+    ).rejects.toThrow(/NOT NULL.*message_ts/i);
   });
 
-  // started_by is NOT NULL, so every row answers "who asked for this?" and no
-  // reader has to decide what a missing answer means. The two halves are pinned
-  // at the DB level, both unrepresentable through `createAgentTask`: a row that
-  // omits the column takes the sentinel the migration backfilled old rows with
-  // (and that keeps the pre-deploy Worker's inserts legal), and an explicit NULL
-  // is refused outright.
-  it("defaults a task row's started_by to the unknown sentinel", async () => {
-    await env.DB.prepare(
+  // started_by is NOT NULL with no default, so every row answers "who asked for
+  // this?" and no reader has to decide what a missing answer means. Both halves
+  // are pinned at the DB level and both are unrepresentable through
+  // `createAgentTask`, whose input requires the field: an insert that omits the
+  // column has nothing to fall back on, and an explicit NULL is refused too.
+  // What the rebuild in 0023 left on the rows written before the column is
+  // 0023's own spec.
+  it.each([
+    [
+      "omits started_by",
       `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id)
-       VALUES ('tok-default-starter', 'remoteagent', 'C1', '1700.1', 'Ev1')`
-    ).run();
-    expect((await getAgentTaskByToken("tok-default-starter"))?.startedBy).toBe(
-      STARTED_BY_UNKNOWN
+       VALUES ('tok-omitted-starter', 'remoteagent', 'C1', '1700.1', 'Ev1')`
+    ],
+    [
+      "nulls started_by",
+      `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id, started_by)
+       VALUES ('tok-null-starter', 'remoteagent', 'C1', '1700.1', 'Ev1', NULL)`
+    ]
+  ])("rejects a task row that %s", async (_what, sql) => {
+    await expect(env.DB.prepare(sql).run()).rejects.toThrow(
+      /NOT NULL.*started_by/i
     );
-  });
-
-  it("rejects a task row whose started_by is null", async () => {
-    await expect(
-      env.DB.prepare(
-        `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id, started_by)
-         VALUES ('tok-null-starter', 'remoteagent', 'C1', '1700.1', 'Ev1', NULL)`
-      ).run()
-    ).rejects.toThrow(/NOT NULL/i);
   });
 
   it("is idempotent on the token PK (no throw, no clobber)", async () => {

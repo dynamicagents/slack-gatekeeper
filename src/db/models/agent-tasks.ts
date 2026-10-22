@@ -51,9 +51,10 @@ export interface CreateAgentTaskInput {
    * is the authored message's author rather than the actor; see `startedBy` in
    * `src/workflows/message-helpers.ts`), so this is a string and never a null.
    *
-   * Required and deliberately not optional: a write path allowed to omit it
-   * would quietly fall back on the column's default, where naming the sentinel
-   * is a decision the caller has to make.
+   * Required and deliberately not optional, like the column itself: naming
+   * nobody is a decision the caller makes, and a write path that omitted the
+   * field would fail on the column's NOT NULL rather than quietly store a
+   * stand-in.
    */
   startedBy: string;
 }

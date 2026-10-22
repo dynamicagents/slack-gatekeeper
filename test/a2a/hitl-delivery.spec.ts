@@ -295,16 +295,18 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
   }
 
   it("posts the approval unmentioned for a row from before the column", async () => {
-    // Raw SQL omitting `started_by`, which is both what the code predating the
-    // column wrote (migration 0023 backfilled those rows with the sentinel) and
-    // what the previous Worker goes on writing until the deploy that knows about
-    // it lands. An agent has until its task deadline to come back, so such a row
-    // can still raise a prompt — worth posting without a ping rather than not
-    // posting. The types make it unrepresentable through `createAgentTask`.
+    // A row as 0023's rebuild left the ones written before the column: the
+    // sentinel it backfilled with, written here as raw SQL because the types make
+    // it unrepresentable through `createAgentTask`. An agent has until its task
+    // deadline to come back, so such a row can still raise a prompt after the
+    // migration — worth posting without a ping rather than not posting. That the
+    // rebuild is what puts the value there is `0023-agent-tasks-started-by.spec`.
     await env.DB.prepare(
-      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id)
-       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy')`
-    ).run();
+      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id, started_by)
+       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy', ?)`
+    )
+      .bind(STARTED_BY_UNKNOWN)
+      .run();
 
     await deliverUnstartedApproval(
       "tok-legacy",

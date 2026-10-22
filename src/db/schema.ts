@@ -196,9 +196,11 @@ export const agentChannels = sqliteTable(
  * - {@link STARTED_BY_PROCESS}: the gatekeeper itself fed the turn in. A feed
  *   turn for an edited or deleted message carries the *authored* message's user
  *   rather than the actor's, so there is no one on it who asked for the work.
- * - {@link STARTED_BY_UNKNOWN}: nobody was recorded. The column's SQLite-side
- *   default, so it is what rows written before it existed were backfilled with
- *   (migration 0023), and what an insert that omits the column lands.
+ * - {@link STARTED_BY_UNKNOWN}: nobody was recorded. What migration 0023's
+ *   rebuild backfilled the rows written before the column existed with, since
+ *   nothing can recover a user id for them after the fact. No live write path
+ *   produces it: every insert names a value, so a row reading `unknown` is one
+ *   that predates the column.
  *
  * Neither is shaped like a Slack user id (`U…`/`W…`, uppercase), which is what
  * makes them safe to store in a column read for a mention: `requestBlocks` only
@@ -264,15 +266,14 @@ export const agentTasks = sqliteTable(
     // (STARTED_BY_PROCESS / STARTED_BY_UNKNOWN) rather than with a null, so every
     // reader gets a string and none has to decide what a missing one means.
     //
-    // The DEFAULT is load-bearing twice over, which is why it lives in the DDL
-    // rather than only in the migration that backfilled with it (unlike
-    // `agents.task_deadline_seconds`, whose 0021 header argues the other way).
-    // It is what let 0023 add the column in place — SQLite will not add a NOT
-    // NULL column without one — and it is what keeps the previous Worker's
-    // inserts legal in the window between `d1 migrations apply` and the deploy
-    // that knows about the column: they land `unknown`, which is the truth about
-    // them, instead of failing the dispatch.
-    startedBy: text("started_by").notNull().default(STARTED_BY_UNKNOWN),
+    // Required and deliberately **without** a default, for the same reason
+    // `agents.task_deadline_seconds` has none: a database default would make the
+    // column optional at every insert forever, so a write path that forgot who
+    // started the task would quietly store `unknown` instead of failing. Naming
+    // nobody is a decision, and the caller makes it — `CreateAgentTaskInput`
+    // requires the field. The rows that predate the column were backfilled once,
+    // by 0023's rebuild, which is why that value exists in the table at all.
+    startedBy: text("started_by").notNull(),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks
     // it `completed`. `awaiting-input` is the parked state while a human-in-the-loop
     // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out
