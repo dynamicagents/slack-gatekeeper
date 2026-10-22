@@ -31,6 +31,11 @@ import { sanitizeSlackText } from "@/util/slack-text";
  * A control holds at most 75 characters, and a button shows about 30, so where
  * an option has more to it than a control shows, its options are listed in full
  * above the controls, which then carry only their numbers.
+ *
+ * A form asking someone to approve something mentions whoever started the task,
+ * so it reaches the person who asked for the work instead of waiting in a thread
+ * nobody is watching (see {@link approvalPing}). Anyone in the thread may still
+ * answer it.
  */
 
 /** Slack's cap on one section's text. */
@@ -451,9 +456,43 @@ function controlBlocks(request: HitlRequest): unknown[] {
   return [{ type: "actions", block_id: "hitl-controls", elements }];
 }
 
-/** The open prompt: what {@link messageText} says, then the controls. */
-export function requestBlocks(request: HitlRequest): unknown[] {
+/**
+ * The line that puts an approval in front of the person who started the task: a
+ * mention of them, which is what Slack notifies on. None when the form asks for
+ * no approval — a question is the agent's to raise, but waking somebody up is
+ * not, so only the decision it cannot make without a person gets a ping.
+ *
+ * `startedBy` is the Slack user id from the trigger message's own event, carried
+ * on the task row (`agent_tasks.started_by`) since dispatch. It is deliberately
+ * not read from the form: every string in there is the agent's, and an agent
+ * naming the user to mention is an agent choosing who to wake. Null for a task
+ * row that predates the column, which renders the prompt with no mention.
+ */
+function approvalPing(
+  request: HitlRequest,
+  startedBy: string | null | undefined
+): string | undefined {
+  const asksApproval = request.questions.some((q) => q.kind === "approval");
+  return startedBy && asksApproval
+    ? `<@${startedBy}> — this needs your approval.`
+    : undefined;
+}
+
+/**
+ * The open prompt: who it is for when it asks for an approval, what
+ * {@link messageText} says, then the controls.
+ *
+ * The mention is a block of its own rather than part of the message's text, so
+ * the agent's words keep the whole {@link MESSAGE_TEXT} budget they had and a
+ * form that only just fit is not cut to make room for it.
+ */
+export function requestBlocks(
+  request: HitlRequest,
+  startedBy?: string | null
+): unknown[] {
+  const ping = approvalPing(request, startedBy);
   return [
+    ...(ping ? [section(ping)] : []),
     ...sections(messageText(request), MESSAGE_TEXT, CUT_PROMPT),
     ...controlBlocks(request)
   ];
@@ -769,10 +808,22 @@ export function fallbackText(text: string): string {
   return clip(text, FALLBACK_TEXT);
 }
 
-/** The form in a line or two, for a notification. */
-export function requestFallbackText(request: HitlRequest): string {
+/**
+ * The form in a line or two, for a notification. An approval's mention leads it:
+ * a desktop notification is drawn from the blocks, but a mobile one is drawn from
+ * this text alone, and leading it is also what keeps the mention out of the cut
+ * when a long form runs past {@link FALLBACK_TEXT}.
+ */
+export function requestFallbackText(
+  request: HitlRequest,
+  startedBy?: string | null
+): string {
   return fallbackText(
-    [request.prompt, ...request.questions.map((q) => q.prompt)]
+    [
+      approvalPing(request, startedBy),
+      request.prompt,
+      ...request.questions.map((q) => q.prompt)
+    ]
       .filter(Boolean)
       .join("\n\n")
   );

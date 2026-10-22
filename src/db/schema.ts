@@ -227,6 +227,22 @@ export const agentTasks = sqliteTable(
     replyThreadTs: text("reply_thread_ts"),
     // Slack event id of the triggering message — used to collect the 🛑 reaction.
     eventId: text("event_id").notNull(),
+    // Slack user who started this task: the `user` of the trigger message event,
+    // as the webhook classified it. The one thing it is for is mentioning that
+    // person when their agent comes back asking a human to approve something, so
+    // the approval reaches whoever asked for the work rather than waiting in a
+    // thread nobody is watching (see `requestBlocks` in `src/slack/hitl/render.ts`).
+    //
+    // It comes from the signature-verified Slack envelope and from nowhere else —
+    // never from the agent's own HITL form, whose every string is untrusted and
+    // could otherwise name anyone it liked. It is written once, at dispatch, so a
+    // task continued by somebody else still pings the person who started it.
+    //
+    // Nullable, for the rows already in flight when the column arrived: an agent
+    // has until its `task_deadline_seconds` to come back, so some of those rows
+    // outlive the deploy that added this. The prompt for one of them renders
+    // without a mention rather than not at all.
+    startedBy: text("started_by"),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks
     // it `completed`. `awaiting-input` is the parked state while a human-in-the-loop
     // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out

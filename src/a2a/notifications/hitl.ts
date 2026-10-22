@@ -140,8 +140,11 @@ export async function deliverHitlRequest(
   const ts = await postBlocks({
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
-    blocks: requestBlocks(request),
-    text: requestFallbackText(request),
+    // `row.startedBy` is the trigger event's own Slack user, so a form asking for
+    // an approval mentions whoever started the task. Null on a row written before
+    // the column existed; the prompt then carries no mention.
+    blocks: requestBlocks(request, row.startedBy),
+    text: requestFallbackText(request, row.startedBy),
     username: displayName,
     iconUrl
   });

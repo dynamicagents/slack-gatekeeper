@@ -496,6 +496,10 @@ describe("MessageWorkflow — remote custom agents", () => {
       expect(row).not.toBeNull();
       expect(row?.taskId).toBe("task-remote-1");
       expect(row?.agentName).toBe(AGENT_NAME);
+      // The trigger event's own sender, so an approval this task later raises can
+      // mention whoever started it. It comes from the Slack envelope and from
+      // nowhere else — nothing an agent says can set it.
+      expect(row?.startedBy).toBe("U1");
     } finally {
       await introspector.dispose();
     }

@@ -5,16 +5,18 @@ import { registerAgent, getAgent } from "@/db/models/agents";
 import {
   completeAgentTask,
   createAgentTask,
-  getAgentTaskByToken
+  getAgentTaskByToken,
+  resumeFromInput
 } from "@/db/models/agent-tasks";
-import { getHitlForm } from "@/db/models/hitl-forms";
+import { claimHitlAnswer, getHitlForm } from "@/db/models/hitl-forms";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
 import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
+import { HITL_APPROVE_OPTION_ID } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
 import { makeSnapshot } from "../helpers/a2a";
 import { useStorageReset } from "../helpers/storage";
-import { choiceForm } from "../helpers/hitl";
+import { approvalForm, choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -84,6 +86,21 @@ function hitlTask(
   });
 }
 
+/** The same, asking a person to approve something rather than to pick. */
+function approvalTask(requestId: string): TaskSnapshot {
+  return makeSnapshot({
+    id: "task-1",
+    contextId: "C1:1700.1",
+    state: TaskState.TASK_STATE_INPUT_REQUIRED,
+    messageId: `${requestId}:u1`,
+    parts: [textPart("Approve the plan?"), dataPart(approvalForm(requestId))]
+  });
+}
+
+/** Who started the task every test here delivers for, and who else is around. */
+const STARTER = "U1";
+const OTHER = "U2";
+
 beforeEach(async () => {
   // A final status completes the row, which signals the ReactionWorkflow — an
   // instance these tests never create, so miniflare emits engine noise. Nothing
@@ -106,7 +123,8 @@ beforeEach(async () => {
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: "1700.1",
-    eventId: "Ev1"
+    eventId: "Ev1",
+    startedBy: STARTER
   });
 });
 
@@ -209,6 +227,99 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toBeUndefined();
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+  });
+});
+
+/**
+ * The approval reaches the person who asked for the work: the prompt mentions
+ * whoever started the task, from the trusted Slack event's user id carried on
+ * the task row since dispatch — never from the agent's own form. This is the
+ * delivery path both kinds of agent share: a built-in's in-process push and a
+ * remote's authenticated callback both arrive at `deliverTaskToSlack`.
+ */
+describe("deliverTaskToSlack — an approval tags whoever started the task", () => {
+  it("mentions them in the prompt's blocks and in its notification text", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+
+    await deliver(approvalTask("req-ap-1"));
+
+    expect(posts).toHaveLength(1);
+    // In the blocks, which is what Slack notifies on...
+    expect(posts[0].blocks).toContain(`<@${STARTER}>`);
+    // ...and in the fallback text, which is what a mobile notification reads.
+    expect(posts[0].text).toContain(`<@${STARTER}>`);
+    expect((await getHitlForm("req-ap-1"))?.status).toBe("awaiting");
+  });
+
+  it("mentions nobody when the form asks for no approval", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+
+    await deliver(hitlTask("req-ap-none"));
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].blocks).not.toContain("<@");
+    expect(posts[0].text).not.toContain("<@");
+  });
+
+  it("posts the approval without a mention for a row that has no starter", async () => {
+    // A row written before `agent_tasks.started_by` existed. An agent has until
+    // its task deadline to come back, so such a row can still raise a prompt —
+    // which is worth posting without a ping rather than not posting. Written as
+    // raw SQL: the types make a row without a starter unrepresentable through
+    // `createAgentTask`.
+    await env.DB.prepare(
+      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id)
+       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy')`
+    ).run();
+    const row = await getAgentTaskByToken("tok-legacy");
+    expect(row?.startedBy).toBeNull();
+
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    const agent = await getAgent("remoteagent");
+    await deliverTaskToSlack(
+      "tok-legacy",
+      row!,
+      agent!,
+      approvalTask("req-ap-legacy")
+    );
+
+    // The prompt is there, asked of nobody in particular.
+    expect(posts).toHaveLength(1);
+    expect(posts[0].blocks).toContain("req-ap-legacy");
+    expect(posts[0].blocks).not.toContain("<@");
+    expect(posts[0].text).not.toContain("<@");
+    expect((await getHitlForm("req-ap-legacy"))?.status).toBe("awaiting");
+    expect((await getAgentTaskByToken("tok-legacy"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("still mentions the starter after somebody else answered an earlier approval", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(approvalTask("req-ap-first"));
+
+    // The two writes the answer path makes on this task row: somebody other than
+    // the starter claims the answer, and the continuation un-parks the row
+    // (dispatch's `markResumed`) so the resumed turn's callbacks are honored.
+    await claimHitlAnswer("req-ap-first", {
+      answeredBy: OTHER,
+      answers: { q1: { optionIds: [HITL_APPROVE_OPTION_ID] } }
+    });
+    expect(await resumeFromInput("tok-del")).toBe("Ev1");
+
+    await deliver(approvalTask("req-ap-second"));
+
+    const prompts = posts.filter((p) => p.blocks);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].blocks).toContain(`<@${STARTER}>`);
+    expect(prompts[1].blocks).not.toContain(`<@${OTHER}>`);
+    expect(prompts[1].text).toContain(`<@${STARTER}>`);
+    // The stored value is the original one, not the answerer's.
+    expect((await getAgentTaskByToken("tok-del"))?.startedBy).toBe(STARTER);
   });
 });
 

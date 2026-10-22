@@ -13,6 +13,7 @@ import {
   formPages,
   formView,
   requestBlocks,
+  requestFallbackText,
   resolvedBlocks,
   splitMrkdwn,
   wordsView
@@ -31,7 +32,7 @@ import {
   messageViolations,
   viewViolations
 } from "../helpers/slack-limits";
-import { choiceForm } from "../helpers/hitl";
+import { approvalForm, choiceForm } from "../helpers/hitl";
 
 // Pure rendering and parsing; no storage, so no `useStorageReset()` — see
 // test/helpers/storage.ts.
@@ -335,6 +336,79 @@ describe("the open prompt", () => {
     const blocks = requestBlocks(manyQuestions(40));
     expect(messageViolations(blocks)).toEqual([]);
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+  });
+});
+
+/**
+ * An approval is the one thing an agent cannot settle on its own, so it is put
+ * in front of the person who asked for the work: a mention of them, which is
+ * what Slack notifies on, in the message and in the notification beside it.
+ * `startedBy` is the trigger event's own Slack user, carried on the task row —
+ * absent only for a row that predates the column.
+ */
+describe("an approval's mention of whoever started the task", () => {
+  const PING = "<@U1> — this needs your approval.";
+  const APPROVAL_BUTTONS = ["Approve", "Reject", "Comment…"];
+
+  it("mentions them in the message and leads the notification with it", () => {
+    const request = approvalForm("req-ping");
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toContain(PING);
+    // Leading the fallback: a mobile notification is drawn from this text alone,
+    // and a long form's is cut from the end.
+    expect(requestFallbackText(request, "U1")).toBe(
+      `${PING}\n\nApprove the plan?`
+    );
+    // The question is still asked the same way, by its own buttons.
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+  });
+
+  it("mentions them for an approval among questions answered in the modal", () => {
+    const request = form(
+      [
+        { kind: "text", id: "q1", prompt: "Anything to add?" },
+        {
+          kind: "approval",
+          id: "q2",
+          prompt: "Approve the rollout?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ],
+      "Here is the plan.",
+      "req-ping-form"
+    );
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toContain(PING);
+    expect(requestFallbackText(request, "U1").startsWith(PING)).toBe(true);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+  });
+
+  /** A task row written before `agent_tasks.started_by` existed, still in flight. */
+  it("asks the approval with no mention when there is no starter to name", () => {
+    const request = approvalForm("req-legacy");
+    const blocks = requestBlocks(request, null);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).not.toContain("<@");
+    expect(blocksText(blocks)).toContain("Approve the plan?");
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+    expect(requestFallbackText(request, null)).toBe(
+      requestFallbackText(request)
+    );
+  });
+
+  it("mentions nobody on a form that asks for no approval", () => {
+    const forms = [
+      choiceForm("req-choice", "Proceed?"),
+      form([{ kind: "text", id: "q1", prompt: "Name it?" }], undefined, "req-t")
+    ];
+    for (const request of forms) {
+      expect(blocksText(requestBlocks(request, "U1"))).not.toContain("<@");
+      expect(requestFallbackText(request, "U1")).toBe(
+        requestFallbackText(request)
+      );
+    }
   });
 });
 

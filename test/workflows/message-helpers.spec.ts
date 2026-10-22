@@ -298,7 +298,8 @@ describe("collectIfEventDrained (fan-out drain)", () => {
       channelId: "C1",
       messageTs: "1700.1",
       replyThreadTs: null,
-      eventId: "EvDrain"
+      eventId: "EvDrain",
+      startedBy: "U1"
     });
 
   it("signals collect only once the last pending task of the event is done", async () => {

@@ -915,7 +915,8 @@ describe("timeoutAgentTask (remote continuation)", () => {
       channelId: "C1",
       messageTs: "1700.1",
       replyThreadTs: "1700.1",
-      eventId: "Ev-timeout"
+      eventId: "Ev-timeout",
+      startedBy: "U1"
     });
     // pending → awaiting-input: the task is suspended while the prompt is open.
     await suspendForInput(TOKEN);

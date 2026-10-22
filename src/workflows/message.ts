@@ -175,7 +175,10 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             channelId: p.channelId,
             messageTs: p.ts,
             replyThreadTs: threadTs,
-            eventId: p.eventId
+            eventId: p.eventId,
+            // The event's own sender, so a prompt this task later raises for a
+            // person to approve can mention whoever asked for the work.
+            startedBy: p.userId
           });
           out.push(token);
         }

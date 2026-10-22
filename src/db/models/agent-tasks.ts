@@ -41,6 +41,13 @@ export interface CreateAgentTaskInput {
   /** Thread to reply into; null = post at channel top-level. */
   replyThreadTs: string | null;
   eventId: string;
+  /**
+   * Slack user who started this task — the trigger message event's own `user`,
+   * never anything the agent says. Required, and deliberately not optional: the
+   * column is nullable only for rows written before it existed (see 0023), and a
+   * write path allowed to omit it would keep minting new ones.
+   */
+  startedBy: string;
 }
 
 /**
@@ -61,7 +68,8 @@ export async function createAgentTask(
       channelId: input.channelId,
       messageTs: input.messageTs,
       replyThreadTs: input.replyThreadTs,
-      eventId: input.eventId
+      eventId: input.eventId,
+      startedBy: input.startedBy
     })
     .onConflictDoNothing();
 }

@@ -165,7 +165,8 @@ beforeEach(async () => {
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: null,
-    eventId: "Ev1"
+    eventId: "Ev1",
+    startedBy: "U1"
   });
 });
 
@@ -662,7 +663,8 @@ describe("handleRemoteAgentNotification — a built-in's callback", () => {
       channelId,
       messageTs: "1700.1",
       replyThreadTs: null,
-      eventId: `Ev-${token}`
+      eventId: `Ev-${token}`,
+      startedBy: "U1"
     });
   }
 

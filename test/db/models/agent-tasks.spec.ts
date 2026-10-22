@@ -44,6 +44,7 @@ function input(token: string, over: Partial<CreateAgentTaskInput> = {}) {
     messageTs: "1700.1",
     replyThreadTs: null,
     eventId: "Ev1",
+    startedBy: "U1",
     ...over
   } satisfies CreateAgentTaskInput;
 }
@@ -56,6 +57,8 @@ describe("agent-tasks model", () => {
     expect(row?.status).toBe("pending");
     expect(row?.channelId).toBe("C1");
     expect(row?.replyThreadTs).toBeNull();
+    // Who started it, for the approval prompts its agent may raise later.
+    expect(row?.startedBy).toBe("U1");
   });
 
   // message_ts is the 🛑 stop reaction's only lookup key (a reaction event

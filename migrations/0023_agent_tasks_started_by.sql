@@ -1,0 +1,22 @@
+-- Add `agent_tasks.started_by`: the Slack user who started this task, so a
+-- human-in-the-loop approval the agent later raises can mention them.
+--
+-- Nullable with no default, and `ALTER TABLE ... ADD COLUMN` rather than a
+-- rebuild. Both follow from what a null means here: the rows already in flight
+-- when this runs. A task has until its agent's `task_deadline_seconds` to come
+-- back, so some of those rows outlive this deploy and will raise prompts after
+-- it; they were written by code that had no user id to store, and nothing can
+-- recover one for them after the fact. A backfilled sentinel would be worse than
+-- the null — rendering reads it as "no mention" and posts the prompt without one,
+-- while any stand-in value would be interpolated into `<@…>` and ping whoever it
+-- happens to name.
+--
+-- So no rebuild is needed, and none is wanted: unlike 0019 and 0021, which added
+-- NOT NULL columns to `agents` and had to move every child table aside to drop
+-- it, this column accepts nulls, so SQLite adds it in place. Nothing is rewritten
+-- and no foreign key is disturbed — `agent_tasks` is itself the child of
+-- `agents`, whose rows are untouched here.
+--
+-- New rows always carry it: `CreateAgentTaskInput` requires it, so the only write
+-- path (MessageWorkflow's `record-tasks` step) cannot forget it.
+ALTER TABLE `agent_tasks` ADD `started_by` text;

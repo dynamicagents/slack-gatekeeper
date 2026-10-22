@@ -281,7 +281,8 @@ async function seedParkedRequest(
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: "1700.1",
-    eventId: "Ev1"
+    eventId: "Ev1",
+    startedBy: "U1"
   });
   await suspendForInput("tok-1");
   await createHitlForm({
