@@ -13,6 +13,7 @@ import {
   type AgentPlan,
   type TaskOutcome,
   replyThreadTs,
+  startedBy,
   resolveMessage,
   dispatchMessage,
   collectIfEventDrained,
@@ -176,9 +177,8 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             messageTs: p.ts,
             replyThreadTs: threadTs,
             eventId: p.eventId,
-            // The event's own sender, so a prompt this task later raises for a
-            // person to approve can mention whoever asked for the work.
-            startedBy: p.userId
+            // Who an approval this task later raises should mention, if anyone.
+            startedBy: startedBy(p)
           });
           out.push(token);
         }

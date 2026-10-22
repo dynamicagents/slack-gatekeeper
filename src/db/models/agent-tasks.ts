@@ -42,12 +42,17 @@ export interface CreateAgentTaskInput {
   replyThreadTs: string | null;
   eventId: string;
   /**
-   * Slack user who started this task — the trigger message event's own `user`,
-   * never anything the agent says. Required, and deliberately not optional: the
-   * column is nullable only for rows written before it existed (see 0023), and a
-   * write path allowed to omit it would keep minting new ones.
+   * Slack user who started this task — the sender of the message that woke the
+   * agent, never anything the agent says. Null where the turn had no sender to
+   * speak of: a feed turn for an edit or a delete carries the *authored*
+   * message's user, which on a delete is whoever wrote it rather than whoever
+   * removed it, so nobody there asked for this work (see `MessageWorkflow`).
+   *
+   * Required even so, and deliberately not optional: a write path allowed to
+   * omit it would quietly mint rows nobody can be asked about, where passing an
+   * explicit null is a decision the caller has to make.
    */
-  startedBy: string;
+  startedBy: string | null;
 }
 
 /**

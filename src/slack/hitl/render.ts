@@ -462,18 +462,25 @@ function controlBlocks(request: HitlRequest): unknown[] {
  * no approval — a question is the agent's to raise, but waking somebody up is
  * not, so only the decision it cannot make without a person gets a ping.
  *
- * `startedBy` is the Slack user id from the trigger message's own event, carried
- * on the task row (`agent_tasks.started_by`) since dispatch. It is deliberately
- * not read from the form: every string in there is the agent's, and an agent
- * naming the user to mention is an agent choosing who to wake. Null for a task
- * row that predates the column, which renders the prompt with no mention.
+ * `startedBy` is the Slack user id of whoever sent the message that woke the
+ * agent, carried on the task row (`agent_tasks.started_by`) since dispatch. It
+ * is deliberately not read from the form: every string in there is the agent's,
+ * so a form that named its own mention would let the agent decide who this line
+ * wakes. (An agent can still mention people in its own prose — `<@U…>` survives
+ * `sanitizeSlackText` by design — but then it is the agent's words saying so,
+ * not the gatekeeper's.) Null where the task row has nobody to name: a feed turn
+ * for an edit or delete, or a row predating the column. The prompt then carries
+ * no mention.
  */
 function approvalPing(
   request: HitlRequest,
   startedBy: string | null | undefined
 ): string | undefined {
   const asksApproval = request.questions.some((q) => q.kind === "approval");
-  return startedBy && asksApproval
+  // A Slack user id is alphanumeric; anything else has no place inside a mention
+  // token, where a `>` would end it early and the rest would render as text.
+  const named = startedBy ? /^[A-Z0-9]+$/i.test(startedBy) : false;
+  return named && asksApproval
     ? `<@${startedBy}> — this needs your approval.`
     : undefined;
 }
@@ -809,10 +816,10 @@ export function fallbackText(text: string): string {
 }
 
 /**
- * The form in a line or two, for a notification. An approval's mention leads it:
- * a desktop notification is drawn from the blocks, but a mobile one is drawn from
- * this text alone, and leading it is also what keeps the mention out of the cut
- * when a long form runs past {@link FALLBACK_TEXT}.
+ * The form in a line or two, for a notification. An approval's mention leads it,
+ * because this text is the fallback Slack falls back *to* — on a surface that
+ * does not render the blocks, it is all there is — and leading it is what keeps
+ * the mention out of the cut when a long form runs past {@link FALLBACK_TEXT}.
  */
 export function requestFallbackText(
   request: HitlRequest,

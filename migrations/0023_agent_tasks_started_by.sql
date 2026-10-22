@@ -2,14 +2,17 @@
 -- human-in-the-loop approval the agent later raises can mention them.
 --
 -- Nullable with no default, and `ALTER TABLE ... ADD COLUMN` rather than a
--- rebuild. Both follow from what a null means here: the rows already in flight
--- when this runs. A task has until its agent's `task_deadline_seconds` to come
--- back, so some of those rows outlive this deploy and will raise prompts after
--- it; they were written by code that had no user id to store, and nothing can
--- recover one for them after the fact. A backfilled sentinel would be worse than
--- the null — rendering reads it as "no mention" and posts the prompt without one,
--- while any stand-in value would be interpolated into `<@…>` and ping whoever it
--- happens to name.
+-- rebuild. Both follow from what a null means here, which is "nobody to name".
+-- One source of those is the rows already in flight when this runs: a task has
+-- until its agent's `task_deadline_seconds` to come back, so some of them
+-- outlive this deploy and will raise prompts after it; they were written by code
+-- that had no user id to store, and nothing can recover one for them after the
+-- fact. The other is a feed turn for an edited or deleted message, which writes
+-- a null deliberately and goes on doing so after this is long applied.
+--
+-- A backfilled sentinel would be worse than the null — rendering reads a null as
+-- "no mention" and posts the prompt without one, while any stand-in value would
+-- be interpolated into `<@…>` and ping whoever it happens to name.
 --
 -- So no rebuild is needed, and none is wanted: unlike 0019 and 0021, which added
 -- NOT NULL columns to `agents` and had to move every child table aside to drop
@@ -17,6 +20,7 @@
 -- and no foreign key is disturbed — `agent_tasks` is itself the child of
 -- `agents`, whose rows are untouched here.
 --
--- New rows always carry it: `CreateAgentTaskInput` requires it, so the only write
--- path (MessageWorkflow's `record-tasks` step) cannot forget it.
+-- A new row's value is always a decision: `CreateAgentTaskInput` requires the
+-- field (nullable, not optional), so the only write path (MessageWorkflow's
+-- `record-tasks` step) can leave nobody to name but cannot forget to say so.
 ALTER TABLE `agent_tasks` ADD `started_by` text;

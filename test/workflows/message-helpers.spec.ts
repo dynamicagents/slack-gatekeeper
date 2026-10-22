@@ -8,6 +8,7 @@ import {
   dispatchMessage,
   feedText,
   replyThreadTs,
+  startedBy,
   collectIfEventDrained,
   type AgentPlan
 } from "@/workflows/message-helpers";
@@ -28,6 +29,7 @@ useStorageReset();
 // Tests covering the shared helpers in message-helpers.ts:
 //   replyThreadTs   — direct unit tests (pure fn)
 //   feedText        — direct unit tests (pure fn)
+//   startedBy       — direct unit tests (pure fn)
 //   dispatchMessage — InvalidEndpointError → error_reply path (no-domains-approved case)
 //   resolveMessage  — exercised via the no-targets short-circuit
 //   signalReactionCollect — exercised via the reaction-removal integration
@@ -170,6 +172,38 @@ describe("feedText", () => {
     expect(result).toContain("deleted");
     expect(result).toContain("deleted content");
   });
+});
+
+// ---------------------------------------------------------------------------
+// startedBy
+// ---------------------------------------------------------------------------
+
+/**
+ * Who an approval raised by this turn's task may mention. The pairing with
+ * {@link feedText} is the point: a turn that reads "[deleted a message]" is a
+ * notice about a change, and the user id on it is the message's author, not
+ * whoever deleted it — so there is nobody on it to ask for an approval.
+ */
+describe("startedBy", () => {
+  it("is the sender of a plain turn, who asked for the work", () => {
+    expect(startedBy(makeParams({ userId: "U1", text: "do it" }))).toBe("U1");
+  });
+
+  it.each(["edited", "deleted"] as const)(
+    "is nobody on a %s feed turn, whose user id is the author's, not the actor's",
+    (editKind) => {
+      expect(
+        startedBy(
+          makeParams({
+            editKind,
+            userId: "U_AUTHOR",
+            ts: "1700.1",
+            prevText: "what was there"
+          })
+        )
+      ).toBeNull();
+    }
+  );
 });
 
 // ---------------------------------------------------------------------------

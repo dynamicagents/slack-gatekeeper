@@ -96,6 +96,21 @@ export function feedText(p: MessageWorkflowParams): string {
   return p.text;
 }
 
+/**
+ * Who to mention if a task from this turn later asks a person to approve
+ * something — recorded on the task row at dispatch (`agent_tasks.started_by`).
+ *
+ * A plain turn was sent by somebody, so the work is theirs and so is the
+ * approval. A feed turn is nobody's: {@link feedText}'s edit and delete both
+ * carry the *authored* message's user rather than the actor's (see
+ * `messageEditFromEvent`), so on a delete it is whoever wrote the message, not
+ * whoever removed it. Mentioning them would wake someone who did nothing, so
+ * such a turn records nobody and its prompts carry no mention.
+ */
+export function startedBy(p: MessageWorkflowParams): string | null {
+  return p.editKind ? null : p.userId;
+}
+
 /** Build dispatch plans from the targets resolved in the handler + auth context. */
 export async function resolveMessage(
   p: MessageWorkflowParams

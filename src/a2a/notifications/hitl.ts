@@ -140,9 +140,10 @@ export async function deliverHitlRequest(
   const ts = await postBlocks({
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
-    // `row.startedBy` is the trigger event's own Slack user, so a form asking for
-    // an approval mentions whoever started the task. Null on a row written before
-    // the column existed; the prompt then carries no mention.
+    // `row.startedBy` is whoever sent the message that woke the agent, so a form
+    // asking for an approval mentions the person who started the task. Null when
+    // there is nobody to name — a feed turn, or a row written before the column
+    // existed; the prompt then carries no mention.
     blocks: requestBlocks(request, row.startedBy),
     text: requestFallbackText(request, row.startedBy),
     username: displayName,

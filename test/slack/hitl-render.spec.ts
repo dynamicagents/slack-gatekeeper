@@ -354,7 +354,12 @@ describe("an approval's mention of whoever started the task", () => {
     const request = approvalForm("req-ping");
     const blocks = requestBlocks(request, "U1");
     expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain(PING);
+    // First, and a block of its own — not folded into the agent's words, whose
+    // budget it would then eat into.
+    expect(blocks[0]).toEqual({
+      type: "section",
+      text: { type: "mrkdwn", text: PING }
+    });
     // Leading the fallback: a mobile notification is drawn from this text alone,
     // and a long form's is cut from the end.
     expect(requestFallbackText(request, "U1")).toBe(
@@ -385,7 +390,11 @@ describe("an approval's mention of whoever started the task", () => {
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
   });
 
-  /** A task row written before `agent_tasks.started_by` existed, still in flight. */
+  /**
+   * No starter to name: a feed turn for an edit or a delete, which records
+   * nobody, or a task row written before `agent_tasks.started_by` existed and
+   * still in flight. The approval is worth asking either way.
+   */
   it("asks the approval with no mention when there is no starter to name", () => {
     const request = approvalForm("req-legacy");
     const blocks = requestBlocks(request, null);
@@ -394,6 +403,28 @@ describe("an approval's mention of whoever started the task", () => {
     expect(blocksText(blocks)).toContain("Approve the plan?");
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
     expect(requestFallbackText(request, null)).toBe(
+      requestFallbackText(request)
+    );
+  });
+
+  /**
+   * A Slack user id is alphanumeric. Nothing else can reach the column today —
+   * only the signature-verified envelope writes it — but the id is interpolated
+   * into a `<@…>` token, where a `>` would close the mention early and leave the
+   * rest as text, so rendering checks the shape rather than trusting where the
+   * value came from. Same guard as `saveHitlDraft`'s, for the same reason.
+   */
+  it.each([
+    ["empty", ""],
+    ["closing the mention early", "U1> ping <!channel"],
+    ["not an id at all", "not an id"]
+  ])("names nobody when the starter is %s", (_what, startedBy) => {
+    const request = approvalForm("req-odd");
+    const blocks = requestBlocks(request, startedBy);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).not.toContain("<@");
+    expect(blocksText(blocks)).toContain("Approve the plan?");
+    expect(requestFallbackText(request, startedBy)).toBe(
       requestFallbackText(request)
     );
   });
