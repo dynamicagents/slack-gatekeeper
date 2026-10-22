@@ -398,6 +398,33 @@ describe("an approval's mention of whoever started the task", () => {
     );
   });
 
+  /**
+   * The mention is a block of its own, so it costs the agent's words nothing: a
+   * form already past the message budget is cut in exactly the same place, and
+   * the message still fits what Slack accepts.
+   */
+  it("costs the agent's words none of their room on a form already cut", () => {
+    const request = form(
+      [
+        {
+          kind: "approval",
+          id: "q1",
+          prompt: "Approve the rollout?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ],
+      "p ".repeat(9_000),
+      "req-ping-long"
+    );
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toBe(
+      `${PING}\n${blocksText(requestBlocks(request))}`
+    );
+    // The cut falls where it did, and the mention is not what was cut.
+    expect(blocksText(blocks)).toContain("Cut here to fit Slack");
+  });
+
   it("mentions nobody on a form that asks for no approval", () => {
     const forms = [
       choiceForm("req-choice", "Proceed?"),
