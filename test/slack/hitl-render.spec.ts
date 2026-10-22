@@ -344,7 +344,8 @@ describe("the open prompt", () => {
  * in front of the person who asked for the work: a mention of them, which is
  * what Slack notifies on, in the message and in the notification beside it.
  * `startedBy` is the trigger event's own Slack user, carried on the task row —
- * absent only for a row that predates the column.
+ * or, where no person started the task, one of that column's sentinels, which
+ * name nobody.
  */
 describe("an approval's mention of whoever started the task", () => {
   const PING = "<@U1> — this needs your approval.";
@@ -391,40 +392,43 @@ describe("an approval's mention of whoever started the task", () => {
   });
 
   /**
-   * No starter to name: a feed turn for an edit or a delete, which records
-   * nobody, or a task row written before `agent_tasks.started_by` existed and
-   * still in flight. The approval is worth asking either way.
-   */
-  it("asks the approval with no mention when there is no starter to name", () => {
-    const request = approvalForm("req-legacy");
-    const blocks = requestBlocks(request, null);
-    expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).not.toContain("<@");
-    expect(blocksText(blocks)).toContain("Approve the plan?");
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
-    expect(requestFallbackText(request, null)).toBe(
-      requestFallbackText(request)
-    );
-  });
-
-  /**
-   * A Slack user id is alphanumeric. Nothing else can reach the column today —
-   * only the signature-verified envelope writes it — but the id is interpolated
-   * into a `<@…>` token, where a `>` would close the mention early and leave the
-   * rest as text, so rendering checks the shape rather than trusting where the
-   * value came from. Same guard as `saveHitlDraft`'s, for the same reason.
+   * No person started the task, which `agent_tasks.started_by` says with a
+   * sentinel rather than a null: `process` for a feed turn (an edit or a delete,
+   * whose user id is the authored message's author, not the actor), `unknown` for
+   * a row written before the column existed and backfilled by migration 0023.
+   * Neither is shaped like a Slack user id, so neither is mentioned — and the
+   * approval is still worth asking.
+   *
+   * The ids below are the same thing from the other side: nothing but the
+   * signature-verified envelope writes this column today, but the value is
+   * interpolated into a `<@…>` token, where a `>` would close the mention early
+   * and leave the rest as text, so rendering checks the shape rather than
+   * trusting where the value came from.
    */
   it.each([
+    // The sentinels as literals, not as `STARTED_BY_*`: importing them would be
+    // an `@/db` import, which is what `check-storage-reset` reads as a spec that
+    // touches storage, and this one does not. That they are *these* strings is
+    // pinned where they are stored and delivered (`hitl-delivery.spec.ts`); what
+    // is pinned here is that a value of this shape names nobody.
+    ["the process sentinel", "process"],
+    ["the unknown sentinel", "unknown"],
+    ["not read at all by this caller", undefined],
     ["empty", ""],
     ["closing the mention early", "U1> ping <!channel"],
+    ["a channel id rather than a user's", "C123ABC"],
     ["not an id at all", "not an id"]
-  ])("names nobody when the starter is %s", (_what, startedBy) => {
-    const request = approvalForm("req-odd");
-    const blocks = requestBlocks(request, startedBy);
+  ])("asks the approval of nobody when the starter is %s", (_what, starter) => {
+    const request = approvalForm("req-nobody");
+    const blocks = requestBlocks(request, starter);
     expect(messageViolations(blocks)).toEqual([]);
     expect(blocksText(blocks)).not.toContain("<@");
+    // Not as a mention, and not as text either.
+    if (starter) expect(blocksText(blocks)).not.toContain(starter);
     expect(blocksText(blocks)).toContain("Approve the plan?");
-    expect(requestFallbackText(request, startedBy)).toBe(
+    // The question is still asked the same way, by its own buttons.
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+    expect(requestFallbackText(request, starter)).toBe(
       requestFallbackText(request)
     );
   });

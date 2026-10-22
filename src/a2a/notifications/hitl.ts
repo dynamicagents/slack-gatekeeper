@@ -141,9 +141,9 @@ export async function deliverHitlRequest(
     channelId: row.channelId,
     threadTs: row.replyThreadTs,
     // `row.startedBy` is whoever sent the message that woke the agent, so a form
-    // asking for an approval mentions the person who started the task. Null when
-    // there is nobody to name — a feed turn, or a row written before the column
-    // existed; the prompt then carries no mention.
+    // asking for an approval mentions the person who started the task. A task no
+    // person started carries a sentinel instead — a feed turn, or a row written
+    // before the column existed — which renders as no mention at all.
     blocks: requestBlocks(request, row.startedBy),
     text: requestFallbackText(request, row.startedBy),
     username: displayName,

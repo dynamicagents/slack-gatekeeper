@@ -499,7 +499,8 @@ describe("MessageWorkflow — remote custom agents", () => {
       // The sender of the message that woke the agent, so an approval this task
       // later raises can mention whoever started it. It comes from the Slack
       // envelope and from nowhere else — nothing an agent says can set it. Which
-      // turns record nobody is `startedBy`'s own test, in message-helpers.spec.
+      // turns record a sentinel instead is `startedBy`'s own test, in
+      // message-helpers.spec.
       expect(row?.startedBy).toBe("U1");
     } finally {
       await introspector.dispose();

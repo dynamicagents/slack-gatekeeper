@@ -189,6 +189,26 @@ export const agentChannels = sqliteTable(
 );
 
 /**
+ * What `agent_tasks.started_by` holds when no person started the task. The
+ * column is NOT NULL — every row answers "who asked for this?", and these are
+ * the two ways the answer is nobody:
+ *
+ * - {@link STARTED_BY_PROCESS}: the gatekeeper itself fed the turn in. A feed
+ *   turn for an edited or deleted message carries the *authored* message's user
+ *   rather than the actor's, so there is no one on it who asked for the work.
+ * - {@link STARTED_BY_UNKNOWN}: nobody was recorded. The column's SQLite-side
+ *   default, so it is what rows written before it existed were backfilled with
+ *   (migration 0023), and what an insert that omits the column lands.
+ *
+ * Neither is shaped like a Slack user id (`U…`/`W…`, uppercase), which is what
+ * makes them safe to store in a column read for a mention: `requestBlocks` only
+ * mentions a value of that shape, so a sentinel can never ping anyone. Keep that
+ * true of any value added here.
+ */
+export const STARTED_BY_PROCESS = "process";
+export const STARTED_BY_UNKNOWN = "unknown";
+
+/**
  * Pending agent tasks — the correlation store for async A2A push
  * notifications. When the gatekeeper dispatches to a remote (custom) agent it no
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
@@ -240,13 +260,19 @@ export const agentTasks = sqliteTable(
     // at dispatch, so a task continued by somebody else still mentions the person
     // who started it.
     //
-    // Nullable, and two ways to be. A feed turn for an edit or a delete carries
-    // the authored message's user, not the actor, so it records nobody. Rows
-    // already in flight when the column arrived have no id to recover: an agent
-    // has until its `task_deadline_seconds` to come back, so some of them outlive
-    // the deploy that added this. Either way the prompt renders without a mention
-    // rather than not at all.
-    startedBy: text("started_by"),
+    // NOT NULL: a task nobody started says so with a sentinel
+    // (STARTED_BY_PROCESS / STARTED_BY_UNKNOWN) rather than with a null, so every
+    // reader gets a string and none has to decide what a missing one means.
+    //
+    // The DEFAULT is load-bearing twice over, which is why it lives in the DDL
+    // rather than only in the migration that backfilled with it (unlike
+    // `agents.task_deadline_seconds`, whose 0021 header argues the other way).
+    // It is what let 0023 add the column in place — SQLite will not add a NOT
+    // NULL column without one — and it is what keeps the previous Worker's
+    // inserts legal in the window between `d1 migrations apply` and the deploy
+    // that knows about the column: they land `unknown`, which is the truth about
+    // them, instead of failing the dispatch.
+    startedBy: text("started_by").notNull().default(STARTED_BY_UNKNOWN),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks
     // it `completed`. `awaiting-input` is the parked state while a human-in-the-loop
     // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out

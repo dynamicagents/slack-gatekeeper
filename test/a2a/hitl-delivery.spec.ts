@@ -6,7 +6,9 @@ import {
   completeAgentTask,
   createAgentTask,
   getAgentTaskByToken,
-  resumeFromInput
+  resumeFromInput,
+  STARTED_BY_PROCESS,
+  STARTED_BY_UNKNOWN
 } from "@/db/models/agent-tasks";
 import { claimHitlAnswer, getHitlForm } from "@/db/models/hitl-forms";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
@@ -263,37 +265,73 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
     expect(posts[0].text).not.toContain("<@");
   });
 
-  it("posts the approval without a mention for a row that has no starter", async () => {
-    // A row written before `agent_tasks.started_by` existed. An agent has until
-    // its task deadline to come back, so such a row can still raise a prompt —
-    // which is worth posting without a ping rather than not posting. Written as
-    // raw SQL: the types make a row without a starter unrepresentable through
-    // `createAgentTask`.
-    await env.DB.prepare(
-      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id)
-       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy')`
-    ).run();
-    const row = await getAgentTaskByToken("tok-legacy");
-    expect(row?.startedBy).toBeNull();
+  /**
+   * Deliver an approval for a task nobody started, and assert the prompt is
+   * posted and asked of nobody in particular — no mention, and no sign of the
+   * sentinel the row carries in place of a person.
+   */
+  async function deliverUnstartedApproval(
+    token: string,
+    requestId: string,
+    sentinel: string
+  ): Promise<void> {
+    const row = await getAgentTaskByToken(token);
+    // Never a null, whichever way nobody started it.
+    expect(row?.startedBy).toBe(sentinel);
 
     const posts: SlackPost[] = [];
     stubFetch(posts);
     const agent = await getAgent("remoteagent");
-    await deliverTaskToSlack(
-      "tok-legacy",
-      row!,
-      agent!,
-      approvalTask("req-ap-legacy")
-    );
+    await deliverTaskToSlack(token, row!, agent!, approvalTask(requestId));
 
-    // The prompt is there, asked of nobody in particular.
     expect(posts).toHaveLength(1);
-    expect(posts[0].blocks).toContain("req-ap-legacy");
+    expect(posts[0].blocks).toContain(requestId);
     expect(posts[0].blocks).not.toContain("<@");
+    expect(posts[0].blocks).not.toContain(sentinel);
     expect(posts[0].text).not.toContain("<@");
-    expect((await getHitlForm("req-ap-legacy"))?.status).toBe("awaiting");
-    expect((await getAgentTaskByToken("tok-legacy"))?.status).toBe(
-      "awaiting-input"
+    expect(posts[0].text).not.toContain(sentinel);
+    expect((await getHitlForm(requestId))?.status).toBe("awaiting");
+    expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
+  }
+
+  it("posts the approval unmentioned for a row from before the column", async () => {
+    // Raw SQL omitting `started_by`, which is both what the code predating the
+    // column wrote (migration 0023 backfilled those rows with the sentinel) and
+    // what the previous Worker goes on writing until the deploy that knows about
+    // it lands. An agent has until its task deadline to come back, so such a row
+    // can still raise a prompt — worth posting without a ping rather than not
+    // posting. The types make it unrepresentable through `createAgentTask`.
+    await env.DB.prepare(
+      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id)
+       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy')`
+    ).run();
+
+    await deliverUnstartedApproval(
+      "tok-legacy",
+      "req-ap-legacy",
+      STARTED_BY_UNKNOWN
+    );
+  });
+
+  it("posts the approval unmentioned for a feed turn no person started", async () => {
+    // What `startedBy` records for an edit or a delete: the user id on such a
+    // turn is the authored message's author, not whoever acted, so the task is
+    // the gatekeeper's own doing and there is nobody on it to ask.
+    await createAgentTask({
+      token: "tok-feed",
+      taskId: "task-1",
+      agentName: "remoteagent",
+      channelId: "C1",
+      messageTs: "1700.1",
+      replyThreadTs: "1700.1",
+      eventId: "Ev-feed",
+      startedBy: STARTED_BY_PROCESS
+    });
+
+    await deliverUnstartedApproval(
+      "tok-feed",
+      "req-ap-feed",
+      STARTED_BY_PROCESS
     );
   });
 

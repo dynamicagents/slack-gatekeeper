@@ -16,6 +16,7 @@ import {
   getPendingAgentTasksByEventId,
   markAgentTaskCanceled,
   markCancelRequested,
+  STARTED_BY_PROCESS,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { getAgent } from "@/db/models/agents";
@@ -101,14 +102,19 @@ export function feedText(p: MessageWorkflowParams): string {
  * something — recorded on the task row at dispatch (`agent_tasks.started_by`).
  *
  * A plain turn was sent by somebody, so the work is theirs and so is the
- * approval. A feed turn is nobody's: {@link feedText}'s edit and delete both
- * carry the *authored* message's user rather than the actor's (see
- * `messageEditFromEvent`), so on a delete it is whoever wrote the message, not
- * whoever removed it. Mentioning them would wake someone who did nothing, so
- * such a turn records nobody and its prompts carry no mention.
+ * approval, and `p.userId` is that person: the classifier ignores a message
+ * event without a user id, so it is always a real id from the signature-verified
+ * envelope.
+ *
+ * A feed turn is nobody's: {@link feedText}'s edit and delete both carry the
+ * *authored* message's user rather than the actor's (see `messageEditFromEvent`),
+ * so on a delete it is whoever wrote the message, not whoever removed it.
+ * Mentioning them would wake someone who did nothing, so such a turn records
+ * {@link STARTED_BY_PROCESS} — the gatekeeper fed the turn in, and no sentinel is
+ * ever rendered as a mention.
  */
-export function startedBy(p: MessageWorkflowParams): string | null {
-  return p.editKind ? null : p.userId;
+export function startedBy(p: MessageWorkflowParams): string {
+  return p.editKind ? STARTED_BY_PROCESS : p.userId;
 }
 
 /** Build dispatch plans from the targets resolved in the handler + auth context. */

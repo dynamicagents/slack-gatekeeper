@@ -13,7 +13,11 @@ import {
   type AgentPlan
 } from "@/workflows/message-helpers";
 import { registerAgent } from "@/db/models/agents";
-import { createAgentTask, completeAgentTask } from "@/db/models/agent-tasks";
+import {
+  createAgentTask,
+  completeAgentTask,
+  STARTED_BY_PROCESS
+} from "@/db/models/agent-tasks";
 import type { MessageWorkflowParams } from "@/slack/types";
 import { stubOutbound } from "../helpers/agents";
 import {
@@ -182,7 +186,10 @@ describe("feedText", () => {
  * Who an approval raised by this turn's task may mention. The pairing with
  * {@link feedText} is the point: a turn that reads "[deleted a message]" is a
  * notice about a change, and the user id on it is the message's author, not
- * whoever deleted it — so there is nobody on it to ask for an approval.
+ * whoever deleted it — so there is nobody on it to ask for an approval. Such a
+ * turn records the process sentinel rather than a null: the column is NOT NULL,
+ * and the sentinel is not shaped like a user id, so nothing renders it as a
+ * mention (see the render spec).
  */
 describe("startedBy", () => {
   it("is the sender of a plain turn, who asked for the work", () => {
@@ -190,7 +197,7 @@ describe("startedBy", () => {
   });
 
   it.each(["edited", "deleted"] as const)(
-    "is nobody on a %s feed turn, whose user id is the author's, not the actor's",
+    "is the process sentinel on a %s feed turn, whose user id is the author's, not the actor's",
     (editKind) => {
       expect(
         startedBy(
@@ -201,7 +208,7 @@ describe("startedBy", () => {
             prevText: "what was there"
           })
         )
-      ).toBeNull();
+      ).toBe(STARTED_BY_PROCESS);
     }
   );
 });

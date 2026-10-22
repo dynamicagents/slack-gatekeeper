@@ -66,6 +66,17 @@ const FALLBACK_TEXT = 3_000;
 
 const FENCE = "```";
 
+/**
+ * A Slack user id, and the one thing allowed inside a `<@…>` this file writes:
+ * `U…` for a person, `W…` for an Enterprise Grid one, uppercase alphanumerics
+ * after that. The shape is checked rather than the source trusted, because the id
+ * is interpolated into a mention token where a `>` would close it early and leave
+ * the rest as text — the same reason `saveHitlDraft` checks before interpolating
+ * into a JSON path. Being this shape is also what separates a real starter from
+ * `agent_tasks.started_by`'s lowercase sentinels, which must never be mentioned.
+ */
+const SLACK_USER_ID = /^[UW][A-Z0-9]+$/;
+
 /** The `callback_id` of the modal a form is answered in. */
 export const FORM_CALLBACK_ID = "hitl-form";
 
@@ -468,19 +479,21 @@ function controlBlocks(request: HitlRequest): unknown[] {
  * so a form that named its own mention would let the agent decide who this line
  * wakes. (An agent can still mention people in its own prose — `<@U…>` survives
  * `sanitizeSlackText` by design — but then it is the agent's words saying so,
- * not the gatekeeper's.) Null where the task row has nobody to name: a feed turn
- * for an edit or delete, or a row predating the column. The prompt then carries
- * no mention.
+ * not the gatekeeper's.)
+ *
+ * The column is never null, so "nobody to name" arrives as one of its sentinels
+ * (`STARTED_BY_PROCESS` / `STARTED_BY_UNKNOWN`) — a feed turn, or a row written
+ * before the column existed. Both fail {@link SLACK_USER_ID} and the prompt then
+ * carries no mention. Omitted entirely by a caller that has no task row to hand
+ * (the re-opened prompt in `slack-interactivity-handler`), which is the same
+ * outcome by the same route.
  */
 function approvalPing(
   request: HitlRequest,
-  startedBy: string | null | undefined
+  startedBy: string | undefined
 ): string | undefined {
   const asksApproval = request.questions.some((q) => q.kind === "approval");
-  // A Slack user id is alphanumeric; anything else has no place inside a mention
-  // token, where a `>` would end it early and the rest would render as text.
-  const named = startedBy ? /^[A-Z0-9]+$/i.test(startedBy) : false;
-  return named && asksApproval
+  return startedBy && SLACK_USER_ID.test(startedBy) && asksApproval
     ? `<@${startedBy}> — this needs your approval.`
     : undefined;
 }
@@ -495,7 +508,7 @@ function approvalPing(
  */
 export function requestBlocks(
   request: HitlRequest,
-  startedBy?: string | null
+  startedBy?: string
 ): unknown[] {
   const ping = approvalPing(request, startedBy);
   return [
@@ -823,7 +836,7 @@ export function fallbackText(text: string): string {
  */
 export function requestFallbackText(
   request: HitlRequest,
-  startedBy?: string | null
+  startedBy?: string
 ): string {
   return fallbackText(
     [

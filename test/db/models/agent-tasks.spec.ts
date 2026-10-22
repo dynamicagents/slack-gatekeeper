@@ -16,6 +16,7 @@ import {
   getPendingAgentTasksWithDeadlinesByEventId,
   deleteAgentTask,
   sweepStaleAgentTasks,
+  STARTED_BY_UNKNOWN,
   type CreateAgentTaskInput
 } from "@/db/models/agent-tasks";
 import { DEFAULT_TASK_DEADLINE_SECONDS } from "@/config";
@@ -69,6 +70,31 @@ describe("agent-tasks model", () => {
     await expect(
       env.DB.prepare(
         "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1')"
+      ).run()
+    ).rejects.toThrow(/NOT NULL/i);
+  });
+
+  // started_by is NOT NULL, so every row answers "who asked for this?" and no
+  // reader has to decide what a missing answer means. The two halves are pinned
+  // at the DB level, both unrepresentable through `createAgentTask`: a row that
+  // omits the column takes the sentinel the migration backfilled old rows with
+  // (and that keeps the pre-deploy Worker's inserts legal), and an explicit NULL
+  // is refused outright.
+  it("defaults a task row's started_by to the unknown sentinel", async () => {
+    await env.DB.prepare(
+      `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id)
+       VALUES ('tok-default-starter', 'remoteagent', 'C1', '1700.1', 'Ev1')`
+    ).run();
+    expect((await getAgentTaskByToken("tok-default-starter"))?.startedBy).toBe(
+      STARTED_BY_UNKNOWN
+    );
+  });
+
+  it("rejects a task row whose started_by is null", async () => {
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id, started_by)
+         VALUES ('tok-null-starter', 'remoteagent', 'C1', '1700.1', 'Ev1', NULL)`
       ).run()
     ).rejects.toThrow(/NOT NULL/i);
   });

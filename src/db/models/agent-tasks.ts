@@ -5,6 +5,9 @@ import { TASK_RETENTION_SECONDS } from "@/config";
 
 export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
 
+/** What `started_by` holds when no person started the task — see the schema. */
+export { STARTED_BY_PROCESS, STARTED_BY_UNKNOWN } from "../schema";
+
 /**
  * Statuses a task can never leave. Everything else (`pending`, `awaiting-input`)
  * is still in flight: it keeps the fan-out undrained, keeps the 🛑 alive, and
@@ -43,16 +46,16 @@ export interface CreateAgentTaskInput {
   eventId: string;
   /**
    * Slack user who started this task — the sender of the message that woke the
-   * agent, never anything the agent says. Null where the turn had no sender to
-   * speak of: a feed turn for an edit or a delete carries the *authored*
-   * message's user, which on a delete is whoever wrote it rather than whoever
-   * removed it, so nobody there asked for this work (see `MessageWorkflow`).
+   * agent, never anything the agent says. A turn no person started names a
+   * sentinel instead ({@link STARTED_BY_PROCESS} for a feed turn, whose user id
+   * is the authored message's author rather than the actor; see `startedBy` in
+   * `src/workflows/message-helpers.ts`), so this is a string and never a null.
    *
-   * Required even so, and deliberately not optional: a write path allowed to
-   * omit it would quietly mint rows nobody can be asked about, where passing an
-   * explicit null is a decision the caller has to make.
+   * Required and deliberately not optional: a write path allowed to omit it
+   * would quietly fall back on the column's default, where naming the sentinel
+   * is a decision the caller has to make.
    */
-  startedBy: string | null;
+  startedBy: string;
 }
 
 /**

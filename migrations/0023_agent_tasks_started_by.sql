@@ -1,26 +1,36 @@
 -- Add `agent_tasks.started_by`: the Slack user who started this task, so a
 -- human-in-the-loop approval the agent later raises can mention them.
 --
--- Nullable with no default, and `ALTER TABLE ... ADD COLUMN` rather than a
--- rebuild. Both follow from what a null means here, which is "nobody to name".
--- One source of those is the rows already in flight when this runs: a task has
--- until its agent's `task_deadline_seconds` to come back, so some of them
--- outlive this deploy and will raise prompts after it; they were written by code
--- that had no user id to store, and nothing can recover one for them after the
--- fact. The other is a feed turn for an edited or deleted message, which writes
--- a null deliberately and goes on doing so after this is long applied.
+-- NOT NULL with a DEFAULT, added in place rather than by a rebuild. The default
+-- does two jobs, and the value it writes is the truth about every row it reaches:
 --
--- A backfilled sentinel would be worse than the null — rendering reads a null as
--- "no mention" and posts the prompt without one, while any stand-in value would
--- be interpolated into `<@…>` and ping whoever it happens to name.
+--   * The rows already in flight when this runs. A task has until its agent's
+--     `task_deadline_seconds` to come back, so some of them outlive this deploy
+--     and will raise prompts after it. They were written by code that had no user
+--     id to store and nothing can recover one for them after the fact, so
+--     `unknown` is precisely what is known about them.
+--   * The inserts the live Worker makes while this is applied. `d1 migrations
+--     apply` lands before the deploy that knows about the column, and in that
+--     window the previous version goes on dispatching with a column list that
+--     omits `started_by`. With a default those inserts land `unknown`; without
+--     one they would fail the NOT NULL and take the dispatch down with them.
 --
--- So no rebuild is needed, and none is wanted: unlike 0019 and 0021, which added
--- NOT NULL columns to `agents` and had to move every child table aside to drop
--- it, this column accepts nulls, so SQLite adds it in place. Nothing is rewritten
--- and no foreign key is disturbed — `agent_tasks` is itself the child of
--- `agents`, whose rows are untouched here.
+-- Hence no rebuild, and none is wanted: SQLite refuses to add a NOT NULL column
+-- without a default and adds one in place with it. Unlike 0019 and 0021, which
+-- added NOT NULL columns to `agents` and had to move every child table aside to
+-- avoid a DEFAULT, nothing here is rewritten and no foreign key is disturbed —
+-- `agent_tasks` is itself the child of `agents`, whose rows are untouched. The
+-- DEFAULT also stays in the table's DDL afterwards rather than being rebuilt
+-- away, because the second job above is a property of every future deploy of this
+-- column, not a one-time backfill. No write path leans on it: `CreateAgentTaskInput`
+-- requires the field, so the only live insert (MessageWorkflow's `record-tasks`
+-- step) always names a value.
 --
--- A new row's value is always a decision: `CreateAgentTaskInput` requires the
--- field (nullable, not optional), so the only write path (MessageWorkflow's
--- `record-tasks` step) can leave nobody to name but cannot forget to say so.
-ALTER TABLE `agent_tasks` ADD `started_by` text;
+-- And a sentinel rather than a nullable column, so every reader gets a string and
+-- none has to decide what a missing one means. `unknown` cannot be mistaken for
+-- somebody: a Slack user id is `U…`/`W…` in uppercase, so it and `process` (what
+-- a feed turn for an edit or a delete records, having no actor on it to ask) both
+-- fail the id-shape check in `src/slack/hitl/render.ts` and are never rendered
+-- into a `<@…>`. A prompt raised by such a task posts with no mention rather than
+-- pinging whoever a stand-in value happened to name.
+ALTER TABLE `agent_tasks` ADD `started_by` text DEFAULT 'unknown' NOT NULL;
