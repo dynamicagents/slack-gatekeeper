@@ -5,16 +5,20 @@ import { registerAgent, getAgent } from "@/db/models/agents";
 import {
   completeAgentTask,
   createAgentTask,
-  getAgentTaskByToken
+  getAgentTaskByToken,
+  resumeFromInput,
+  STARTED_BY_PROCESS,
+  STARTED_BY_UNKNOWN
 } from "@/db/models/agent-tasks";
-import { getHitlForm } from "@/db/models/hitl-forms";
+import { claimHitlAnswer, getHitlForm } from "@/db/models/hitl-forms";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
 import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
+import { HITL_APPROVE_OPTION_ID } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
 import { makeSnapshot } from "../helpers/a2a";
 import { useStorageReset } from "../helpers/storage";
-import { choiceForm } from "../helpers/hitl";
+import { approvalForm, choiceForm } from "../helpers/hitl";
 
 useStorageReset();
 
@@ -84,6 +88,21 @@ function hitlTask(
   });
 }
 
+/** The same, asking a person to approve something rather than to pick. */
+function approvalTask(requestId: string): TaskSnapshot {
+  return makeSnapshot({
+    id: "task-1",
+    contextId: "C1:1700.1",
+    state: TaskState.TASK_STATE_INPUT_REQUIRED,
+    messageId: `${requestId}:u1`,
+    parts: [textPart("Approve the plan?"), dataPart(approvalForm(requestId))]
+  });
+}
+
+/** Who started the task every test here delivers for, and who else is around. */
+const STARTER = "U1";
+const OTHER = "U2";
+
 beforeEach(async () => {
   // A final status completes the row, which signals the ReactionWorkflow — an
   // instance these tests never create, so miniflare emits engine noise. Nothing
@@ -106,7 +125,8 @@ beforeEach(async () => {
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: "1700.1",
-    eventId: "Ev1"
+    eventId: "Ev1",
+    startedBy: STARTER
   });
 });
 
@@ -209,6 +229,137 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toBeUndefined();
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+  });
+});
+
+/**
+ * The approval reaches the person who asked for the work: the prompt mentions
+ * whoever started the task, from the trusted Slack event's user id carried on
+ * the task row since dispatch — never from the agent's own form. This is the
+ * delivery path both kinds of agent share: a built-in's in-process push and a
+ * remote's authenticated callback both arrive at `deliverTaskToSlack`.
+ */
+describe("deliverTaskToSlack — an approval tags whoever started the task", () => {
+  it("mentions them in the prompt's blocks and in its notification text", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+
+    await deliver(approvalTask("req-ap-1"));
+
+    expect(posts).toHaveLength(1);
+    // In the blocks, which is what Slack notifies on...
+    expect(posts[0].blocks).toContain(`<@${STARTER}>`);
+    // ...and in the fallback text, which is what a mobile notification reads.
+    expect(posts[0].text).toContain(`<@${STARTER}>`);
+    expect((await getHitlForm("req-ap-1"))?.status).toBe("awaiting");
+  });
+
+  it("mentions nobody when the form asks for no approval", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+
+    await deliver(hitlTask("req-ap-none"));
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].blocks).not.toContain("<@");
+    expect(posts[0].text).not.toContain("<@");
+  });
+
+  /**
+   * Deliver an approval for a task nobody started, and assert the prompt is
+   * posted and asked of nobody in particular — no mention, and no sign of the
+   * sentinel the row carries in place of a person.
+   */
+  async function deliverUnstartedApproval(
+    token: string,
+    requestId: string,
+    sentinel: string
+  ): Promise<void> {
+    const row = await getAgentTaskByToken(token);
+    // Never a null, whichever way nobody started it.
+    expect(row?.startedBy).toBe(sentinel);
+
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    const agent = await getAgent("remoteagent");
+    await deliverTaskToSlack(token, row!, agent!, approvalTask(requestId));
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].blocks).toContain(requestId);
+    expect(posts[0].blocks).not.toContain("<@");
+    expect(posts[0].blocks).not.toContain(sentinel);
+    expect(posts[0].text).not.toContain("<@");
+    expect(posts[0].text).not.toContain(sentinel);
+    expect((await getHitlForm(requestId))?.status).toBe("awaiting");
+    expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
+  }
+
+  it("posts the approval unmentioned for a row from before the column", async () => {
+    // A row as 0023's rebuild left the ones written before the column: the
+    // sentinel it backfilled with, written here as raw SQL because the types make
+    // it unrepresentable through `createAgentTask`. An agent has until its task
+    // deadline to come back, so such a row can still raise a prompt after the
+    // migration — worth posting without a ping rather than not posting. That the
+    // rebuild is what puts the value there is `0023-agent-tasks-started-by.spec`.
+    await env.DB.prepare(
+      `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id, started_by)
+       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy', ?)`
+    )
+      .bind(STARTED_BY_UNKNOWN)
+      .run();
+
+    await deliverUnstartedApproval(
+      "tok-legacy",
+      "req-ap-legacy",
+      STARTED_BY_UNKNOWN
+    );
+  });
+
+  it("posts the approval unmentioned for a feed turn no person started", async () => {
+    // What `startedBy` records for an edit or a delete: the user id on such a
+    // turn is the authored message's author, not whoever acted, so the task is
+    // the gatekeeper's own doing and there is nobody on it to ask.
+    await createAgentTask({
+      token: "tok-feed",
+      taskId: "task-1",
+      agentName: "remoteagent",
+      channelId: "C1",
+      messageTs: "1700.1",
+      replyThreadTs: "1700.1",
+      eventId: "Ev-feed",
+      startedBy: STARTED_BY_PROCESS
+    });
+
+    await deliverUnstartedApproval(
+      "tok-feed",
+      "req-ap-feed",
+      STARTED_BY_PROCESS
+    );
+  });
+
+  it("still mentions the starter after somebody else answered an earlier approval", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(approvalTask("req-ap-first"));
+
+    // The two writes the answer path makes on this task row: somebody other than
+    // the starter claims the answer, and the continuation un-parks the row
+    // (dispatch's `markResumed`) so the resumed turn's callbacks are honored.
+    await claimHitlAnswer("req-ap-first", {
+      answeredBy: OTHER,
+      answers: { q1: { optionIds: [HITL_APPROVE_OPTION_ID] } }
+    });
+    expect(await resumeFromInput("tok-del")).toBe("Ev1");
+
+    await deliver(approvalTask("req-ap-second"));
+
+    const prompts = posts.filter((p) => p.blocks);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].blocks).toContain(`<@${STARTER}>`);
+    expect(prompts[1].blocks).not.toContain(`<@${OTHER}>`);
+    expect(prompts[1].text).toContain(`<@${STARTER}>`);
+    // The stored value is the original one, not the answerer's.
+    expect((await getAgentTaskByToken("tok-del"))?.startedBy).toBe(STARTER);
   });
 });
 

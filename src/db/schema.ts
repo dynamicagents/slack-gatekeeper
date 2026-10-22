@@ -189,6 +189,28 @@ export const agentChannels = sqliteTable(
 );
 
 /**
+ * What `agent_tasks.started_by` holds when no person started the task. The
+ * column is NOT NULL — every row answers "who asked for this?", and these are
+ * the two ways the answer is nobody:
+ *
+ * - {@link STARTED_BY_PROCESS}: the gatekeeper itself fed the turn in. A feed
+ *   turn for an edited or deleted message carries the *authored* message's user
+ *   rather than the actor's, so there is no one on it who asked for the work.
+ * - {@link STARTED_BY_UNKNOWN}: nobody was recorded. What migration 0023's
+ *   rebuild backfilled the rows written before the column existed with, since
+ *   nothing can recover a user id for them after the fact. No live write path
+ *   produces it: every insert names a value, so a row reading `unknown` is one
+ *   that predates the column.
+ *
+ * Neither is shaped like a Slack user id (`U…`/`W…`, uppercase), which is what
+ * makes them safe to store in a column read for a mention: `requestBlocks` only
+ * mentions a value of that shape, so a sentinel can never ping anyone. Keep that
+ * true of any value added here.
+ */
+export const STARTED_BY_PROCESS = "process";
+export const STARTED_BY_UNKNOWN = "unknown";
+
+/**
  * Pending agent tasks — the correlation store for async A2A push
  * notifications. When the gatekeeper dispatches to a remote (custom) agent it no
  * longer blocks for the reply: it sends a per-dispatch validation `token` in the
@@ -227,6 +249,31 @@ export const agentTasks = sqliteTable(
     replyThreadTs: text("reply_thread_ts"),
     // Slack event id of the triggering message — used to collect the 🛑 reaction.
     eventId: text("event_id").notNull(),
+    // Slack user who started this task: the sender of the message that woke the
+    // agent, as the webhook classified it. The one thing it is for is mentioning
+    // that person when their agent comes back asking a human to approve
+    // something, so the approval reaches whoever asked for the work rather than
+    // waiting in a thread nobody is watching (see `requestBlocks` in
+    // `src/slack/hitl/render.ts`).
+    //
+    // It comes from the signature-verified Slack envelope and from nowhere else,
+    // never from the agent's own HITL form — so the line the gatekeeper writes in
+    // its own voice names somebody the agent did not choose. It is written once,
+    // at dispatch, so a task continued by somebody else still mentions the person
+    // who started it.
+    //
+    // NOT NULL: a task nobody started says so with a sentinel
+    // (STARTED_BY_PROCESS / STARTED_BY_UNKNOWN) rather than with a null, so every
+    // reader gets a string and none has to decide what a missing one means.
+    //
+    // Required and deliberately **without** a default, for the same reason
+    // `agents.task_deadline_seconds` has none: a database default would make the
+    // column optional at every insert forever, so a write path that forgot who
+    // started the task would quietly store `unknown` instead of failing. Naming
+    // nobody is a decision, and the caller makes it — `CreateAgentTaskInput`
+    // requires the field. The rows that predate the column were backfilled once,
+    // by 0023's rebuild, which is why that value exists in the table at all.
+    startedBy: text("started_by").notNull(),
     // `pending` until a terminal callback posts (or classifies no-reply) and marks
     // it `completed`. `awaiting-input` is the parked state while a human-in-the-loop
     // prompt is open (see `hitl_requests`): the row is non-terminal (so the fan-out

@@ -31,6 +31,11 @@ import { sanitizeSlackText } from "@/util/slack-text";
  * A control holds at most 75 characters, and a button shows about 30, so where
  * an option has more to it than a control shows, its options are listed in full
  * above the controls, which then carry only their numbers.
+ *
+ * A form asking someone to approve something mentions whoever started the task,
+ * so it reaches the person who asked for the work instead of waiting in a thread
+ * nobody is watching (see {@link approvalPing}). Anyone in the thread may still
+ * answer it.
  */
 
 /** Slack's cap on one section's text. */
@@ -60,6 +65,17 @@ const VIEW_BLOCKS = 100;
 const FALLBACK_TEXT = 3_000;
 
 const FENCE = "```";
+
+/**
+ * A Slack user id, and the one thing allowed inside a `<@…>` this file writes:
+ * `U…` for a person, `W…` for an Enterprise Grid one, uppercase alphanumerics
+ * after that. The shape is checked rather than the source trusted, because the id
+ * is interpolated into a mention token where a `>` would close it early and leave
+ * the rest as text — the same reason `saveHitlDraft` checks before interpolating
+ * into a JSON path. Being this shape is also what separates a real starter from
+ * `agent_tasks.started_by`'s lowercase sentinels, which must never be mentioned.
+ */
+const SLACK_USER_ID = /^[UW][A-Z0-9]+$/;
 
 /** The `callback_id` of the modal a form is answered in. */
 export const FORM_CALLBACK_ID = "hitl-form";
@@ -451,9 +467,52 @@ function controlBlocks(request: HitlRequest): unknown[] {
   return [{ type: "actions", block_id: "hitl-controls", elements }];
 }
 
-/** The open prompt: what {@link messageText} says, then the controls. */
-export function requestBlocks(request: HitlRequest): unknown[] {
+/**
+ * The line that puts an approval in front of the person who started the task: a
+ * mention of them, which is what Slack notifies on. None when the form asks for
+ * no approval — a question is the agent's to raise, but waking somebody up is
+ * not, so only the decision it cannot make without a person gets a ping.
+ *
+ * `startedBy` is the Slack user id of whoever sent the message that woke the
+ * agent, carried on the task row (`agent_tasks.started_by`) since dispatch. It
+ * is deliberately not read from the form: every string in there is the agent's,
+ * so a form that named its own mention would let the agent decide who this line
+ * wakes. (An agent can still mention people in its own prose — `<@U…>` survives
+ * `sanitizeSlackText` by design — but then it is the agent's words saying so,
+ * not the gatekeeper's.)
+ *
+ * The column is never null, so "nobody to name" arrives as one of its sentinels
+ * (`STARTED_BY_PROCESS` / `STARTED_BY_UNKNOWN`) — a feed turn, or a row written
+ * before the column existed. Both fail {@link SLACK_USER_ID} and the prompt then
+ * carries no mention. Omitted entirely by a caller that has no task row to hand
+ * (the re-opened prompt in `slack-interactivity-handler`), which is the same
+ * outcome by the same route.
+ */
+function approvalPing(
+  request: HitlRequest,
+  startedBy: string | undefined
+): string | undefined {
+  const asksApproval = request.questions.some((q) => q.kind === "approval");
+  return startedBy && SLACK_USER_ID.test(startedBy) && asksApproval
+    ? `<@${startedBy}> — this needs your approval.`
+    : undefined;
+}
+
+/**
+ * The open prompt: who it is for when it asks for an approval, what
+ * {@link messageText} says, then the controls.
+ *
+ * The mention is a block of its own rather than part of the message's text, so
+ * the agent's words keep the whole {@link MESSAGE_TEXT} budget they had and a
+ * form that only just fit is not cut to make room for it.
+ */
+export function requestBlocks(
+  request: HitlRequest,
+  startedBy?: string
+): unknown[] {
+  const ping = approvalPing(request, startedBy);
   return [
+    ...(ping ? [section(ping)] : []),
     ...sections(messageText(request), MESSAGE_TEXT, CUT_PROMPT),
     ...controlBlocks(request)
   ];
@@ -769,10 +828,22 @@ export function fallbackText(text: string): string {
   return clip(text, FALLBACK_TEXT);
 }
 
-/** The form in a line or two, for a notification. */
-export function requestFallbackText(request: HitlRequest): string {
+/**
+ * The form in a line or two, for a notification. An approval's mention leads it,
+ * because this text is the fallback Slack falls back *to* — on a surface that
+ * does not render the blocks, it is all there is — and leading it is what keeps
+ * the mention out of the cut when a long form runs past {@link FALLBACK_TEXT}.
+ */
+export function requestFallbackText(
+  request: HitlRequest,
+  startedBy?: string
+): string {
   return fallbackText(
-    [request.prompt, ...request.questions.map((q) => q.prompt)]
+    [
+      approvalPing(request, startedBy),
+      request.prompt,
+      ...request.questions.map((q) => q.prompt)
+    ]
       .filter(Boolean)
       .join("\n\n")
   );

@@ -13,6 +13,7 @@ import {
   type AgentPlan,
   type TaskOutcome,
   replyThreadTs,
+  startedBy,
   resolveMessage,
   dispatchMessage,
   collectIfEventDrained,
@@ -175,7 +176,9 @@ export class MessageWorkflow extends WorkflowEntrypoint<
             channelId: p.channelId,
             messageTs: p.ts,
             replyThreadTs: threadTs,
-            eventId: p.eventId
+            eventId: p.eventId,
+            // Who an approval this task later raises should mention, if anyone.
+            startedBy: startedBy(p)
           });
           out.push(token);
         }

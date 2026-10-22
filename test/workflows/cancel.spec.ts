@@ -104,7 +104,8 @@ async function seedTask(token: string, taskId: string | null): Promise<void> {
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: null,
-    eventId: "Ev1"
+    eventId: "Ev1",
+    startedBy: "U1"
   });
 }
 

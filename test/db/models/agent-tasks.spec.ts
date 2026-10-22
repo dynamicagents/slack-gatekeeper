@@ -44,6 +44,7 @@ function input(token: string, over: Partial<CreateAgentTaskInput> = {}) {
     messageTs: "1700.1",
     replyThreadTs: null,
     eventId: "Ev1",
+    startedBy: "U1",
     ...over
   } satisfies CreateAgentTaskInput;
 }
@@ -56,6 +57,8 @@ describe("agent-tasks model", () => {
     expect(row?.status).toBe("pending");
     expect(row?.channelId).toBe("C1");
     expect(row?.replyThreadTs).toBeNull();
+    // Who started it, for the approval prompts its agent may raise later.
+    expect(row?.startedBy).toBe("U1");
   });
 
   // message_ts is the 🛑 stop reaction's only lookup key (a reaction event
@@ -65,9 +68,33 @@ describe("agent-tasks model", () => {
   it("rejects a task row without a message_ts", async () => {
     await expect(
       env.DB.prepare(
-        "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1')"
+        "INSERT INTO agent_tasks (token, agent_name, channel_id, event_id, started_by) VALUES ('tok-null-ts', 'remoteagent', 'C1', 'Ev1', 'U1')"
       ).run()
-    ).rejects.toThrow(/NOT NULL/i);
+    ).rejects.toThrow(/NOT NULL.*message_ts/i);
+  });
+
+  // started_by is NOT NULL with no default, so every row answers "who asked for
+  // this?" and no reader has to decide what a missing answer means. Both halves
+  // are pinned at the DB level and both are unrepresentable through
+  // `createAgentTask`, whose input requires the field: an insert that omits the
+  // column has nothing to fall back on, and an explicit NULL is refused too.
+  // What the rebuild in 0023 left on the rows written before the column is
+  // 0023's own spec.
+  it.each([
+    [
+      "omits started_by",
+      `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id)
+       VALUES ('tok-omitted-starter', 'remoteagent', 'C1', '1700.1', 'Ev1')`
+    ],
+    [
+      "nulls started_by",
+      `INSERT INTO agent_tasks (token, agent_name, channel_id, message_ts, event_id, started_by)
+       VALUES ('tok-null-starter', 'remoteagent', 'C1', '1700.1', 'Ev1', NULL)`
+    ]
+  ])("rejects a task row that %s", async (_what, sql) => {
+    await expect(env.DB.prepare(sql).run()).rejects.toThrow(
+      /NOT NULL.*started_by/i
+    );
   });
 
   it("is idempotent on the token PK (no throw, no clobber)", async () => {

@@ -215,7 +215,8 @@ async function seedPendingTask(
     channelId: "C1",
     messageTs: "1700.1",
     replyThreadTs: null,
-    eventId
+    eventId,
+    startedBy: "U1"
   });
   if (lastError) await recordAgentTaskError(token, lastError);
 }

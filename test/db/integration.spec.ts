@@ -153,7 +153,8 @@ describe("agents — registry CRUD", () => {
       channelId: "C_USED",
       messageTs: "1700.1",
       replyThreadTs: null,
-      eventId: "Ev_CASCADE"
+      eventId: "Ev_CASCADE",
+      startedBy: "U1"
     });
     await createHitlForm({
       requestId: "req-cascade",

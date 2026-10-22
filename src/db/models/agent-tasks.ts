@@ -5,6 +5,9 @@ import { TASK_RETENTION_SECONDS } from "@/config";
 
 export type AgentTaskRow = typeof schema.agentTasks.$inferSelect;
 
+/** What `started_by` holds when no person started the task — see the schema. */
+export { STARTED_BY_PROCESS, STARTED_BY_UNKNOWN } from "../schema";
+
 /**
  * Statuses a task can never leave. Everything else (`pending`, `awaiting-input`)
  * is still in flight: it keeps the fan-out undrained, keeps the 🛑 alive, and
@@ -41,6 +44,19 @@ export interface CreateAgentTaskInput {
   /** Thread to reply into; null = post at channel top-level. */
   replyThreadTs: string | null;
   eventId: string;
+  /**
+   * Slack user who started this task — the sender of the message that woke the
+   * agent, never anything the agent says. A turn no person started names a
+   * sentinel instead ({@link STARTED_BY_PROCESS} for a feed turn, whose user id
+   * is the authored message's author rather than the actor; see `startedBy` in
+   * `src/workflows/message-helpers.ts`), so this is a string and never a null.
+   *
+   * Required and deliberately not optional, like the column itself: naming
+   * nobody is a decision the caller makes, and a write path that omitted the
+   * field would fail on the column's NOT NULL rather than quietly store a
+   * stand-in.
+   */
+  startedBy: string;
 }
 
 /**
@@ -61,7 +77,8 @@ export async function createAgentTask(
       channelId: input.channelId,
       messageTs: input.messageTs,
       replyThreadTs: input.replyThreadTs,
-      eventId: input.eventId
+      eventId: input.eventId,
+      startedBy: input.startedBy
     })
     .onConflictDoNothing();
 }

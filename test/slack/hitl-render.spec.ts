@@ -13,6 +13,7 @@ import {
   formPages,
   formView,
   requestBlocks,
+  requestFallbackText,
   resolvedBlocks,
   splitMrkdwn,
   wordsView
@@ -31,7 +32,7 @@ import {
   messageViolations,
   viewViolations
 } from "../helpers/slack-limits";
-import { choiceForm } from "../helpers/hitl";
+import { approvalForm, choiceForm } from "../helpers/hitl";
 
 // Pure rendering and parsing; no storage, so no `useStorageReset()` — see
 // test/helpers/storage.ts.
@@ -335,6 +336,141 @@ describe("the open prompt", () => {
     const blocks = requestBlocks(manyQuestions(40));
     expect(messageViolations(blocks)).toEqual([]);
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+  });
+});
+
+/**
+ * An approval is the one thing an agent cannot settle on its own, so it is put
+ * in front of the person who asked for the work: a mention of them, which is
+ * what Slack notifies on, in the message and in the notification beside it.
+ * `startedBy` is the trigger event's own Slack user, carried on the task row —
+ * or, where no person started the task, one of that column's sentinels, which
+ * name nobody.
+ */
+describe("an approval's mention of whoever started the task", () => {
+  const PING = "<@U1> — this needs your approval.";
+  const APPROVAL_BUTTONS = ["Approve", "Reject", "Comment…"];
+
+  it("mentions them in the message and leads the notification with it", () => {
+    const request = approvalForm("req-ping");
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    // First, and a block of its own — not folded into the agent's words, whose
+    // budget it would then eat into.
+    expect(blocks[0]).toEqual({
+      type: "section",
+      text: { type: "mrkdwn", text: PING }
+    });
+    // Leading the fallback: a mobile notification is drawn from this text alone,
+    // and a long form's is cut from the end.
+    expect(requestFallbackText(request, "U1")).toBe(
+      `${PING}\n\nApprove the plan?`
+    );
+    // The question is still asked the same way, by its own buttons.
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+  });
+
+  it("mentions them for an approval among questions answered in the modal", () => {
+    const request = form(
+      [
+        { kind: "text", id: "q1", prompt: "Anything to add?" },
+        {
+          kind: "approval",
+          id: "q2",
+          prompt: "Approve the rollout?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ],
+      "Here is the plan.",
+      "req-ping-form"
+    );
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toContain(PING);
+    expect(requestFallbackText(request, "U1").startsWith(PING)).toBe(true);
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+  });
+
+  /**
+   * No person started the task, which `agent_tasks.started_by` says with a
+   * sentinel rather than a null: `process` for a feed turn (an edit or a delete,
+   * whose user id is the authored message's author, not the actor), `unknown` for
+   * a row written before the column existed and backfilled by migration 0023.
+   * Neither is shaped like a Slack user id, so neither is mentioned — and the
+   * approval is still worth asking.
+   *
+   * The ids below are the same thing from the other side: nothing but the
+   * signature-verified envelope writes this column today, but the value is
+   * interpolated into a `<@…>` token, where a `>` would close the mention early
+   * and leave the rest as text, so rendering checks the shape rather than
+   * trusting where the value came from.
+   */
+  it.each([
+    // The sentinels as literals, not as `STARTED_BY_*`: importing them would be
+    // an `@/db` import, which is what `check-storage-reset` reads as a spec that
+    // touches storage, and this one does not. That they are *these* strings is
+    // pinned where they are stored and delivered (`hitl-delivery.spec.ts`); what
+    // is pinned here is that a value of this shape names nobody.
+    ["the process sentinel", "process"],
+    ["the unknown sentinel", "unknown"],
+    ["not read at all by this caller", undefined],
+    ["empty", ""],
+    ["closing the mention early", "U1> ping <!channel"],
+    ["a channel id rather than a user's", "C123ABC"],
+    ["not an id at all", "not an id"]
+  ])("asks the approval of nobody when the starter is %s", (_what, starter) => {
+    const request = approvalForm("req-nobody");
+    const blocks = requestBlocks(request, starter);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).not.toContain("<@");
+    // Not as a mention, and not as text either.
+    if (starter) expect(blocksText(blocks)).not.toContain(starter);
+    expect(blocksText(blocks)).toContain("Approve the plan?");
+    // The question is still asked the same way, by its own buttons.
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+    expect(requestFallbackText(request, starter)).toBe(
+      requestFallbackText(request)
+    );
+  });
+
+  /**
+   * The mention is a block of its own, so it costs the agent's words nothing: a
+   * form already past the message budget is cut in exactly the same place, and
+   * the message still fits what Slack accepts.
+   */
+  it("costs the agent's words none of their room on a form already cut", () => {
+    const request = form(
+      [
+        {
+          kind: "approval",
+          id: "q1",
+          prompt: "Approve the rollout?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ],
+      "p ".repeat(9_000),
+      "req-ping-long"
+    );
+    const blocks = requestBlocks(request, "U1");
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(blocksText(blocks)).toBe(
+      `${PING}\n${blocksText(requestBlocks(request))}`
+    );
+    // The cut falls where it did, and the mention is not what was cut.
+    expect(blocksText(blocks)).toContain("Cut here to fit Slack");
+  });
+
+  it("mentions nobody on a form that asks for no approval", () => {
+    const forms = [
+      choiceForm("req-choice", "Proceed?"),
+      form([{ kind: "text", id: "q1", prompt: "Name it?" }], undefined, "req-t")
+    ];
+    for (const request of forms) {
+      expect(blocksText(requestBlocks(request, "U1"))).not.toContain("<@");
+      expect(requestFallbackText(request, "U1")).toBe(
+        requestFallbackText(request)
+      );
+    }
   });
 });
 

@@ -157,7 +157,8 @@ describe("hitl-forms model", () => {
         channelId: "C1",
         messageTs: "1700.1",
         replyThreadTs: "1700.1",
-        eventId: `Ev-${token}`
+        eventId: `Ev-${token}`,
+        startedBy: "U1"
       });
       await suspendForInput(token);
     }
@@ -321,7 +322,8 @@ describe("agent_tasks suspend/resume for input", () => {
       channelId: "C1",
       messageTs: "1700.1",
       replyThreadTs: null,
-      eventId: "Ev1"
+      eventId: "Ev1",
+      startedBy: "U1"
     };
   }
 
