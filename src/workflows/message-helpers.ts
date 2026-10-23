@@ -4,15 +4,20 @@ import type {
   MessageWorkflowParams
 } from "@/slack/types";
 import { buildUserAuthContext } from "@/auth";
+import { env } from "cloudflare:workers";
 import {
   cancelAgentTask,
   dispatchToAgent,
+  joinAgentTask,
   type DispatchAgentRef,
   type DispatchMetadata,
-  type DispatchResult
+  type DispatchPayload,
+  type DispatchResult,
+  type JoinOutcome
 } from "@/a2a/dispatch";
 import { InvalidEndpointError } from "@/a2a/endpoint";
 import {
+  getOpenAgentTaskInThread,
   getPendingAgentTasksByEventId,
   markAgentTaskCanceled,
   markCancelRequested,
@@ -22,8 +27,12 @@ import {
 import { getAgent } from "@/db/models/agents";
 import { closeOpenHitlPrompts } from "@/a2a/notifications/hitl";
 import { renderEditDiff } from "@/util/text-diff";
-import { postReply } from "@/wrappers/slack";
-import { signalReactionSync } from "@/workflows/reaction-helpers";
+import { addReaction, postReply } from "@/wrappers/slack";
+import {
+  reactionInstanceId,
+  signalReactionSync,
+  STOP_REACTION
+} from "@/workflows/reaction-helpers";
 
 // Shown when a dispatch's retries are fully exhausted (persistently unreachable
 // endpoint, TLS/DNS failure, persistent 5xx, accept timeout). Not transient by
@@ -164,6 +173,120 @@ export async function dispatchMessage(
   p: MessageWorkflowParams,
   plan: AgentPlan
 ): Promise<DispatchResult> {
+  try {
+    return await dispatchToAgent(plan.agent, payloadFor(p, plan));
+  } catch (err) {
+    if (err instanceof InvalidEndpointError) {
+      // Policy rejection — not transient, so don't let the step retry.
+      console.warn("[message] agent endpoint rejected", {
+        agent: plan.agent.name,
+        err: err.message
+      });
+      return {
+        kind: "error_reply",
+        text: `The agent *${plan.agent.name}* could not be reached because its endpoint was rejected by the security policy: ${err.message}. Please contact the agent developer to resolve this.`
+      };
+    }
+    throw err; // transient — retry is safe (deterministic dispatch id dedupes)
+  }
+}
+
+/** The thread a message belongs to, as dispatch keys its A2A context. */
+export function threadKeyOf(
+  p: Pick<MessageWorkflowParams, "threadTs" | "ts">
+): string {
+  return p.threadTs || p.ts;
+}
+
+/** How long a message waits for a task in its thread to finish being accepted. */
+const ACCEPT_WAIT_MS = 15_000;
+const ACCEPT_POLL_MS = 500;
+
+/**
+ * The open task each plan's agent already has in this message's thread, or
+ * `null` where it has none: the message joins those, and starts a task only
+ * for the rest. A task still waiting on its accept (no task id yet) is waited
+ * for, bounded, so two quick messages do not start two tasks; one that never
+ * gets its id in time is passed over.
+ */
+export async function openTasksFor(
+  p: MessageWorkflowParams,
+  plans: AgentPlan[]
+): Promise<(Pick<AgentTaskRow, "token" | "taskId"> | null)[]> {
+  const threadKey = threadKeyOf(p);
+  return Promise.all(
+    plans.map(async (plan) => {
+      const deadline = Date.now() + ACCEPT_WAIT_MS;
+      for (;;) {
+        const row = await getOpenAgentTaskInThread(
+          plan.agent.name,
+          p.channelId,
+          threadKey
+        );
+        if (!row) return null;
+        if (row.taskId) return { token: row.token, taskId: row.taskId };
+        if (Date.now() >= deadline) return null;
+        await scheduler.wait(ACCEPT_POLL_MS);
+      }
+    })
+  );
+}
+
+/**
+ * Send a message onto an agent's open task. An endpoint the policy now
+ * rejects, like any refusal, starts a task instead, where the rejection is
+ * said in the thread.
+ */
+export async function joinMessage(
+  p: MessageWorkflowParams,
+  plan: AgentPlan,
+  row: Pick<AgentTaskRow, "token" | "taskId">
+): Promise<JoinOutcome> {
+  try {
+    return await joinAgentTask(plan.agent, row, payloadFor(p, plan));
+  } catch (err) {
+    if (err instanceof InvalidEndpointError) return "refused";
+    throw err;
+  }
+}
+
+/**
+ * Put the 🛑 on the trigger message and start its ReactionWorkflow, for a
+ * message that starts a task after the handler gave it neither: its join was
+ * refused, or the task it would have joined closed in between. Both are
+ * idempotent, so a delivery that races the handler's repeats nothing.
+ */
+export async function ensureStopReaction(
+  p: MessageWorkflowParams
+): Promise<void> {
+  try {
+    await addReaction(p.channelId, p.ts, STOP_REACTION);
+  } catch (err) {
+    console.warn("[message] could not add the stop reaction", {
+      eventId: p.eventId,
+      err: String(err)
+    });
+  }
+  try {
+    await env.REACTION_WORKFLOW.create({
+      id: reactionInstanceId(p.eventId),
+      params: { eventId: p.eventId, channelId: p.channelId, ts: p.ts }
+    });
+  } catch (err) {
+    if (!/already exists/i.test(String(err))) {
+      console.error("[message] could not start the reaction workflow", {
+        eventId: p.eventId,
+        err: String(err)
+      });
+    }
+  }
+}
+
+/** What one plan's dispatch or join sends: the turn, where it goes, for whom. */
+function payloadFor(
+  p: MessageWorkflowParams,
+  plan: AgentPlan
+): DispatchPayload {
   // *Which* agent this is comes from `tenantId`, the same field the dispatcher
   // routes on; `kind` only says whether it is one of this Worker's own tenants.
   let metadata: DispatchMetadata;
@@ -185,31 +308,16 @@ export async function dispatchMessage(
     };
   }
 
-  try {
-    return await dispatchToAgent(plan.agent, {
-      eventId: p.eventId,
-      text: plan.text,
-      channelId: p.channelId,
-      channelName: plan.channelName,
-      threadTs: p.threadTs || p.ts,
-      messageTs: p.ts,
-      user: plan.user,
-      metadata
-    });
-  } catch (err) {
-    if (err instanceof InvalidEndpointError) {
-      // Policy rejection — not transient, so don't let the step retry.
-      console.warn("[message] agent endpoint rejected", {
-        agent: plan.agent.name,
-        err: err.message
-      });
-      return {
-        kind: "error_reply",
-        text: `The agent *${plan.agent.name}* could not be reached because its endpoint was rejected by the security policy: ${err.message}. Please contact the agent developer to resolve this.`
-      };
-    }
-    throw err; // transient — retry is safe (deterministic dispatch id dedupes)
-  }
+  return {
+    eventId: p.eventId,
+    text: plan.text,
+    channelId: p.channelId,
+    channelName: plan.channelName,
+    threadTs: threadKeyOf(p),
+    messageTs: p.ts,
+    user: plan.user,
+    metadata
+  };
 }
 
 /**

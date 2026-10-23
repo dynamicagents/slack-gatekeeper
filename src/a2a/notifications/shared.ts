@@ -3,6 +3,7 @@ import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import {
   completeAgentTask,
   recordReceivedMessageId,
+  suspendForInput,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { isTerminalTaskState, taskStateLabel } from "@/a2a/parts";
@@ -63,20 +64,23 @@ export async function deliverTaskToSlack(
   // and for the admin agent this resolution costs extra config reads.
   const renderIdentity = () => agentRenderIdentity(agent, row.channelId);
 
-  // Human-in-the-loop: an `input-required` update carrying a HITL request
-  // DataPart is rendered as an interactive Slack prompt and the task is parked
-  // awaiting a human answer (see deliverHitlRequest). An `input-required` update
-  // *without* a HITL request falls through to the plain-text path below (posted
-  // as a normal reply, row stays pending) — same as any other non-terminal state.
-  if (state === TaskState.TASK_STATE_INPUT_REQUIRED) {
+  // Human-in-the-loop. A task asks as it works: any non-terminal update carrying
+  // a HITL request DataPart is rendered as an interactive prompt, however many
+  // the task already has open (see deliverHitlRequest). `input-required` is the
+  // other half: the agent is idle, waiting on nothing but its open questions, so
+  // the row parks and the processing clock stops. An agent that asks only once
+  // it is idle sends both in one update; one that asks in prose is posted below,
+  // and the reply that answers it joins the task.
+  if (!isTerminalTaskState(state)) {
     const hitl = parseHitlRequest(snapshot.statusMessage);
+    const waiting = state === TaskState.TASK_STATE_INPUT_REQUIRED;
     if (hitl) {
-      await deliverHitlRequest(token, row, agent, snapshot, hitl);
+      await deliverHitlRequest(token, row, agent, snapshot, hitl, {
+        park: waiting
+      });
       return;
     }
-  }
 
-  if (!isTerminalTaskState(state)) {
     const updateId = snapshot.statusMessage?.messageId;
     if (!updateId) {
       throw new TaskDeliveryValidationError(
@@ -84,6 +88,10 @@ export async function deliverTaskToSlack(
       );
     }
 
+    // A parked row takes no updates: its agent is idle, so one arriving now is
+    // a progress line from before the park. What wakes a parked task is an
+    // answer, a joined message or an expiry, and the gatekeeper un-parks the row
+    // as it sends each one.
     const isNew = await recordReceivedMessageId(token, updateId);
     if (isNew && text) {
       const { displayName, iconUrl } = await renderIdentity();
@@ -95,6 +103,7 @@ export async function deliverTaskToSlack(
         iconUrl
       );
     }
+    if (waiting) await suspendForInput(token);
     return;
   }
 

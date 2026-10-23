@@ -4,6 +4,7 @@ import { registerAgent } from "@/db/models/agents";
 import {
   createAgentTask,
   getAgentTaskByToken,
+  getOpenAgentTaskInThread,
   getPendingAgentTasksByChannelAndTs,
   completeAgentTask,
   recordReceivedMessageId,
@@ -394,5 +395,57 @@ describe("agent-tasks model", () => {
       // Parked is *not* terminal: the fan-out stays undrained and the 🛑 alive.
       expect(isTerminalTaskStatus("awaiting-input")).toBe(false);
     });
+  });
+});
+
+describe("getOpenAgentTaskInThread", () => {
+  it("finds a task by the thread it replies in", async () => {
+    await createAgentTask(
+      input("t-reply", { messageTs: "1700.2", replyThreadTs: "1700.1" })
+    );
+    expect(
+      (await getOpenAgentTaskInThread("remoteagent", "C1", "1700.1"))?.token
+    ).toBe("t-reply");
+  });
+
+  it("finds a task a top-level message started by that message's ts", async () => {
+    // It replies at channel level, so only its message names the thread a
+    // reply under that message is in.
+    await createAgentTask(
+      input("t-top", { messageTs: "1700.1", replyThreadTs: null })
+    );
+    expect(
+      (await getOpenAgentTaskInThread("remoteagent", "C1", "1700.1"))?.token
+    ).toBe("t-top");
+  });
+
+  it("passes over a task that has ended, another channel's and another agent's", async () => {
+    await registerAgent({
+      name: "otheragent",
+      kind: "remote",
+      a2aEndpoint: "https://agent.example.com/a2a",
+      tenantId: "main",
+      notifyOn: "mention",
+      workspaceId: 0
+    });
+    await createAgentTask(input("t-done", { replyThreadTs: "1700.1" }));
+    await completeAgentTask("t-done");
+    await createAgentTask(
+      input("t-elsewhere", { channelId: "C2", replyThreadTs: "1700.1" })
+    );
+    await createAgentTask(
+      input("t-other", { agentName: "otheragent", replyThreadTs: "1700.1" })
+    );
+    expect(
+      await getOpenAgentTaskInThread("remoteagent", "C1", "1700.1")
+    ).toBeNull();
+  });
+
+  it("counts a parked task as open", async () => {
+    await createAgentTask(input("t-parked", { replyThreadTs: "1700.1" }));
+    await suspendForInput("t-parked");
+    expect(
+      (await getOpenAgentTaskInThread("remoteagent", "C1", "1700.1"))?.status
+    ).toBe("awaiting-input");
   });
 });

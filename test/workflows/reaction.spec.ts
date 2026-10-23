@@ -19,6 +19,7 @@ import {
   createAgentTask,
   recordAgentTaskError,
   suspendForInput,
+  resumeFromInput,
   getAgentTaskByToken
 } from "@/db/models/agent-tasks";
 import { buildAgentCard } from "@/a2a/card";
@@ -538,6 +539,75 @@ describe("ReactionWorkflow", () => {
       // Crucially the 🛑 is still there — it is the only one-tap way to stop a
       // task parked on a prompt.
       expect(captured.reactions).toHaveLength(0);
+    } finally {
+      await introspector.dispose();
+    }
+  });
+});
+
+/**
+ * What a wake does to the budgets, observed through which tasks the next forced
+ * timeout stops. Two tasks on the same hour: `worker` works through leg 0 while
+ * `asker` is parked on a prompt. Mid-leg, `asker` goes back to work and the loop
+ * is woken, 50 minutes into the leg.
+ */
+describe("ReactionWorkflow, woken mid-leg", () => {
+  const LEG_START = 1_000_000;
+  const WORKED_MS = 50 * 60 * 1000;
+
+  async function wakeMidLeg(sync: { refresh: boolean }) {
+    const captured = captureWithCancellableAgent();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    const p = makeParams();
+    const worker = `wtok-${p.eventId}`.toLowerCase();
+    const asker = `atok-${p.eventId}`.toLowerCase();
+    await seedPendingTask(p.eventId, worker, undefined, 3600);
+    await seedPendingTask(p.eventId, asker, undefined, 3600);
+    expect(await suspendForInput(asker)).toBe(true);
+
+    await introspector.modifyAll(async (m) => {
+      await m.forceEventTimeout({ name: GRACE_STEP });
+      // Never 0: the introspector takes a falsy mock for none.
+      await m.mockStepResult({ name: "leg-start:0" }, LEG_START);
+      await m.mockStepResult({ name: "woke:0" }, LEG_START + WORKED_MS);
+      await m.forceEventTimeout({ name: "sync:1" });
+    });
+    await env.REACTION_WORKFLOW.create({
+      id: reactionInstanceId(p.eventId),
+      params: p
+    });
+    const [instance] = await introspector.get();
+    await instance.waitForStepResult({ name: "leg-start:0" });
+
+    expect(await resumeFromInput(asker)).toBe(p.eventId);
+    const live = await env.REACTION_WORKFLOW.get(reactionInstanceId(p.eventId));
+    await live.sendEvent({ type: REACTION_SYNC_EVENT, payload: sync });
+    await instance.waitForStepResult({ name: "cancel:1" });
+    return { captured, introspector, worker, asker };
+  }
+
+  it("charges only the task that worked, when nobody answered", async () => {
+    const { introspector, worker, asker } = await wakeMidLeg({
+      refresh: false
+    });
+    try {
+      // `worker` had ten minutes left, so it is the one stopped; `asker` spent
+      // nothing while parked and carries on with what it had.
+      expect((await getAgentTaskByToken(worker))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(asker))?.status).toBe("pending");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("gives every task a fresh leg when a person answered", async () => {
+    const { introspector, worker, asker } = await wakeMidLeg({
+      refresh: true
+    });
+    try {
+      // Both start the hour again, so the next timeout spends both.
+      expect((await getAgentTaskByToken(worker))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(asker))?.status).toBe("canceled");
     } finally {
       await introspector.dispose();
     }

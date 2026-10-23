@@ -26,6 +26,12 @@ export interface ClassifiedMessageParams {
 export interface MessageWorkflowParams extends ClassifiedMessageParams {
   /** Agents woken by this message, resolved once in the handler. Always ≥1. */
   targets: ResolvedTarget[];
+  /**
+   * Whether the handler gave the message its 🛑 and ReactionWorkflow, which it
+   * does when some agent has no task open in the thread. The workflow decides
+   * again later, and squares the two.
+   */
+  stopped?: boolean;
 }
 
 export interface LifecycleWorkflowParams {

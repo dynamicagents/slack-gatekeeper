@@ -204,31 +204,83 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect((await getHitlForm("req-race"))?.status).toBe("canceled");
   });
 
-  it("closes a second prompt that fails to park, and only that one", async () => {
+  it("posts a second prompt while the first is open, each its own form", async () => {
     const posts: SlackPost[] = [];
     stubFetch(posts);
-    await deliver(hitlTask("req-first"));
+    // Asked while the agent works: shown at once, and the clock keeps running.
+    await deliver(
+      hitlTask("req-first", { state: TaskState.TASK_STATE_WORKING })
+    );
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
 
-    // The park fails here because the task is already parked, not because it is
-    // over — so the question it is parked on still stands.
+    // Asked once it is idle: shown, and the row parks.
     await deliver(hitlTask("req-second"));
 
     expect((await getHitlForm("req-first"))?.status).toBe("awaiting");
-    // Never shown, so never left for the sweep to time out.
-    expect((await getHitlForm("req-second"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-second"))?.status).toBe("awaiting");
+    const prompts = posts.filter((p) => p.blocks);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0].blocks).toContain("req-first");
+    expect(prompts[1].blocks).toContain("req-second");
     expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
-    expect(posts.filter((p) => p.blocks)).toHaveLength(1);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
   });
 
-  it("falls back to a plain reply for input-required without a HITL DataPart", async () => {
+  it("parks on input-required without a HITL DataPart, posting its prose as a reply", async () => {
     const posts: SlackPost[] = [];
     stubFetch(posts);
     await deliver(hitlTask("req-none", { withDataPart: false }));
 
-    // Posted as a normal reply (no blocks), and the row stays pending — no HITL row.
+    // Posted as a normal reply (no blocks), with no form behind it: whoever
+    // answers replies in the thread, which joins the task.
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toBeUndefined();
-    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+    expect(await getHitlForm("req-none")).toBeNull();
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("parks on an input-required with nothing to say, posting nothing", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(
+      makeSnapshot({
+        id: "task-1",
+        state: TaskState.TASK_STATE_INPUT_REQUIRED,
+        text: "",
+        messageId: "idle-1"
+      })
+    );
+
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("keeps a parked row parked through a late progress line", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-parked"));
+
+    // Written while the agent still worked, delivered after it went idle.
+    await deliver(
+      makeSnapshot({
+        id: "task-1",
+        state: TaskState.TASK_STATE_WORKING,
+        text: "Reading the logs.",
+        messageId: "w-late"
+      })
+    );
+
+    expect(posts.filter((p) => !p.blocks)).toHaveLength(0);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+    expect((await getHitlForm("req-parked"))?.status).toBe("awaiting");
   });
 });
 

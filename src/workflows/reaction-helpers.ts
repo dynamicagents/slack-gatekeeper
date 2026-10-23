@@ -25,19 +25,28 @@ export const STOP_REACTION = "octagonal_sign";
 
 /**
  * Event `type` sent to the ReactionWorkflow whenever the task ledger reaches a
- * boundary it cares about: the fan-out drained, or a parked task resumed. Slack
- * event types only allow `[a-zA-Z0-9_-]` — no dots.
+ * boundary it cares about. Slack event types only allow `[a-zA-Z0-9_-]`, no dots.
  *
- * **The workflow's processing budget depends on this firing only at real leg
- * boundaries.** It measures a leg with its own `waitForEvent` timeout rather than
- * a stored timestamp, so a signal sent mid-leg would silently hand every agent
- * of the fan-out a fresh leg of its own budget. Both senders respect that today:
- * `collectIfEventDrained` signals
- * only once no non-terminal task remains (not when one agent of a fan-out
- * finishes), and the resume path signals exactly when a new leg starts. Anything
- * added later must hold to the same rule.
+ * **The workflow's processing budget depends on what each signal says.** It
+ * measures a leg with its own `waitForEvent` timeout rather than a stored
+ * timestamp, so a signal it read as a leg boundary mid-leg would silently hand
+ * every agent of the fan-out a fresh leg of its own budget. So a signal says
+ * which it is ({@link ReactionSync}):
+ *
+ *  - a leg boundary, `refresh: true`: the fan-out drained (`collectIfEventDrained`
+ *    signals only once no non-terminal task remains), or a person answered a
+ *    question, which starts a fresh leg;
+ *  - a wake, `refresh: false`: a parked task went back to work without an
+ *    answer (a message joined it, or its agent took up a result), so the clock
+ *    runs again on what it had left. A parked leg spends no budget, so nothing
+ *    is owed for the time it waited.
  */
 export const REACTION_SYNC_EVENT = "ledger_changed";
+
+/** What a signal to the ReactionWorkflow says: see {@link REACTION_SYNC_EVENT}. */
+export interface ReactionSync {
+  refresh: boolean;
+}
 
 /**
  * Ceiling on how many times the ReactionWorkflow's budget loop may go round. A
@@ -96,12 +105,15 @@ export function reactionInstanceId(eventId: string): string {
  * costs lateness, never correctness. Also throws once the instance has finished
  * (a reply landing after the task was canceled), which is expected and harmless.
  */
-export async function signalReactionSync(eventId: string): Promise<void> {
+export async function signalReactionSync(
+  eventId: string,
+  sync: ReactionSync = { refresh: true }
+): Promise<void> {
   try {
     const instance = await env.REACTION_WORKFLOW.get(
       reactionInstanceId(eventId)
     );
-    await instance.sendEvent({ type: REACTION_SYNC_EVENT, payload: {} });
+    await instance.sendEvent({ type: REACTION_SYNC_EVENT, payload: sync });
   } catch (err) {
     console.warn("[reaction] sync signal failed (non-fatal)", {
       eventId,

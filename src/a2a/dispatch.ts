@@ -11,7 +11,11 @@ import {
 } from "@/auth/agent-outbound";
 import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
-import { resumeFromInput } from "@/db/models/agent-tasks";
+import {
+  getAgentTaskByToken,
+  resumeFromInput,
+  type AgentTaskRow
+} from "@/db/models/agent-tasks";
 import { signalReactionSync } from "@/workflows/reaction-helpers";
 import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import type { HitlFormRow } from "@/db/models/hitl-forms";
@@ -466,6 +470,65 @@ export async function dispatchToAgent(
   return dispatchResultFor(accept, agent, dispatchId);
 }
 
+/**
+ * How sending a message onto an agent's open task went: taken, as the next
+ * message of the conversation the task is having, or refused, by an agent
+ * whose task has closed or that takes no such message, so the caller starts a
+ * task with it instead. A failure that could be transient throws, so the step
+ * sending it retries: the message id is the dispatch's, so a resend dedupes.
+ */
+export type JoinOutcome = "joined" | "refused";
+
+/**
+ * Send a message onto the open task `row` instead of starting a task beside
+ * it: the same turn a dispatch would send, wrapped the same way, carrying the
+ * task's id and its own push token, so its callbacks land on the same row.
+ *
+ * A parked task woken this way goes back to work on the budget it had: the
+ * joined message is not an answer, and starts no fresh leg.
+ */
+export async function joinAgentTask(
+  agent: DispatchAgentRef,
+  row: Pick<AgentTaskRow, "token" | "taskId">,
+  payload: DispatchPayload
+): Promise<JoinOutcome> {
+  if (!row.taskId) return "refused";
+  const identity = await identityFor(agent, payload.channelId);
+  if (!identity) return "refused";
+  const { target, issuer } = await targetFor(agent, identity);
+  const message = buildMessage({
+    messageId: await buildDispatchId(payload.eventId, agent),
+    role: Role.ROLE_USER,
+    taskId: row.taskId,
+    contextId: buildRemoteContextId(
+      identity,
+      payload.channelId,
+      payload.threadTs
+    ),
+    referenceTaskIds: [row.taskId],
+    parts: [
+      textPart(renderTurn(payload.text, turnContextFromPayload(payload)))
+    ],
+    metadata: { ...payload.metadata }
+  });
+  const accept = await sendA2ARemote(
+    target,
+    message,
+    remotePushNotificationConfig(issuer, row.token)
+  );
+  if (accept.kind !== "accepted") {
+    console.log("[dispatch] a join was refused; starting a task instead", {
+      agent: agent.name,
+      taskId: row.taskId,
+      accept: accept.kind
+    });
+    return "refused";
+  }
+  const eventId = await resumeFromInput(row.token);
+  if (eventId) await signalReactionSync(eventId, { refresh: false });
+  return "joined";
+}
+
 /** A person's answers to a HITL prompt, as captured from Slack. */
 export interface HitlSubmission {
   /** Slack user id of whoever answered. */
@@ -505,14 +568,17 @@ function continuationFailureDetail(
 }
 
 /**
- * Un-park the task row and wake the ReactionWorkflow, because this is the start
- * of a fresh processing leg and the workflow measures legs with its own timer
- * rather than a stored timestamp — parking only ever *extends* its wait, so this
- * is the one transition it has to be told about. Without the nudge it would sit
- * on the parked wait (the full HITL TTL) instead of the agent's hour.
+ * An answer was taken: un-park the task row if it was parked, and start a fresh
+ * processing leg either way, because the workflow measures legs with its own
+ * timer rather than a stored timestamp. A task holds several questions, so an
+ * answer can land while it works on as much as while it waits; both are the
+ * person's turn, and both start a leg. Without the nudge a parked task would
+ * sit on the parked wait (the full HITL TTL) instead of the agent's hour.
  */
 async function markResumed(token: string): Promise<void> {
-  const eventId = await resumeFromInput(token);
+  const eventId =
+    (await resumeFromInput(token)) ??
+    (await getAgentTaskByToken(token))?.eventId;
   if (eventId) await signalReactionSync(eventId);
 }
 

@@ -14,7 +14,8 @@ import { cancelTaskRow } from "@/workflows/message-helpers";
 import {
   MAX_LEGS,
   REACTION_SYNC_EVENT,
-  STOP_REACTION
+  STOP_REACTION,
+  type ReactionSync
 } from "@/workflows/reaction-helpers";
 
 // Re-exported so callers and tests can keep importing the 🛑 vocabulary from the
@@ -397,12 +398,22 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
             : minRemaining
         );
 
+        // When this leg began, from a step so a replay reads the same: what a
+        // wake mid-leg charges the tasks that were working through it.
+        const legStartedAt = await step.do(`leg-start:${leg}`, async () =>
+          Date.now()
+        );
         let timedOut = false;
+        let sync: Partial<ReactionSync> | undefined;
         try {
-          await step.waitForEvent(`sync:${leg}`, {
-            type: REACTION_SYNC_EVENT,
-            timeout: `${waitSeconds} seconds`
-          });
+          const event = await step.waitForEvent<Partial<ReactionSync>>(
+            `sync:${leg}`,
+            {
+              type: REACTION_SYNC_EVENT,
+              timeout: `${waitSeconds} seconds`
+            }
+          );
+          sync = event.payload as Partial<ReactionSync> | undefined;
         } catch {
           timedOut = true;
         }
@@ -434,11 +445,24 @@ export class ReactionWorkflow extends WorkflowEntrypoint<
             const left = remaining.get(t.token);
             if (left !== undefined) remaining.set(t.token, left - waitSeconds);
           }
-        } else if (!timedOut) {
-          // A signal only ever fires at a real boundary (the fan-out drained, or a
-          // parked task resumed), so this is the start of a fresh leg — and each
-          // task gets a fresh leg of its own agent's budget.
+        } else if (!timedOut && sync?.refresh !== false) {
+          // A leg boundary (the fan-out drained, or a person answered), so this
+          // is the start of a fresh leg, and each task gets a fresh leg of its
+          // own agent's budget.
           for (const t of snap.tasks) remaining.set(t.token, t.deadlineSeconds);
+        }
+        // A wake without a refresh (a parked task went back to work on a joined
+        // message or a result) starts no fresh leg. A task that was parked
+        // through it spent nothing; one that was working is charged the time
+        // it worked, and the next pass waits out what each has left.
+        if (!timedOut && sync?.refresh === false) {
+          const wokeAt = await step.do(`woke:${leg}`, async () => Date.now());
+          const worked = Math.floor((wokeAt - legStartedAt) / 1000);
+          for (const t of pending) {
+            const left = remaining.get(t.token);
+            if (left !== undefined)
+              remaining.set(t.token, Math.max(1, left - worked));
+          }
         }
         // parked + timedOut → the prompt outlived its TTL. The maintenance sweep
         // owns that; just loop and re-read what it did.
