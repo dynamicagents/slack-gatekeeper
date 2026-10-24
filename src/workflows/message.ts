@@ -1,14 +1,16 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { buildDispatchId } from "@/a2a/dispatch";
+import { buildDispatchId, type JoinOutcome } from "@/a2a/dispatch";
 import { postReply } from "@/wrappers/slack";
 import {
   createAgentTask,
   updateAgentTaskTaskId,
   deleteAgentTask,
-  isCancelRequested
+  isCancelRequested,
+  type AgentTaskRow
 } from "@/db/models/agent-tasks";
+import { parkTask, wakeTask } from "@/workflows/reaction-helpers";
 import {
   type AgentPlan,
   type TaskOutcome,
@@ -19,7 +21,10 @@ import {
   collectIfEventDrained,
   cancelAndReconcile,
   cancelNotHonoredText,
-  handleUnreachable
+  ensureStopReaction,
+  handleUnreachable,
+  joinMessage,
+  openTasksFor
 } from "@/workflows/message-helpers";
 
 /**
@@ -135,9 +140,48 @@ async function runAgentTask(
 }
 
 /**
+ * Send a message onto an agent's open task. A parked task is woken first, so
+ * the turn's first callbacks find it working, and parked again if the message
+ * is not taken. One whose retries ran out may have been taken or not: the
+ * thread is told the agent could not be reached, and no task is started with
+ * it, which could run it twice.
+ */
+async function joinTask(
+  step: WorkflowStep,
+  p: MessageWorkflowParams,
+  plan: AgentPlan,
+  row: Pick<AgentTaskRow, "token" | "taskId" | "eventId">
+): Promise<JoinOutcome | "undelivered"> {
+  const name = plan.agent.name;
+  const woke = await step.do(`wake:${name}`, () => wakeTask(row.token));
+  let outcome: JoinOutcome | "undelivered";
+  try {
+    outcome = await step.do(`join:${name}`, () => joinMessage(p, plan, row));
+  } catch (err) {
+    outcome = "undelivered";
+    await handleUnreachable(
+      step,
+      p,
+      replyThreadTs(p),
+      name,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+  if (outcome !== "joined" && woke) {
+    await step.do(`repark:${name}`, () => parkTask(row.token, row.eventId));
+  }
+  return outcome;
+}
+
+/**
  * Durable workflow for Slack messages dispatched to agents. One instance per
  * Slack `event_id`, handling every woken agent (local built-in and remote
  * custom) for that event.
+ *
+ * An agent that already has a task open in the message's thread is sent the
+ * message onto that task: it joins the conversation the task is having, and
+ * gets no row, no 🛑 and no budget of its own. Only an agent with none, or one
+ * that refuses the join, starts a task here.
  *
  * All agents accept the turn and deliver status snapshots asynchronously:
  * built-ins through a trusted in-process push sender, remotes through the
@@ -148,8 +192,11 @@ async function runAgentTask(
  * budget (its agent's `task_deadline_seconds`, which defaults to
  * `DEFAULT_TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
  *
- * Steps: `resolve` → one `record-tasks` (all rows up front) → per agent
- * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) → `collect`.
+ * Steps: `resolve` → `route` → per joining agent `wake` + `join` (+ `repark`)
+ * → (`ensure-reaction` when the handler gave no 🛑) → one `record-tasks`
+ * (every row up front, before any dispatch) → per opening agent
+ * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) →
+ * `collect-reaction`.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -160,7 +207,41 @@ export class MessageWorkflow extends WorkflowEntrypoint<
     const threadTs = replyThreadTs(p);
 
     try {
-      const plans = await step.do("resolve", () => resolveMessage(p));
+      const resolved = await step.do("resolve", () => resolveMessage(p));
+
+      // Joins go first, all of them, so a join refused still opens its task
+      // before any dispatch: every row is recorded up front either way.
+      const open = await step.do("route", () => openTasksFor(p, resolved));
+      const plans: AgentPlan[] = [];
+      for (const [i, plan] of resolved.entries()) {
+        const row = open[i];
+        if (!row || (await joinTask(step, p, plan, row)) === "refused") {
+          plans.push(plan);
+        }
+      }
+
+      // The handler gave the 🛑 on what it saw a moment earlier: a task can
+      // open or close in between, and a join can be refused.
+      if (plans.length === 0) {
+        if (p.stopped) {
+          await step.do("collect-reaction", () =>
+            collectIfEventDrained(p.eventId, { routed: true })
+          );
+        }
+        return;
+      }
+      if (!p.stopped) {
+        try {
+          await step.do("ensure-reaction", () => ensureStopReaction(p));
+        } catch (err) {
+          // Its retries ran out. The tasks start without a deadline rather
+          // than not at all.
+          console.error("[message] could not give the message its 🛑", {
+            eventId: p.eventId,
+            err: err instanceof Error ? err.message : String(err)
+          });
+        }
+      }
 
       // Record every fan-out row up front (before any dispatch) so a fast
       // terminal callback can't observe an incomplete sibling set and drain the
@@ -220,7 +301,9 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       // Clear the 🛑 only when no agent is still working. A pending accepted task
       // keeps it alive until its push-notification delivery (or the
       // ReactionWorkflow backstop) drains the fan-out and removes it.
-      await step.do("collect-reaction", () => collectIfEventDrained(p.eventId));
+      await step.do("collect-reaction", () =>
+        collectIfEventDrained(p.eventId, { routed: true })
+      );
     } catch (err) {
       console.error("[message] workflow run failed", {
         instanceId: event.instanceId,

@@ -12,7 +12,11 @@ import {
 } from "@/db/models/agent-tasks";
 import { claimHitlAnswer, getHitlForm } from "@/db/models/hitl-forms";
 import { deliverTaskToSlack } from "@/a2a/notifications/shared";
-import { TASK_ENDED_NOTE } from "@/a2a/notifications/hitl";
+import {
+  closeOpenHitlPrompts,
+  TASK_ENDED_NOTE
+} from "@/a2a/notifications/hitl";
+import { REACTION_SYNC_EVENT } from "@/workflows/reaction-helpers";
 import { HITL_APPROVE_OPTION_ID } from "@/a2a/hitl";
 import { dataPart, textPart } from "@/a2a/parts";
 import type { TaskSnapshot } from "@/a2a/snapshot";
@@ -35,7 +39,10 @@ interface SlackPost {
  * Record Slack posts and updates. `failReplies` makes every plain (block-less)
  * post fail, the way a Slack outage fails an agent's final reply.
  */
-function stubFetch(posts: SlackPost[], opts: { failReplies?: boolean } = {}) {
+function stubFetch(
+  posts: SlackPost[],
+  opts: { failReplies?: boolean; onPrompt?: () => Promise<void> } = {}
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -65,6 +72,8 @@ function stubFetch(posts: SlackPost[], opts: { failReplies?: boolean } = {}) {
         if (opts.failReplies && method === "chat.postMessage" && !post.blocks) {
           return Response.json({ ok: false, error: "internal_error" });
         }
+        if (method === "chat.postMessage" && post.blocks)
+          await opts.onPrompt?.();
         posts.push(post);
         return Response.json({ ok: true, ts: "1700.9" });
       }
@@ -75,7 +84,7 @@ function stubFetch(posts: SlackPost[], opts: { failReplies?: boolean } = {}) {
 
 function hitlTask(
   requestId: string,
-  opts: { state?: TaskState; withDataPart?: boolean } = {}
+  opts: { state?: TaskState; withDataPart?: boolean; messageId?: string } = {}
 ): TaskSnapshot {
   const fallback = textPart("Proceed with deletion?");
   const request = dataPart(choiceForm(requestId, "Proceed with deletion?"));
@@ -83,7 +92,7 @@ function hitlTask(
     id: "task-1",
     contextId: "C1:1700.1",
     state: opts.state ?? TaskState.TASK_STATE_INPUT_REQUIRED,
-    messageId: `${requestId}:u1`,
+    messageId: opts.messageId ?? `${requestId}:u1`,
     parts: opts.withDataPart === false ? [fallback] : [fallback, request]
   });
 }
@@ -204,31 +213,154 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
     expect((await getHitlForm("req-race"))?.status).toBe("canceled");
   });
 
-  it("closes a second prompt that fails to park, and only that one", async () => {
+  it("posts a second prompt while the first is open, each its own form", async () => {
     const posts: SlackPost[] = [];
     stubFetch(posts);
-    await deliver(hitlTask("req-first"));
+    // Asked while the agent works: shown at once, and the clock keeps running.
+    await deliver(
+      hitlTask("req-first", { state: TaskState.TASK_STATE_WORKING })
+    );
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
 
-    // The park fails here because the task is already parked, not because it is
-    // over — so the question it is parked on still stands.
+    // Asked once it is idle: shown, and the row parks.
     await deliver(hitlTask("req-second"));
 
     expect((await getHitlForm("req-first"))?.status).toBe("awaiting");
-    // Never shown, so never left for the sweep to time out.
-    expect((await getHitlForm("req-second"))?.status).toBe("canceled");
+    expect((await getHitlForm("req-second"))?.status).toBe("awaiting");
+    const prompts = posts.filter((p) => p.blocks);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0].blocks).toContain("req-first");
+    expect(prompts[1].blocks).toContain("req-second");
     expect(posts.filter((p) => p.method === "chat.update")).toHaveLength(0);
-    expect(posts.filter((p) => p.blocks)).toHaveLength(1);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
   });
 
-  it("falls back to a plain reply for input-required without a HITL DataPart", async () => {
+  it("parks on input-required without a HITL DataPart, posting its prose as a reply", async () => {
     const posts: SlackPost[] = [];
     stubFetch(posts);
     await deliver(hitlTask("req-none", { withDataPart: false }));
 
-    // Posted as a normal reply (no blocks), and the row stays pending — no HITL row.
+    // Posted as a normal reply (no blocks), with no form behind it: whoever
+    // answers replies in the thread, which joins the task.
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toBeUndefined();
+    expect(await getHitlForm("req-none")).toBeNull();
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("parks on an input-required with nothing to say, posting nothing", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(
+      makeSnapshot({
+        id: "task-1",
+        state: TaskState.TASK_STATE_INPUT_REQUIRED,
+        text: "",
+        messageId: "idle-1"
+      })
+    );
+
+    expect(posts).toHaveLength(0);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("parks once a form it already showed comes back on input-required", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(
+      hitlTask("req-again", {
+        state: TaskState.TASK_STATE_WORKING,
+        messageId: "w-ask"
+      })
+    );
     expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+
+    await deliver(hitlTask("req-again", { messageId: "w-idle" }));
+
+    expect(posts.filter((p) => p.blocks)).toHaveLength(1);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+  });
+
+  it("does not park again on an input-required redelivered after the task resumed", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    const idle = makeSnapshot({
+      id: "task-1",
+      state: TaskState.TASK_STATE_INPUT_REQUIRED,
+      text: "",
+      messageId: "idle-again"
+    });
+    await deliver(idle);
+    // An answer or a joined message resumed it.
+    expect(await resumeFromInput("tok-del")).toBe("Ev1");
+
+    await deliver(idle);
+
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe("pending");
+  });
+
+  it("closes a prompt whose task ended while it posted", async () => {
+    const posts: SlackPost[] = [];
+    // The task's final status lands mid-post, before the prompt has a message
+    // the closing could update.
+    stubFetch(posts, {
+      onPrompt: async () => {
+        await closeOpenHitlPrompts("tok-del", TASK_ENDED_NOTE);
+        await completeAgentTask("tok-del");
+      }
+    });
+
+    await deliver(hitlTask("req-raced"));
+
+    expect((await getHitlForm("req-raced"))?.status).toBe("canceled");
+    const updates = posts.filter((p) => p.method === "chat.update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].ts).toBe("1700.9");
+    expect(updates[0].text).toBe(TASK_ENDED_NOTE);
+  });
+
+  it("ends the budget's leg where it parks", async () => {
+    const signals: unknown[] = [];
+    vi.spyOn(env.REACTION_WORKFLOW, "get").mockResolvedValue({
+      sendEvent: async (event: unknown) => {
+        signals.push(event);
+      }
+    } as unknown as WorkflowInstance);
+    stubFetch([]);
+
+    await deliver(hitlTask("req-leg"));
+
+    expect(signals).toEqual([{ type: REACTION_SYNC_EVENT, payload: {} }]);
+  });
+
+  it("keeps a parked row parked through a late progress line", async () => {
+    const posts: SlackPost[] = [];
+    stubFetch(posts);
+    await deliver(hitlTask("req-parked"));
+
+    // Written while the agent still worked, delivered after it went idle.
+    await deliver(
+      makeSnapshot({
+        id: "task-1",
+        state: TaskState.TASK_STATE_WORKING,
+        text: "Reading the logs.",
+        messageId: "w-late"
+      })
+    );
+
+    expect(posts.filter((p) => !p.blocks)).toHaveLength(0);
+    expect((await getAgentTaskByToken("tok-del"))?.status).toBe(
+      "awaiting-input"
+    );
+    expect((await getHitlForm("req-parked"))?.status).toBe("awaiting");
   });
 });
 

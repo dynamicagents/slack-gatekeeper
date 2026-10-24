@@ -16,6 +16,7 @@ import {
 } from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import { collectIfEventDrained } from "@/workflows/message-helpers";
+import { parkTask } from "@/workflows/reaction-helpers";
 
 /** A malformed task snapshot that is safe to report to a task's owner. */
 export class TaskDeliveryValidationError extends Error {}
@@ -63,19 +64,13 @@ export async function deliverTaskToSlack(
   // and for the admin agent this resolution costs extra config reads.
   const renderIdentity = () => agentRenderIdentity(agent, row.channelId);
 
-  // Human-in-the-loop: an `input-required` update carrying a HITL request
-  // DataPart is rendered as an interactive Slack prompt and the task is parked
-  // awaiting a human answer (see deliverHitlRequest). An `input-required` update
-  // *without* a HITL request falls through to the plain-text path below (posted
-  // as a normal reply, row stays pending) — same as any other non-terminal state.
-  if (state === TaskState.TASK_STATE_INPUT_REQUIRED) {
-    const hitl = parseHitlRequest(snapshot.statusMessage);
-    if (hitl) {
-      await deliverHitlRequest(token, row, agent, snapshot, hitl);
-      return;
-    }
-  }
-
+  // Human-in-the-loop. A task asks as it works: any non-terminal update carrying
+  // a HITL request DataPart is rendered as an interactive prompt, however many
+  // the task already has open (see deliverHitlRequest). `input-required` is the
+  // other half: the agent is idle, waiting on nothing but its open questions, so
+  // the row parks and the processing clock stops. An agent that asks only once
+  // it is idle sends both in one update; one that asks in prose is posted below,
+  // and the reply that answers it joins the task.
   if (!isTerminalTaskState(state)) {
     const updateId = snapshot.statusMessage?.messageId;
     if (!updateId) {
@@ -84,8 +79,21 @@ export async function deliverTaskToSlack(
       );
     }
 
+    // Claimed once per update, and only on a row that works: a parked row's
+    // agent is idle, so an update arriving then is a progress line from before
+    // the park, and what wakes a parked task (an answer, a joined message, an
+    // expiry) un-parks it as the gatekeeper sends it. A redelivery repeats
+    // nothing, the park least of all: it would stop the clock of a task an
+    // answer or a join has since resumed. The park goes before the post, so a
+    // post that fails and is retried still leaves the task parked.
     const isNew = await recordReceivedMessageId(token, updateId);
-    if (isNew && text) {
+    if (isNew && state === TaskState.TASK_STATE_INPUT_REQUIRED) {
+      await parkTask(token, row.eventId);
+    }
+    const hitl = parseHitlRequest(snapshot.statusMessage);
+    if (hitl) {
+      await deliverHitlRequest(token, row, agent, snapshot, hitl);
+    } else if (isNew && text) {
       const { displayName, iconUrl } = await renderIdentity();
       await postReply(
         row.channelId,

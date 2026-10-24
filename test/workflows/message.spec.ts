@@ -5,7 +5,8 @@ import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { upsertSlackUser } from "@/db/models/users";
 import {
   getAgentTaskByToken,
-  getPendingAgentTasksByEventId
+  getPendingAgentTasksByEventId,
+  suspendForInput
 } from "@/db/models/agent-tasks";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { STOP_REACTION } from "@/workflows/reaction";
@@ -320,15 +321,24 @@ describe("MessageWorkflow — remote custom agents", () => {
    */
   function stubFetch({
     remoteMode = "accepted" as RemoteMode,
+    joinMode = "accepted" as "accepted" | "refused",
     slackPosts,
     slackReactions,
-    remotePosts
+    remotePosts,
+    remoteMessages,
+    onJoin
   }: {
     remoteMode?: RemoteMode;
+    /** How the agent answers a message sent onto a task it has open. */
+    joinMode?: "accepted" | "refused";
     slackPosts?: PostCall[];
     slackReactions?: ReactionCall[];
     /** Counts dispatch POSTs so a test can assert the step did not retry. */
     remotePosts?: { count: number };
+    /** Every JSON-RPC request the agent was sent, as sent. */
+    remoteMessages?: unknown[];
+    /** Runs as a message onto an open task arrives, before it is answered. */
+    onJoin?: () => Promise<void>;
   } = {}) {
     const card = buildAgentCard({
       name: "Remote Test",
@@ -377,8 +387,40 @@ describe("MessageWorkflow — remote custom agents", () => {
           return Response.json(AgentCard.toJSON(card));
 
         // Remote agent dispatch (POST).
-        const rpc = (await request.clone().json()) as { id?: unknown };
+        const rpc = (await request.clone().json()) as {
+          id?: unknown;
+          params?: { message?: { taskId?: string } };
+        };
         if (remotePosts) remotePosts.count += 1;
+        remoteMessages?.push(rpc);
+
+        if (rpc.params?.message?.taskId) {
+          await onJoin?.();
+          // A message onto an open task: taken, or refused the way core
+          // refuses one on a task that has closed.
+          return Response.json(
+            joinMode === "refused"
+              ? {
+                  jsonrpc: "2.0",
+                  id: rpc.id ?? 1,
+                  error: { code: -32004, message: "task is closed" }
+                }
+              : {
+                  jsonrpc: "2.0",
+                  id: rpc.id ?? 1,
+                  result: SendMessageResponse.toJSON({
+                    payload: {
+                      $case: "task",
+                      value: makeTask({
+                        id: rpc.params.message.taskId,
+                        contextId: "ctx",
+                        state: TaskState.TASK_STATE_WORKING
+                      })
+                    }
+                  })
+                }
+          );
+        }
 
         if (remoteMode === "protocol_error") {
           // A deterministic A2A refusal: the agent understood the request and
@@ -428,11 +470,11 @@ describe("MessageWorkflow — remote custom agents", () => {
 
   let seq = 0;
   /**
-   * Each message gets its own ts. An earlier test's `ReactionWorkflow` is never
+   * Each message gets its own ts; `threadTs` puts it in that message's thread. An earlier test's `ReactionWorkflow` is never
    * awaited and can remove its 🛑 after the next test has stubbed `fetch`, so a
    * reaction assertion counts only the calls on its own message.
    */
-  function makeChannelMessageRequest(channelId: string) {
+  function makeChannelMessageRequest(channelId: string, threadTs?: string) {
     const eventId = `Ev-remote-${++seq}`;
     const ts = `1700.${String(seq).padStart(6, "0")}`;
     const body = JSON.stringify({
@@ -444,9 +486,10 @@ describe("MessageWorkflow — remote custom agents", () => {
         channel_type: "channel",
         channel: channelId,
         user: "U1",
-        text: "hello remote",
+        text: threadTs ? "one more thing" : "hello remote",
         ts,
-        event_ts: ts
+        event_ts: ts,
+        ...(threadTs ? { thread_ts: threadTs } : {})
       }
     });
     return { body, eventId, ts };
@@ -583,6 +626,171 @@ describe("MessageWorkflow — remote custom agents", () => {
       expect(slackPosts[0].text).toContain(AGENT_UNREACHABLE_BASE_TEXT);
       expect(slackPosts[0].text).toContain(AGENT_NAME);
       expect(slackPosts[0].text).toContain("connection refused");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  /** Open a task in a new thread, and return its message's event and ts. */
+  async function openTask(
+    introspector: Awaited<ReturnType<typeof introspectWorkflow>>
+  ) {
+    const first = makeChannelMessageRequest(REMOTE_CHANNEL);
+    expect((await trigger(first.body)).status).toBe(200);
+    const [instance] = await introspector.get();
+    await instance.waitForStatus("complete");
+    expect(
+      (await getAgentTaskByToken(await tokenFor(first.eventId)))?.taskId
+    ).toBe("task-remote-1");
+    return first;
+  }
+
+  it("a message in the thread of an open task joins it: no task, row or 🛑 of its own", async () => {
+    const slackReactions: ReactionCall[] = [];
+    const remoteMessages: unknown[] = [];
+    stubFetch({ slackReactions, remoteMessages });
+    const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const reactionIntrospector = await introspectWorkflow(
+      env.REACTION_WORKFLOW
+    );
+    try {
+      const first = await openTask(msgIntrospector);
+      const reply = makeChannelMessageRequest(REMOTE_CHANNEL, first.ts);
+      expect((await trigger(reply.body)).status).toBe(200);
+      const instances = await msgIntrospector.get();
+      expect(instances).toHaveLength(2);
+      await instances[1].waitForStatus("complete");
+
+      // Sent onto the open task, with its push token, so its callbacks land on
+      // the task's own row.
+      expect(remoteMessages).toHaveLength(2);
+      const join = JSON.stringify(remoteMessages[1]);
+      expect(join).toContain('"taskId":"task-remote-1"');
+      expect(join).toContain("one more thing");
+      expect(join).toContain(await tokenFor(first.eventId));
+      expect(
+        await getAgentTaskByToken(await tokenFor(reply.eventId))
+      ).toBeNull();
+
+      // The opening message's 🛑 stops the task; this one has none to stop.
+      expect(slackReactions.filter((r) => r.timestamp === reply.ts)).toEqual(
+        []
+      );
+      expect(await reactionIntrospector.get()).toHaveLength(1);
+    } finally {
+      await msgIntrospector.dispose();
+      await reactionIntrospector.dispose();
+    }
+  });
+
+  it("a refused join opens a task of its own, with its own 🛑", async () => {
+    const slackReactions: ReactionCall[] = [];
+    const remoteMessages: unknown[] = [];
+    stubFetch({ joinMode: "refused", slackReactions, remoteMessages });
+    const msgIntrospector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    const reactionIntrospector = await introspectWorkflow(
+      env.REACTION_WORKFLOW
+    );
+    try {
+      const first = await openTask(msgIntrospector);
+      const reply = makeChannelMessageRequest(REMOTE_CHANNEL, first.ts);
+      await trigger(reply.body);
+      const instances = await msgIntrospector.get();
+      await instances[1].waitForStatus("complete");
+
+      // Refused onto the old task, then dispatched as a task of its own.
+      expect(remoteMessages).toHaveLength(3);
+      expect(JSON.stringify(remoteMessages[2])).not.toContain('"taskId"');
+      expect(
+        (await getAgentTaskByToken(await tokenFor(reply.eventId)))?.status
+      ).toBe("pending");
+
+      // The handler saw a task open and gave none; the workflow did.
+      expect(
+        slackReactions
+          .filter((r) => r.timestamp === reply.ts)
+          .map((r) => r.method)
+      ).toEqual(["reactions.add"]);
+      expect(await reactionIntrospector.get()).toHaveLength(2);
+    } finally {
+      await msgIntrospector.dispose();
+      await reactionIntrospector.dispose();
+    }
+  });
+
+  it("wakes a parked task before the join goes, so the turn's callbacks find it working", async () => {
+    let atJoin: string | undefined;
+    let token = "";
+    stubFetch({
+      onJoin: async () => {
+        atJoin = (await getAgentTaskByToken(token))?.status;
+      }
+    });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      token = await tokenFor(first.eventId);
+      expect(await suspendForInput(token)).toBe(true);
+
+      await trigger(makeChannelMessageRequest(REMOTE_CHANNEL, first.ts).body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      expect(atJoin).toBe("pending");
+      expect((await getAgentTaskByToken(token))?.status).toBe("pending");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("parks it again when the join is refused", async () => {
+    stubFetch({ joinMode: "refused" });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      const token = await tokenFor(first.eventId);
+      await suspendForInput(token);
+
+      await trigger(makeChannelMessageRequest(REMOTE_CHANNEL, first.ts).body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      // Still waiting on its person, as an agent that takes no joins left it.
+      expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("says so, and starts no task, when a join's retries run out", async () => {
+    const slackPosts: PostCall[] = [];
+    stubFetch({ slackPosts });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      const token = await tokenFor(first.eventId);
+      await suspendForInput(token);
+      await introspector.modifyAll(async (m) => {
+        await m.disableRetryDelays([{ name: `join:${AGENT_NAME}` }]);
+        await m.mockStepError(
+          { name: `join:${AGENT_NAME}` },
+          new Error("connection refused")
+        );
+      });
+
+      const reply = makeChannelMessageRequest(REMOTE_CHANNEL, first.ts);
+      await trigger(reply.body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      // It may have been taken: a task of its own could run it twice.
+      expect(
+        await getAgentTaskByToken(await tokenFor(reply.eventId))
+      ).toBeNull();
+      expect(slackPosts.map((p) => p.text).join("\n")).toContain(
+        AGENT_UNREACHABLE_BASE_TEXT
+      );
+      expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
     } finally {
       await introspector.dispose();
     }

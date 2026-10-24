@@ -14,6 +14,7 @@ import {
 } from "@/db/models/workspace-configs";
 import { ORG_WORKSPACE_ID } from "@/db/models/workspaces";
 import { MAX_WOKEN_AGENTS, STOP_REACTION } from "@/workflows/reaction";
+import { completeAgentTask, createAgentTask } from "@/db/models/agent-tasks";
 import { _resetBotInfoCacheForTest } from "@/wrappers/slack";
 import { stubSlack } from "./wrappers/slack-stub";
 import { useStorageReset } from "./helpers/storage";
@@ -440,6 +441,98 @@ describe("reaction workflow", () => {
     // The message workflow is authoritative and still runs.
     expect(messageCreate).toHaveBeenCalledOnce();
     expect(reactionCreate).toHaveBeenCalledOnce();
+  });
+
+  describe("in a thread whose agent has a task open", () => {
+    const THREAD = "1700000000.000100";
+
+    function threadReply(eventId: string): string {
+      return JSON.stringify({
+        type: "event_callback",
+        event_id: eventId,
+        team_id: "T1",
+        event: {
+          type: "message",
+          channel_type: "channel",
+          user: "U1",
+          text: "one more thing",
+          ts: "1700000000.000200",
+          thread_ts: THREAD,
+          channel: "C1"
+        }
+      });
+    }
+
+    beforeEach(() =>
+      createAgentTask({
+        token: "tok-open",
+        taskId: "task-open",
+        agentName: "wf-c1",
+        channelId: "C1",
+        messageTs: THREAD,
+        replyThreadTs: THREAD,
+        eventId: "EvOpen",
+        startedBy: "U1"
+      })
+    );
+
+    it("gives the message no 🛑 and no removal workflow: it joins the task", async () => {
+      const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+      const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
+      const adds = captureAddReactions();
+
+      expect((await post(threadReply("EvJoin"))).status).toBe(200);
+
+      // The opening message's 🛑 is the task's; this one has nothing to stop.
+      expect(adds).toEqual([]);
+      expect(reactionCreate).not.toHaveBeenCalled();
+      expect(messageCreate).toHaveBeenCalledWith({
+        id: "EvJoin",
+        params: expect.objectContaining({ stopped: false })
+      });
+    });
+
+    it("gives it both when the lookup fails, rather than dropping it", async () => {
+      const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+      const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
+      const adds = captureAddReactions();
+      // The open-task lookup throws; the workflow decides for good.
+      await env.DB.prepare(
+        "ALTER TABLE agent_tasks RENAME TO agent_tasks_away"
+      ).run();
+      try {
+        expect((await post(threadReply("EvLookup"))).status).toBe(200);
+      } finally {
+        await env.DB.prepare(
+          "ALTER TABLE agent_tasks_away RENAME TO agent_tasks"
+        ).run();
+      }
+
+      expect(adds).toHaveLength(1);
+      expect(reactionCreate).toHaveBeenCalledOnce();
+      expect(messageCreate).toHaveBeenCalledWith({
+        id: "EvLookup",
+        params: expect.objectContaining({ stopped: true })
+      });
+    });
+
+    it("gives it both once that task has ended, since it starts one", async () => {
+      await completeAgentTask("tok-open");
+      const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+      const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
+      const adds = captureAddReactions();
+
+      await post(threadReply("EvAfter"));
+
+      expect(adds).toEqual([
+        { channel: "C1", timestamp: "1700000000.000200", name: STOP_REACTION }
+      ]);
+      expect(reactionCreate).toHaveBeenCalledOnce();
+      expect(messageCreate).toHaveBeenCalledWith({
+        id: "EvAfter",
+        params: expect.objectContaining({ stopped: true })
+      });
+    });
   });
 
   it("does not react or start a removal workflow for lifecycle events", async () => {
@@ -1042,13 +1135,20 @@ describe("error handling", () => {
     expect(res.status).toBe(200);
   });
 
-  it("still returns 200 on an unexpected Workflow failure (error is logged, Slack does not retry)", async () => {
-    vi.spyOn(env.MESSAGE_WORKFLOW, "create").mockRejectedValue(
-      new Error("transient network error")
-    );
-    const body = JSON.stringify({
+  /** Every Slack call, by method, with what a notice would carry. */
+  function captureSlackCalls(): { method: string; text?: string }[] {
+    const calls: { method: string; text?: string }[] = [];
+    stubSlack((method, body) => {
+      calls.push({ method, text: body.get("text") ?? undefined });
+      return { ok: true, ts: "1.2" };
+    });
+    return calls;
+  }
+
+  const mention = (eventId: string) =>
+    JSON.stringify({
       type: "event_callback",
-      event_id: "EvBoom",
+      event_id: eventId,
       event: {
         type: "app_mention",
         user: "U1",
@@ -1057,8 +1157,44 @@ describe("error handling", () => {
         channel: "C1"
       }
     });
-    const res = await post(body);
+
+  it("retries a create that fails, then says so in the thread and takes the 🛑 off", async () => {
+    // Slack is acked before the create runs, so it never redelivers: a message
+    // whose workflow never starts is lost unless the thread is told.
+    const create = vi
+      .spyOn(env.MESSAGE_WORKFLOW, "create")
+      .mockRejectedValue(new Error("internal error"));
+    spyWorkflow("REACTION_WORKFLOW");
+    const calls = captureSlackCalls();
+
+    const res = await post(mention("EvBoom"));
+
     expect(res.status).toBe(200);
+    expect(create).toHaveBeenCalledTimes(3);
+    const posts = calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].text).toContain("didn't reach its agents");
+    expect(calls.map((c) => c.method)).toEqual(
+      expect.arrayContaining(["reactions.add", "reactions.remove"])
+    );
+  }, 15_000);
+
+  it("counts a create that takes on a retry as this delivery's own", async () => {
+    const create = vi
+      .spyOn(env.MESSAGE_WORKFLOW, "create")
+      .mockRejectedValueOnce(new Error("internal error"))
+      // The first attempt did start the instance; only its answer was lost.
+      .mockRejectedValueOnce(
+        new Error("instance with id EvLate already exists")
+      );
+    spyWorkflow("REACTION_WORKFLOW");
+    const calls = captureSlackCalls();
+
+    await post(mention("EvLate"));
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(calls.filter((c) => c.method === "chat.postMessage")).toEqual([]);
+    expect(calls.map((c) => c.method)).not.toContain("reactions.remove");
   });
 });
 

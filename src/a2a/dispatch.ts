@@ -11,8 +11,11 @@ import {
 } from "@/auth/agent-outbound";
 import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
-import { resumeFromInput } from "@/db/models/agent-tasks";
-import { signalReactionSync } from "@/workflows/reaction-helpers";
+import {
+  getAgentTaskByToken,
+  type AgentTaskRow
+} from "@/db/models/agent-tasks";
+import { parkTask, wakeTask } from "@/workflows/reaction-helpers";
 import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import type { HitlFormRow } from "@/db/models/hitl-forms";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
@@ -466,6 +469,64 @@ export async function dispatchToAgent(
   return dispatchResultFor(accept, agent, dispatchId);
 }
 
+/**
+ * How sending a message onto an agent's open task went: taken, as the next
+ * message of the conversation the task is having, or refused, by an agent
+ * whose task has closed or that takes no such message, so the caller starts a
+ * task with it instead. A failure that could be transient throws, so the step
+ * sending it retries: the message id is the dispatch's, so a resend dedupes.
+ */
+export type JoinOutcome = "joined" | "refused";
+
+/**
+ * Send a message onto the open task `row` instead of starting a task beside
+ * it: the same turn a dispatch would send, wrapped the same way, carrying the
+ * task's id and its own push token, so its callbacks land on the same row.
+ *
+ * The row is the caller's to wake before this and park again after a refusal
+ * (`wakeTask`, `parkTask`): woken after the accept instead, the turn's first
+ * callbacks could land on it still parked.
+ */
+export async function joinAgentTask(
+  agent: DispatchAgentRef,
+  row: Pick<AgentTaskRow, "token" | "taskId">,
+  payload: DispatchPayload
+): Promise<JoinOutcome> {
+  if (!row.taskId) return "refused";
+  const identity = await identityFor(agent, payload.channelId);
+  if (!identity) return "refused";
+  const { target, issuer } = await targetFor(agent, identity);
+  const message = buildMessage({
+    messageId: await buildDispatchId(payload.eventId, agent),
+    role: Role.ROLE_USER,
+    taskId: row.taskId,
+    contextId: buildRemoteContextId(
+      identity,
+      payload.channelId,
+      payload.threadTs
+    ),
+    referenceTaskIds: [row.taskId],
+    parts: [
+      textPart(renderTurn(payload.text, turnContextFromPayload(payload)))
+    ],
+    metadata: { ...payload.metadata }
+  });
+  const accept = await sendA2ARemote(
+    target,
+    message,
+    remotePushNotificationConfig(issuer, row.token)
+  );
+  if (accept.kind !== "accepted") {
+    console.log("[dispatch] a join was refused; starting a task instead", {
+      agent: agent.name,
+      taskId: row.taskId,
+      accept: accept.kind
+    });
+    return "refused";
+  }
+  return "joined";
+}
+
 /** A person's answers to a HITL prompt, as captured from Slack. */
 export interface HitlSubmission {
   /** Slack user id of whoever answered. */
@@ -505,26 +566,14 @@ function continuationFailureDetail(
 }
 
 /**
- * Un-park the task row and wake the ReactionWorkflow, because this is the start
- * of a fresh processing leg and the workflow measures legs with its own timer
- * rather than a stored timestamp — parking only ever *extends* its wait, so this
- * is the one transition it has to be told about. Without the nudge it would sit
- * on the parked wait (the full HITL TTL) instead of the agent's hour.
- */
-async function markResumed(token: string): Promise<void> {
-  const eventId = await resumeFromInput(token);
-  if (eventId) await signalReactionSync(eventId);
-}
-
-/**
  * Continue a task parked on a human-in-the-loop prompt. Calls the agent the way
  * {@link dispatchToAgent} does but *continues* an existing task rather than
  * starting one: the message carries the paused `taskId` + `contextId` +
  * `referenceTaskIds` (A2A multi-turn), and the push config reuses the original
- * `token` so continued callbacks land on the same `agent_tasks` row. On a
- * successful accept the row is un-parked (`resumeFromInput`) so the resumed
- * turn's callbacks are honored again and `"resumed"` is returned; any failure
- * returns `"failed"` so the caller can tell the user the task did not continue.
+ * `token` so continued callbacks land on the same `agent_tasks` row. An accept
+ * returns `"resumed"`; any failure returns `"failed"` so the caller can tell
+ * the user the task did not continue. The row is the caller's to wake before
+ * this and park again after a failure (`wakeTask`, `parkTask`).
  * Shared by the human-answer path ({@link resumeAgentTask}) and the TTL-timeout
  * path ({@link timeoutAgentTask}); the `messageId` is deterministic so a retried
  * continuation dedupes at the agent.
@@ -598,10 +647,7 @@ async function sendTaskContinuation(
     message,
     remotePushNotificationConfig(issuer, row.token)
   );
-  if (accept.kind === "accepted") {
-    await markResumed(row.token);
-    return { kind: "resumed" };
-  }
+  if (accept.kind === "accepted") return { kind: "resumed" };
   console.error("[hitl] continuation: agent did not accept", {
     agent: agent.name,
     requestId: row.requestId,
@@ -660,7 +706,25 @@ export async function resumeAgentTask(
     ...submission
   });
   const messageId = `${row.token}:r:${row.requestId}`;
+  // Woken before it goes, as a join is, so the answer's turn finds the row
+  // working, and its own leg starts afresh. Parked again if it is not taken.
+  const woke = await wakeTask(row.token, true);
+  const outcome = await sendAnswer(row, parts, messageId);
+  if (outcome !== "resumed" && woke) await parkAgain(row.token);
+  return outcome;
+}
 
+/** Park a row a send woke again, the send having not been taken. */
+async function parkAgain(token: string): Promise<void> {
+  const task = await getAgentTaskByToken(token);
+  if (task) await parkTask(token, task.eventId);
+}
+
+async function sendAnswer(
+  row: HitlFormRow,
+  parts: Message["parts"],
+  messageId: string
+): Promise<ResumeOutcome> {
   for (let attempt = 1; ; attempt++) {
     let outcome: ContinuationOutcome;
     try {
@@ -695,11 +759,13 @@ export async function resumeAgentTask(
  * the agent is down and can fix it — the expiry note alone wouldn't reveal that.
  */
 export async function timeoutAgentTask(row: HitlFormRow): Promise<void> {
+  const woke = await wakeTask(row.token);
   const outcome = await sendTaskContinuation(row, {
     parts: buildHitlTimeoutParts(row.requestId),
     messageId: `${row.token}:t:${row.requestId}`
   });
   if (outcome.kind === "failed") {
+    if (woke) await parkAgain(row.token);
     await notifyHitlContinuationFailed(row, outcome.detail);
   }
 }

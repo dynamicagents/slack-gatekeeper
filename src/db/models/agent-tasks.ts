@@ -1,4 +1,4 @@
-import { and, eq, lt, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { getDb } from "../client";
 import * as schema from "../schema";
 import { TASK_RETENTION_SECONDS } from "@/config";
@@ -106,6 +106,43 @@ export async function getPendingAgentTasksByChannelAndTs(
         notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES)
       )
     );
+}
+
+/**
+ * The task an agent still has open in a thread, if any: what a later message in
+ * that thread joins instead of starting a task beside it.
+ *
+ * A thread is keyed as dispatch keys an A2A context: a reply's thread, or a
+ * top-level message's own `ts`. So a task a top-level message started, which
+ * replies at channel level, is found by the thread under that message too. The
+ * newest, should two be open: a join it refuses starts another.
+ */
+export async function getOpenAgentTaskInThread(
+  agentName: string,
+  channelId: string,
+  threadKey: string
+): Promise<AgentTaskRow | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(schema.agentTasks)
+    .where(
+      and(
+        eq(schema.agentTasks.agentName, agentName),
+        eq(schema.agentTasks.channelId, channelId),
+        notInArray(schema.agentTasks.status, TERMINAL_TASK_STATUSES),
+        or(
+          eq(schema.agentTasks.replyThreadTs, threadKey),
+          and(
+            isNull(schema.agentTasks.replyThreadTs),
+            eq(schema.agentTasks.messageTs, threadKey)
+          )
+        )
+      )
+    )
+    .orderBy(desc(schema.agentTasks.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 /** Look up a pending/known task by its validation token (the callback's correlation key). */

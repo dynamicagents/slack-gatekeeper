@@ -12,6 +12,8 @@ import {
   _resetIssuerCacheForTest,
   dispatchToAgent,
   cancelAgentTask,
+  joinAgentTask,
+  resumeAgentTask,
   timeoutAgentTask,
   buildDispatchId,
   buildAgentInstanceKey
@@ -49,6 +51,7 @@ import {
 } from "@/agents/worker";
 import { useStorageReset } from "../helpers/storage";
 import { choiceForm } from "../helpers/hitl";
+import { REACTION_SYNC_EVENT } from "@/workflows/reaction-helpers";
 
 useStorageReset();
 
@@ -1012,5 +1015,193 @@ describe("timeoutAgentTask (remote continuation)", () => {
     expect(notices[0].thread_ts).toBe("1700.1");
     expect(notices[0].text).toContain("alpha");
     expect(notices[0].text.toLowerCase()).toContain("unreachable");
+  });
+});
+
+describe("joinAgentTask (remote)", () => {
+  const TOKEN = "tok-join";
+  const TASK_ID = "task-1";
+  const AGENT = {
+    name: "alpha",
+    kind: "remote" as const,
+    a2aEndpoint: ENDPOINT,
+    tenantId: "main",
+    workspaceId: 0
+  };
+  const PAYLOAD = {
+    eventId: "Ev-join",
+    text: "one more thing",
+    channelId: "C1",
+    channelName: "general",
+    threadTs: "1700.1",
+    messageTs: "1700.2",
+    user: user("U1"),
+    metadata: { agentKind: "remote" as const, tenant: "main", workspaceId: 0 }
+  };
+
+  /** The sync signals sent to the event's ReactionWorkflow. */
+  let signals: unknown[];
+
+  beforeEach(async () => {
+    await setPublicUrl("https://gatekeeper.test");
+    await setAllowedRemoteAgentDomains(["example.com"]);
+    signals = [];
+    vi.spyOn(env.REACTION_WORKFLOW, "get").mockResolvedValue({
+      sendEvent: async (event: unknown) => {
+        signals.push(event);
+      }
+    } as unknown as WorkflowInstance);
+    await registerAgent({ ...AGENT, notifyOn: "mention" });
+    await createAgentTask({
+      token: TOKEN,
+      taskId: TASK_ID,
+      agentName: "alpha",
+      channelId: "C1",
+      messageTs: "1700.1",
+      replyThreadTs: "1700.1",
+      eventId: "Ev-open",
+      startedBy: "U1"
+    });
+  });
+
+  it("sends the message onto the open task, leaving its row to the caller", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    await suspendForInput(TOKEN);
+
+    expect(
+      await joinAgentTask(AGENT, { token: TOKEN, taskId: TASK_ID }, PAYLOAD)
+    ).toBe("joined");
+
+    expect(posts).toHaveLength(1);
+    const msg = posts[0].message;
+    expect(msg.taskId).toBe(TASK_ID);
+    expect(msg.referenceTaskIds).toEqual([TASK_ID]);
+    // The dispatch's own id, so a retried step dedupes at the agent.
+    expect(msg.messageId).toBe(await buildDispatchId("Ev-join", AGENT));
+    expect(partsText(msg.parts)).toContain("one more thing");
+    // Woken before the send and parked again after a refusal, by the workflow
+    // sending it (`wakeTask`, `parkTask`), so nothing changes here.
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+    expect(signals).toEqual([]);
+  });
+
+  it("is refused, without sending, for a task not accepted yet", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    expect(
+      await joinAgentTask(AGENT, { token: TOKEN, taskId: null }, PAYLOAD)
+    ).toBe("refused");
+    expect(posts).toHaveLength(0);
+  });
+
+  it("is refused when the agent declines it, leaving the row as it was", async () => {
+    const posts: RemotePost[] = [];
+    // What core answers a message on a task that has closed.
+    stubRemoteRpcError(-32004, posts);
+    await suspendForInput(TOKEN);
+
+    expect(
+      await joinAgentTask(AGENT, { token: TOKEN, taskId: TASK_ID }, PAYLOAD)
+    ).toBe("refused");
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+    expect(signals).toEqual([]);
+  });
+
+  /** A form the task asked, answered: what `resumeAgentTask` sends. */
+  async function answerable(requestId: string): Promise<HitlFormRow> {
+    await createHitlForm({
+      requestId,
+      token: TOKEN,
+      taskId: TASK_ID,
+      contextId: "C1:1700.1",
+      agentName: "alpha",
+      channelId: "C1",
+      threadTs: "1700.1",
+      request: choiceForm(requestId),
+      deadlineAt: Math.floor(Date.now() / 1000) + 3600
+    });
+    return (await getHitlForm(requestId))!;
+  }
+
+  /** Record the row's status as each send reaches the agent. */
+  function statusAtSend(): string[] {
+    const seen: string[] = [];
+    const inner = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        if (request.method === "POST" && request.url.startsWith(ENDPOINT)) {
+          seen.push((await getAgentTaskByToken(TOKEN))?.status ?? "none");
+        }
+        return inner(input, init);
+      }
+    );
+    return seen;
+  }
+
+  it("wakes a parked task before its answer goes, on a fresh leg of its own", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    const seen = statusAtSend();
+    await suspendForInput(TOKEN);
+    const form = await answerable("req-wake");
+
+    expect(
+      await resumeAgentTask(form, {
+        answers: { q1: { optionIds: ["q1.o1"] } },
+        answeredBy: "U1"
+      })
+    ).toBe("resumed");
+    expect(seen).toEqual(["pending"]);
+    expect(signals).toEqual([
+      { type: REACTION_SYNC_EVENT, payload: { fresh: TOKEN } }
+    ]);
+  });
+
+  it("parks it again when its answer is refused", async () => {
+    const posts: RemotePost[] = [];
+    stubRemoteRpcError(-32004, posts);
+    await suspendForInput(TOKEN);
+    const form = await answerable("req-refused");
+
+    expect(
+      await resumeAgentTask(form, {
+        answers: { q1: { optionIds: ["q1.o1"] } },
+        answeredBy: "U1"
+      })
+    ).toBe("refused");
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+  });
+
+  it("starts a fresh leg for an answer that lands while the task works", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    // Asked while working: the row was never parked.
+    await createHitlForm({
+      requestId: "req-working",
+      token: TOKEN,
+      taskId: TASK_ID,
+      contextId: "C1:1700.1",
+      agentName: "alpha",
+      channelId: "C1",
+      threadTs: "1700.1",
+      request: choiceForm("req-working"),
+      deadlineAt: Math.floor(Date.now() / 1000) + 3600
+    });
+    const form = await getHitlForm("req-working");
+
+    expect(
+      await resumeAgentTask(form!, {
+        answers: { q1: { optionIds: ["q1.o1"] } },
+        answeredBy: "U1"
+      })
+    ).toBe("resumed");
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
+    expect(signals).toEqual([
+      { type: REACTION_SYNC_EVENT, payload: { fresh: TOKEN } }
+    ]);
   });
 });

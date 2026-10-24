@@ -10,6 +10,7 @@ import {
   replyThreadTs,
   startedBy,
   collectIfEventDrained,
+  ensureStopReaction,
   type AgentPlan
 } from "@/workflows/message-helpers";
 import { registerAgent } from "@/db/models/agents";
@@ -365,5 +366,26 @@ describe("collectIfEventDrained (fan-out drain)", () => {
     await completeAgentTask("d2");
     await collectIfEventDrained("EvDrain");
     expect(sendEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ensureStopReaction", () => {
+  it("throws when the reaction workflow will not start, so its step tries again", async () => {
+    captureSlackWithReactions();
+    vi.spyOn(env.REACTION_WORKFLOW, "create").mockRejectedValue(
+      new Error("internal error")
+    );
+    await expect(ensureStopReaction(makeParams())).rejects.toThrow(
+      "internal error"
+    );
+  });
+
+  it("takes one already started as started", async () => {
+    const { reactions } = captureSlackWithReactions();
+    vi.spyOn(env.REACTION_WORKFLOW, "create").mockRejectedValue(
+      new Error("instance with id react-Ev-helpers-0 already exists")
+    );
+    await ensureStopReaction(makeParams());
+    expect(reactions.map((r) => r.method)).toEqual(["reactions.add"]);
   });
 });

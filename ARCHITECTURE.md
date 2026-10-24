@@ -85,14 +85,14 @@ a per-task token.
 
 The gatekeeper's own Workflows are bound in `wrangler.jsonc` and live in `src/workflows/`:
 
-| Workflow              | Started by                               | Does                                                                                                    |
-| --------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `MessageWorkflow`     | a classified Slack message               | Resolves targets, records correlation rows, dispatches one A2A task per agent                           |
-| `LifecycleWorkflow`   | membership / team-join events            | Keeps the D1 registry in step with Slack membership                                                     |
-| `ReactionWorkflow`    | a trigger message's agents starting work | Owns the 🛑 reaction's removal and **each agent's own** processing deadline; cancels tasks that overrun |
-| `CancelWorkflow`      | a 🛑 stop reaction                       | Cancels every non-terminal task that trigger message woke, then confirms                                |
-| `ReconcileWorkflow`   | nightly cron                             | Convergence backstop — repairs registry drift against Slack reality                                     |
-| `MaintenanceWorkflow` | nightly cron                             | Expires human-in-the-loop prompts past their TTL and sweeps resolved rows                               |
+| Workflow              | Started by                               | Does                                                                                                                       |
+| --------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `MessageWorkflow`     | a classified Slack message               | Resolves targets, joins the message onto any task an agent has open in its thread, dispatches one A2A task per other agent |
+| `LifecycleWorkflow`   | membership / team-join events            | Keeps the D1 registry in step with Slack membership                                                                        |
+| `ReactionWorkflow`    | a trigger message's agents starting work | Owns the 🛑 reaction's removal and **each agent's own** processing deadline; cancels tasks that overrun                    |
+| `CancelWorkflow`      | a 🛑 stop reaction                       | Cancels every non-terminal task that trigger message woke, then confirms                                                   |
+| `ReconcileWorkflow`   | nightly cron                             | Convergence backstop — repairs registry drift against Slack reality                                                        |
+| `MaintenanceWorkflow` | nightly cron                             | Expires human-in-the-loop prompts past their TTL and sweeps resolved rows                                                  |
 
 Each built-in tenant also runs its tasks as a core task workflow — `AdminWorkflow` and
 `OnboardingWorkflow`, in `src/agents/` — started by its task host, not by the gatekeeper.
@@ -118,9 +118,16 @@ it is allowed on:
 
 When nothing applies, the resolver returns an empty list and the gatekeeper stays silent.
 
+A thread is a task's conversation. A message in a thread where a woken agent already has a
+task open joins that task as its next message, and gets no 🛑, row or deadline of its own:
+the opening message's 🛑 stops the task, and the task keeps its own deadline. Only an agent
+with no task open there, or one that refuses the join, gets a new task.
+
 At the other end, one message wakes at most **99 agents** (`MAX_WOKEN_AGENTS`). The
 `ReactionWorkflow` stops each woken agent at its own deadline by spending a leg of its
-budget loop per distinct expiry, so the fan-out has to stay below that loop's 100-leg cap.
+budget loop per distinct expiry, besides the first leg, which ends at the delivery-retry
+grace, and the last, which sees the fan-out drained; so the fan-out has to stay two below
+that loop's 101-leg cap.
 A channel wide enough to exceed it is clamped where the fan-out is decided: the first 99 by
 name are woken, the rest are skipped, and the thread is told so.
 

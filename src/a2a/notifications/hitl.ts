@@ -1,6 +1,10 @@
 import { HITL_REQUEST_TTL_SECONDS } from "@/config";
 import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
-import { suspendForInput, type AgentTaskRow } from "@/db/models/agent-tasks";
+import {
+  getAgentTaskByToken,
+  isTerminalTaskStatus,
+  type AgentTaskRow
+} from "@/db/models/agent-tasks";
 import type { HitlOption, HitlQuestion } from "@dynamicagents/g2a-protocol";
 import {
   cancelHitlForm,
@@ -64,14 +68,15 @@ function sanitizeQuestion(question: HitlQuestion): HitlQuestion {
 }
 
 /**
- * Render a human-in-the-loop form to Slack and park the task.
+ * Render a human-in-the-loop form to Slack.
  *
- * Called from the delivery boundary when an `input-required` snapshot carries a
- * HITL request data part. Sanitizes the agent's prompt/options before they are
- * stored or shown, persists the request keyed by `requestId`
- * (idempotent — a redelivered push does not double-post), suspends the paired
- * `agent_tasks` row (so the fan-out stays undrained and stray callbacks no-op),
- * then posts the interactive message and records its ts for later updates.
+ * Called from the delivery boundary when a non-terminal snapshot carries a HITL
+ * request data part; whether the task parks is the boundary's, decided by the
+ * update's state. A task may have any number open, each its own form, answered
+ * on its own. Sanitizes the agent's prompt/options before they are
+ * stored or shown, persists the request keyed by `requestId` (idempotent: a
+ * redelivered push does not double-post), then posts the interactive message
+ * and records its ts for later updates.
  */
 export async function deliverHitlRequest(
   token: string,
@@ -114,22 +119,15 @@ export async function deliverHitlRequest(
     }
   }
 
-  // Park the task (pending → awaiting-input): non-terminal, so 🛑 still cancels
-  // and the fan-out doesn't drain. When we recorded this request fresh but the
-  // park matched no `pending` row, a terminal callback or a 🛑 completed the task
-  // between the boundary's `row` snapshot and here — it can no longer be resumed,
-  // so don't post an unanswerable prompt. (A `created`-false re-post is the
-  // crash-recovery path, whose task was already parked, so a false park there is
-  // expected — let it re-post.)
-  const parked = await suspendForInput(token);
-  if (created && !parked) {
-    // Not posting still leaves the row just created `awaiting`, and a week from
-    // now the expiry sweep would send a timeout for a question nobody was shown —
-    // onto a finished task, or onto one that has since moved on. Close this row
-    // alone: a park also fails on a task already parked on an earlier prompt, and
-    // that prompt still stands. (A finished task's other prompts were closed by
-    // the delivery that finished it.)
-    await cancelHitlForm(req.requestId);
+  // A task finished, or stopped by a 🛑, between the boundary's `row` snapshot
+  // and here can no longer be answered, so the prompt is not posted. Not posting
+  // still leaves the form just created `awaiting`, and a week from now the
+  // expiry sweep would send a timeout for a question nobody was shown, so this
+  // form alone is closed: a finished task's other prompts were closed by the
+  // delivery that finished it.
+  const current = await getAgentTaskByToken(token);
+  if (!current || isTerminalTaskStatus(current.status)) {
+    if (created) await cancelHitlForm(req.requestId);
     return;
   }
 
@@ -149,7 +147,19 @@ export async function deliverHitlRequest(
     username: displayName,
     iconUrl
   });
-  if (ts) await setHitlFormMessageTs(req.requestId, ts);
+  if (!ts) return;
+  await setHitlFormMessageTs(req.requestId, ts);
+  // A task that ended while this posted closed its prompts before this one had
+  // a message to update, so it is closed here instead, buttons and all.
+  const posted = await getHitlForm(req.requestId);
+  const task = await getAgentTaskByToken(token);
+  if (
+    posted &&
+    (posted.status !== "awaiting" || !task || isTerminalTaskStatus(task.status))
+  ) {
+    if (posted.status === "awaiting") await cancelHitlForm(req.requestId);
+    await markHitlPromptResolved(posted, TASK_ENDED_NOTE);
+  }
 }
 
 /**

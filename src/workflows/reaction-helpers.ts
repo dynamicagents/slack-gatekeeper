@@ -1,4 +1,9 @@
 import { env } from "cloudflare:workers";
+import {
+  getAgentTaskByToken,
+  resumeFromInput,
+  suspendForInput
+} from "@/db/models/agent-tasks";
 
 /**
  * Shared vocabulary for the 🛑 reaction: its emoji, the event that wakes the
@@ -9,8 +14,8 @@ import { env } from "cloudflare:workers";
  * Split out to keep the import graph acyclic. `reaction.ts` needs the
  * cancellation machinery in `message-helpers.ts` (and through it `dispatch.ts`),
  * while `dispatch.ts` needs to signal the workflow when a parked task resumes —
- * so the constants and the signal live here, importing nothing of ours, and all
- * three depend on this rather than on each other.
+ * so the constants and the signal live here, importing nothing of ours but the
+ * task ledger, and all three depend on this rather than on each other.
  */
 
 /**
@@ -25,19 +30,26 @@ export const STOP_REACTION = "octagonal_sign";
 
 /**
  * Event `type` sent to the ReactionWorkflow whenever the task ledger reaches a
- * boundary it cares about: the fan-out drained, or a parked task resumed. Slack
- * event types only allow `[a-zA-Z0-9_-]` — no dots.
+ * boundary it cares about. Slack event types only allow `[a-zA-Z0-9_-]`, no dots.
  *
- * **The workflow's processing budget depends on this firing only at real leg
- * boundaries.** It measures a leg with its own `waitForEvent` timeout rather than
- * a stored timestamp, so a signal sent mid-leg would silently hand every agent
- * of the fan-out a fresh leg of its own budget. Both senders respect that today:
- * `collectIfEventDrained` signals
- * only once no non-terminal task remains (not when one agent of a fan-out
- * finishes), and the resume path signals exactly when a new leg starts. Anything
- * added later must hold to the same rule.
+ * Every signal ends the leg in progress: the workflow charges the time since it
+ * began to each task that worked through it, a parked one nothing, and reads
+ * the ledger again. A task parking, a message waking one, the fan-out draining
+ * all send one. What a signal adds is in {@link ReactionSync}. A lost one costs
+ * accuracy, never the task: the leg it would have ended runs to its timeout.
  */
 export const REACTION_SYNC_EVENT = "ledger_changed";
+
+/** What a signal to the ReactionWorkflow says: see {@link REACTION_SYNC_EVENT}. */
+export interface ReactionSync {
+  /** The task a person answered: its own budget starts again, and no other's. */
+  fresh?: string;
+  /**
+   * From the MessageWorkflow once it has recorded every task it will: until
+   * then, a fan-out with nothing open may still be routing, not drained.
+   */
+  routed?: boolean;
+}
 
 /**
  * Ceiling on how many times the ReactionWorkflow's budget loop may go round. A
@@ -56,33 +68,31 @@ export const REACTION_SYNC_EVENT = "ledger_changed";
  * is logged loudly and the workflow then gives up watching — the 🛑 comes off and
  * the 30-day task sweep still owns the rows.
  */
-export const MAX_LEGS = 100;
+export const MAX_LEGS = 101;
 
 /**
  * Ceiling on how many agents one message may wake. Enforced where the fan-out is
  * decided (`handleSlackEvent`), because `resolveTargets` returns every agent
  * attached to the channel and so bounds the width by configuration alone.
  *
- * Why it must be strictly under {@link MAX_LEGS}: the ReactionWorkflow stops each
+ * Why it must be two under {@link MAX_LEGS}: the ReactionWorkflow stops each
  * woken agent at its *own* deadline, and the only way it can do that is to wait
- * out one leg of its loop per distinct expiry — N agents on N different deadlines
- * spend N legs, plus one more leg to see the ledger drained and stop. Leaving a
- * leg of headroom is therefore what keeps the widest legal fan-out inside the
- * budget, and it is why the fan-out must be less than 100.
+ * out one leg of its loop per distinct expiry. N agents on N different deadlines
+ * spend N legs, plus the first, which ends at the delivery-retry grace, and one
+ * more to see the ledger drained and stop.
  *
- * The whole arithmetic, so the −1 is not read as more than it is: N expiry legs
- * plus one drained-observation leg is exactly what fits in {@link MAX_LEGS}, and
- * nothing beyond that is reserved. HITL draws on the same leg budget — roughly two
- * legs per ask/answer round-trip, one to park and one to resume — and no fixed
- * reserve could cover it, because a single turn may ask arbitrarily many questions.
- * So a max-width fan-out that also needs HITL can still run the loop out of legs;
- * so can one agent asking fifty questions, which was true before this guard
- * existed and is not changed by it. The guard bounds the dimension that
- * configuration alone decides, not the loop's total appetite — when the legs do run
- * out, the `console.error` at the cap is the tripwire and the 30-day task sweep
- * still owns the rows.
+ * The whole arithmetic, so the −2 is not read as more than it is: the grace leg,
+ * N expiry legs and the drained-observation leg are exactly what fits in
+ * {@link MAX_LEGS}, and nothing beyond that is reserved. Every other signal draws
+ * on the same leg budget (a task parking on a question, an answer, a message
+ * joining it), and no fixed reserve could cover them, because a single turn may
+ * ask arbitrarily many questions. So a max-width fan-out that also asks can still
+ * run the loop out of legs, and so can one agent asking fifty questions. The guard
+ * bounds the dimension that configuration alone decides, not the loop's total
+ * appetite: when the legs do run out, the `console.error` at the cap is the
+ * tripwire and the 30-day task sweep still owns the rows.
  */
-export const MAX_WOKEN_AGENTS = MAX_LEGS - 1;
+export const MAX_WOKEN_AGENTS = MAX_LEGS - 2;
 
 /** Deterministic ReactionWorkflow instance id derived from the Slack event id. */
 export function reactionInstanceId(eventId: string): string {
@@ -96,16 +106,54 @@ export function reactionInstanceId(eventId: string): string {
  * costs lateness, never correctness. Also throws once the instance has finished
  * (a reply landing after the task was canceled), which is expected and harmless.
  */
-export async function signalReactionSync(eventId: string): Promise<void> {
+export async function signalReactionSync(
+  eventId: string,
+  sync: ReactionSync = {}
+): Promise<void> {
   try {
     const instance = await env.REACTION_WORKFLOW.get(
       reactionInstanceId(eventId)
     );
-    await instance.sendEvent({ type: REACTION_SYNC_EVENT, payload: {} });
+    await instance.sendEvent({ type: REACTION_SYNC_EVENT, payload: sync });
   } catch (err) {
     console.warn("[reaction] sync signal failed (non-fatal)", {
       eventId,
       err: String(err)
     });
   }
+}
+
+/**
+ * Park a task's row on the person (`awaiting-input`), and end the budget's leg
+ * there. Without the signal the wait in progress would charge the task for the
+ * whole leg once it woke, the time it spent parked included. Returns whether
+ * the row parked.
+ */
+export async function parkTask(
+  token: string,
+  eventId: string
+): Promise<boolean> {
+  const parked = await suspendForInput(token);
+  if (parked) await signalReactionSync(eventId);
+  return parked;
+}
+
+/**
+ * Wake a task's row before something is sent onto it, so the turn's first
+ * callbacks find it working: a joined message, on the budget it had, or a
+ * person's answer (`answered`), which starts the task's own leg afresh, parked
+ * or not. Returns whether the row was parked, so a send the task does not take
+ * can park it again.
+ */
+export async function wakeTask(
+  token: string,
+  answered = false
+): Promise<boolean> {
+  const woke = await resumeFromInput(token);
+  const eventId =
+    woke ?? (answered ? (await getAgentTaskByToken(token))?.eventId : null);
+  if (eventId) {
+    await signalReactionSync(eventId, answered ? { fresh: token } : {});
+  }
+  return woke !== null;
 }

@@ -14,8 +14,14 @@ import {
   STOP_REACTION,
   reactionInstanceId
 } from "@/workflows/reaction";
-import { replyThreadTs } from "@/workflows/message-helpers";
-import { addReaction, getBotUserId, postReply } from "@/wrappers/slack";
+import { replyThreadTs, threadKeyOf } from "@/workflows/message-helpers";
+import { getOpenAgentTaskInThread } from "@/db/models/agent-tasks";
+import {
+  addReaction,
+  getBotUserId,
+  postReply,
+  removeReaction
+} from "@/wrappers/slack";
 import { resolveTargets } from "@/router/resolve";
 import type { ResolvedTarget } from "@/router/resolve";
 import type {
@@ -419,32 +425,94 @@ function isInstanceExistsError(err: unknown): boolean {
 }
 
 /**
+ * How starting a workflow instance for an event went: this delivery created
+ * it, a redelivery found it already there, or every attempt failed.
+ */
+type CreateOutcome = "created" | "duplicate" | "failed";
+
+/**
+ * The pauses before a failed create's second and third attempts. The whole
+ * ladder runs inside the event's `ctx.waitUntil`, which the runtime cancels 30
+ * seconds after the ack, and the notice for a create that never took has to
+ * fit in after it.
+ */
+const CREATE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+
+/**
  * Start one workflow instance for this event, keyed by `event_id` so a Slack
  * redelivery is deduped by the platform rather than by us. Never throws.
  *
- * Returns whether *this* delivery is the one that created the instance: `false`
- * both for a duplicate delivery and for a create that failed outright. That
- * boolean is how a caller tells a first delivery from a retry — see the fan-out
- * notice in `handleSlackEvent`, which is user-visible and so must be posted once.
+ * Slack is acked before this runs, so it never redelivers an event whose create
+ * failed: a create that fails is retried here, and `failed` means the event is
+ * lost unless the caller says so. The platform's own `internal error` is the
+ * failure seen: it lost a person's message once, silently. An instance that
+ * exists after a failed attempt is this delivery's own, so it counts as
+ * created.
+ *
+ * `created` is how a caller tells a first delivery from a retry: see the
+ * fan-out notice in `handleSlackEvent`, which is user-visible and so must be
+ * posted once.
  */
 async function triggerWorkflow(
   workflow: Workflow,
   params: MessageWorkflowParams | LifecycleWorkflowParams | CancelWorkflowParams
-): Promise<boolean> {
+): Promise<CreateOutcome> {
   const id = params.eventId;
-  try {
-    await workflow.create({ id, params });
-    return true;
-  } catch (err) {
-    if (isInstanceExistsError(err)) {
-      console.log("[gatekeeper] duplicate event — skipping", { eventId: id });
-      return false;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await workflow.create({ id, params });
+      return "created";
+    } catch (err) {
+      if (isInstanceExistsError(err)) {
+        if (attempt > 1) return "created";
+        console.log("[gatekeeper] duplicate event — skipping", { eventId: id });
+        return "duplicate";
+      }
+      const delay: number | undefined = CREATE_RETRY_DELAYS_MS[attempt - 1];
+      console.error("[gatekeeper] failed to create workflow instance", {
+        eventId: id,
+        attempt,
+        lastAttempt: delay === undefined,
+        err: String(err)
+      });
+      if (delay === undefined) return "failed";
+      await scheduler.wait(delay);
     }
-    console.error("[gatekeeper] failed to create workflow instance", {
-      eventId: id,
+  }
+}
+
+/**
+ * Say in the thread that a message never reached its agents, because its
+ * workflow could not be started, and take the 🛑 off it if it got one: nothing
+ * is working on it. Gatekeeper-branded, like every notice of its own.
+ * Best-effort: the `console.error` above is the record either way.
+ */
+async function noticeMessageLost(
+  params: ClassifiedMessageParams,
+  reacted: boolean
+): Promise<void> {
+  try {
+    await postReply(
+      params.channelId,
+      replyThreadTs(params),
+      "⚠️ This message didn't reach its agents: the gatekeeper couldn't start handling it. Please send it again.",
+      null,
+      null
+    );
+  } catch (err) {
+    console.error("[gatekeeper] failed to post the lost-message notice", {
+      eventId: params.eventId,
       err: String(err)
     });
-    return false;
+  }
+  if (!reacted) return;
+  try {
+    await removeReaction(params.channelId, params.ts, STOP_REACTION);
+  } catch (err) {
+    console.error("[gatekeeper] failed to remove the stop reaction", {
+      eventId: params.eventId,
+      err: String(err)
+    });
   }
 }
 
@@ -736,23 +804,60 @@ export async function handleSlackEvent(
             });
             return;
           }
+          // An agent with a task open in this thread takes the message as more
+          // input to that task: no 🛑 of its own, and no budget. Only a message
+          // that starts a task for some agent gets them. The workflow decides
+          // for good, and gives a join it finds refused the 🛑 itself.
+          // A lookup that fails reads as no task open: the message gets its 🛑
+          // rather than being lost before its workflow starts.
+          const threadKey = threadKeyOf(base);
+          const open = await Promise.all(
+            targets.map((t) =>
+              getOpenAgentTaskInThread(
+                t.agent.name,
+                base.channelId,
+                threadKey
+              ).catch((err: unknown) => {
+                console.error("[gatekeeper] open-task lookup failed", {
+                  eventId: base.eventId,
+                  agent: t.agent.name,
+                  err: String(err)
+                });
+                return null;
+              })
+            )
+          );
+          const opens = open.some((row) => !row);
           // One workflow instance per event handles every woken agent, local or
           // remote; it dispatches each by `agent.kind` and owns the single
           // collect-reaction signal for the event.
           const [, , messageCreate] = await Promise.allSettled([
-            addStopReaction(base),
-            triggerReactionWorkflow(env.REACTION_WORKFLOW, base),
-            triggerWorkflow(env.MESSAGE_WORKFLOW, { ...base, targets })
+            opens ? addStopReaction(base) : Promise.resolve(),
+            opens
+              ? triggerReactionWorkflow(env.REACTION_WORKFLOW, base)
+              : Promise.resolve(false),
+            triggerWorkflow(env.MESSAGE_WORKFLOW, {
+              ...base,
+              targets,
+              stopped: opens
+            })
           ]);
-          // The clamp notice is the only user-visible post on this path, so it
-          // waits for the dedupe anchor to speak: the MessageWorkflow's create is
-          // what decides whether this delivery is the one that woke these agents,
-          // and a Slack retry of the same `event_id` is told the instance already
-          // exists. Posting it where the clamp is decided instead repeated the
-          // warning in the thread on every redelivery of a fan-out that ran once.
-          const created =
-            messageCreate.status === "fulfilled" && messageCreate.value;
-          if (created && targets.length < resolved.length) {
+          const outcome: CreateOutcome =
+            messageCreate.status === "fulfilled"
+              ? messageCreate.value
+              : "failed";
+          if (outcome === "failed") {
+            await noticeMessageLost(base, opens);
+            return;
+          }
+          // The clamp notice is the only other user-visible post on this path,
+          // so it waits for the dedupe anchor to speak: the MessageWorkflow's
+          // create is what decides whether this delivery is the one that woke
+          // these agents, and a Slack retry of the same `event_id` is told the
+          // instance already exists. Posting it where the clamp is decided
+          // instead repeated the warning in the thread on every redelivery of a
+          // fan-out that ran once.
+          if (outcome === "created" && targets.length < resolved.length) {
             await postFanOutClampedNotice(resolved.length, base);
           }
         })()
