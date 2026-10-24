@@ -492,6 +492,30 @@ describe("reaction workflow", () => {
       });
     });
 
+    it("gives it both when the lookup fails, rather than dropping it", async () => {
+      const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");
+      const reactionCreate = spyWorkflow("REACTION_WORKFLOW");
+      const adds = captureAddReactions();
+      // The open-task lookup throws; the workflow decides for good.
+      await env.DB.prepare(
+        "ALTER TABLE agent_tasks RENAME TO agent_tasks_away"
+      ).run();
+      try {
+        expect((await post(threadReply("EvLookup"))).status).toBe(200);
+      } finally {
+        await env.DB.prepare(
+          "ALTER TABLE agent_tasks_away RENAME TO agent_tasks"
+        ).run();
+      }
+
+      expect(adds).toHaveLength(1);
+      expect(reactionCreate).toHaveBeenCalledOnce();
+      expect(messageCreate).toHaveBeenCalledWith({
+        id: "EvLookup",
+        params: expect.objectContaining({ stopped: true })
+      });
+    });
+
     it("gives it both once that task has ended, since it starts one", async () => {
       await completeAgentTask("tok-open");
       const messageCreate = spyWorkflow("MESSAGE_WORKFLOW");

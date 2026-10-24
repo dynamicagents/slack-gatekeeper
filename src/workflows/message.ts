@@ -150,13 +150,16 @@ async function joinTask(
   step: WorkflowStep,
   p: MessageWorkflowParams,
   plan: AgentPlan,
-  row: Pick<AgentTaskRow, "token" | "taskId" | "eventId">
+  row: Pick<AgentTaskRow, "token" | "taskId" | "eventId">,
+  round: "" | "again:"
 ): Promise<JoinOutcome | "undelivered"> {
   const name = plan.agent.name;
-  const woke = await step.do(`wake:${name}`, () => wakeTask(row.token));
+  const woke = await step.do(`${round}wake:${name}`, () => wakeTask(row.token));
   let outcome: JoinOutcome | "undelivered";
   try {
-    outcome = await step.do(`join:${name}`, () => joinMessage(p, plan, row));
+    outcome = await step.do(`${round}join:${name}`, () =>
+      joinMessage(p, plan, row)
+    );
   } catch (err) {
     outcome = "undelivered";
     await handleUnreachable(
@@ -168,9 +171,50 @@ async function joinTask(
     );
   }
   if (outcome !== "joined" && woke) {
-    await step.do(`repark:${name}`, () => parkTask(row.token, row.eventId));
+    await step.do(`${round}repark:${name}`, () =>
+      parkTask(row.token, row.eventId)
+    );
   }
   return outcome;
+}
+
+/** An agent that starts a task with the message, and whether beside another. */
+interface Opening {
+  plan: AgentPlan;
+  /** Its open task refused the message, so this one shares the thread. */
+  beside: boolean;
+}
+
+/**
+ * Record a row for each task the message starts, in one step, before any
+ * dispatch, so a fast terminal callback can't observe an incomplete sibling
+ * set and drain the 🛑 early. Deterministic tokens keep this idempotent under
+ * step retries. Answers each one's token, or `null` for one whose thread an
+ * open task of the same agent took first (see `createAgentTask`).
+ */
+async function recordTasks(
+  p: MessageWorkflowParams,
+  threadTs: string | null,
+  opening: Opening[]
+): Promise<(string | null)[]> {
+  const out: (string | null)[] = [];
+  for (const { plan, beside } of opening) {
+    const token = await buildDispatchId(p.eventId, plan.agent);
+    const taken = await createAgentTask({
+      token,
+      taskId: null,
+      agentName: plan.agent.name,
+      channelId: p.channelId,
+      messageTs: p.ts,
+      replyThreadTs: threadTs,
+      eventId: p.eventId,
+      // Who an approval this task later raises should mention, if anyone.
+      startedBy: startedBy(p),
+      ...(beside ? { openedBeside: true } : {})
+    });
+    out.push(taken ? token : null);
+  }
+  return out;
 }
 
 /**
@@ -193,10 +237,11 @@ async function joinTask(
  * `DEFAULT_TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
  *
  * Steps: `resolve` → `route` → per joining agent `wake` + `join` (+ `repark`)
- * → (`ensure-reaction` when the handler gave no 🛑) → one `record-tasks`
- * (every row up front, before any dispatch) → per opening agent
- * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) →
- * `collect-reaction`.
+ * → `record-tasks` (every row up front, before any dispatch) → for an agent
+ * whose thread another message took first, `route:again`, its join, and
+ * `record-tasks:again` → (`ensure-reaction` when the handler gave no 🛑) → per
+ * opening agent `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`)
+ * → `collect-reaction`.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -212,12 +257,48 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       // Joins go first, all of them, so a join refused still opens its task
       // before any dispatch: every row is recorded up front either way.
       const open = await step.do("route", () => openTasksFor(p, resolved));
-      const plans: AgentPlan[] = [];
+      const opening: Opening[] = [];
       for (const [i, plan] of resolved.entries()) {
         const row = open[i];
-        if (!row || (await joinTask(step, p, plan, row)) === "refused") {
-          plans.push(plan);
+        if (!row) opening.push({ plan, beside: false });
+        else if ((await joinTask(step, p, plan, row, "")) === "refused") {
+          opening.push({ plan, beside: true });
         }
+      }
+      const recorded = await step.do("record-tasks", () =>
+        recordTasks(p, threadTs, opening)
+      );
+
+      // A message that lost its thread to another a moment ahead of it, whose
+      // task now holds it, joins that task instead. One that cannot (the task
+      // refuses it, or never gets its id in time) starts its own beside it.
+      const lost = opening.filter((_, i) => !recorded[i]).map((o) => o.plan);
+      const beside: Opening[] = [];
+      if (lost.length > 0) {
+        const again = await step.do("route:again", () => openTasksFor(p, lost));
+        for (const [i, plan] of lost.entries()) {
+          const row = again[i];
+          if (
+            !row ||
+            (await joinTask(step, p, plan, row, "again:")) === "refused"
+          ) {
+            beside.push({ plan, beside: true });
+          }
+        }
+      }
+      const recordedBeside =
+        beside.length > 0
+          ? await step.do("record-tasks:again", () =>
+              recordTasks(p, threadTs, beside)
+            )
+          : [];
+
+      const plans: AgentPlan[] = [];
+      const tokens: string[] = [];
+      for (const [i, token] of [...recorded, ...recordedBeside].entries()) {
+        if (!token) continue;
+        plans.push([...opening, ...beside][i].plan);
+        tokens.push(token);
       }
 
       // The handler gave the 🛑 on what it saw a moment earlier: a task can
@@ -225,7 +306,7 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       if (plans.length === 0) {
         if (p.stopped) {
           await step.do("collect-reaction", () =>
-            collectIfEventDrained(p.eventId)
+            collectIfEventDrained(p.eventId, { routed: true })
           );
         }
         return;
@@ -242,29 +323,6 @@ export class MessageWorkflow extends WorkflowEntrypoint<
           });
         }
       }
-
-      // Record every fan-out row up front (before any dispatch) so a fast
-      // terminal callback can't observe an incomplete sibling set and drain the
-      // 🛑 early. Deterministic tokens keep this idempotent under step retries.
-      const tokens = await step.do("record-tasks", async () => {
-        const out: string[] = [];
-        for (const plan of plans) {
-          const token = await buildDispatchId(p.eventId, plan.agent);
-          await createAgentTask({
-            token,
-            taskId: null,
-            agentName: plan.agent.name,
-            channelId: p.channelId,
-            messageTs: p.ts,
-            replyThreadTs: threadTs,
-            eventId: p.eventId,
-            // Who an approval this task later raises should mention, if anyone.
-            startedBy: startedBy(p)
-          });
-          out.push(token);
-        }
-        return out;
-      });
 
       const results = await Promise.allSettled(
         plans.map((plan, i) => runAgentTask(step, p, plan, threadTs, tokens[i]))
@@ -301,7 +359,9 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       // Clear the 🛑 only when no agent is still working. A pending accepted task
       // keeps it alive until its push-notification delivery (or the
       // ReactionWorkflow backstop) drains the fan-out and removes it.
-      await step.do("collect-reaction", () => collectIfEventDrained(p.eventId));
+      await step.do("collect-reaction", () =>
+        collectIfEventDrained(p.eventId, { routed: true })
+      );
     } catch (err) {
       console.error("[message] workflow run failed", {
         instanceId: event.instanceId,

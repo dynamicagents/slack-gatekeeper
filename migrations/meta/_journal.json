@@ -169,6 +169,13 @@
       "when": 1792709845823,
       "tag": "0023_agent_tasks_started_by",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1792824499694,
+      "tag": "0024_agent_tasks_open_thread",
+      "breakpoints": true
     }
   ]
 }

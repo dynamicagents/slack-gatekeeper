@@ -796,6 +796,36 @@ describe("MessageWorkflow — remote custom agents", () => {
     }
   });
 
+  it("joins the task that took its thread a moment ahead of it, rather than starting a second", async () => {
+    const remoteMessages: unknown[] = [];
+    stubFetch({ remoteMessages });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      // The race, held still: this message's route ran before the first one's
+      // row was there, so it found the thread empty.
+      await introspector.modifyAll(async (m) => {
+        await m.mockStepResult({ name: "route" }, [null]);
+      });
+
+      const reply = makeChannelMessageRequest(REMOTE_CHANNEL, first.ts);
+      await trigger(reply.body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      // Its insert lost to the open task, so it was sent onto that one.
+      expect(
+        await getAgentTaskByToken(await tokenFor(reply.eventId))
+      ).toBeNull();
+      expect(remoteMessages).toHaveLength(2);
+      expect(JSON.stringify(remoteMessages[1])).toContain(
+        '"taskId":"task-remote-1"'
+      );
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
   it("collect-reaction fires when all dispatches end in non-accepted (error_reply)", async () => {
     const slackReactions: ReactionCall[] = [];
     stubFetch({ remoteMode: "contract_violation", slackReactions });

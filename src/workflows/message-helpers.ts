@@ -198,8 +198,12 @@ export function threadKeyOf(
   return p.threadTs || p.ts;
 }
 
-/** How long a message waits for a task in its thread to finish being accepted. */
-const ACCEPT_WAIT_MS = 15_000;
+/**
+ * How long a message waits for a task in its thread to finish being accepted:
+ * past one dispatch attempt's accept timeout (`ACCEPT_TIMEOUT_MS` in
+ * `src/a2a/client.ts`), with room to spare.
+ */
+const ACCEPT_WAIT_MS = 45_000;
 const ACCEPT_POLL_MS = 500;
 
 /**
@@ -328,21 +332,23 @@ function payloadFor(
  * point a task leaves the pending set: a terminal delivery, and the end of the
  * MessageWorkflow (after non-accepts/unreachables have been unrecorded).
  *
- * Race note: this is only reliable because every fan-out row is recorded up front
- * (before any dispatch), so a fast terminal callback can never observe an
- * incomplete sibling set and drain early.
+ * Race note: every fan-out row is recorded before any dispatch, so a fast
+ * terminal callback can never observe an incomplete sibling set of dispatched
+ * tasks. A row a refused join opens is recorded later than its siblings', so the
+ * MessageWorkflow says when it is done (`routed`), and until then, or until it
+ * stops running, the ReactionWorkflow does not read nothing open as drained.
  *
- * The drain check is also what keeps the signal honest. The ReactionWorkflow
- * measures its processing budget with its own timer, so it must only ever be
- * woken at a real leg boundary — signalling on *every* completion would hand a
- * slow sibling a fresh leg of its own budget each time a fast one finished.
- * Hence the guard: no
- * signal until nothing is left.
+ * The drain check keeps the signal to the one the workflow needs: every signal
+ * ends a leg, and one per completion would end a leg each time a fast sibling
+ * finished.
  */
-export async function collectIfEventDrained(eventId: string): Promise<void> {
+export async function collectIfEventDrained(
+  eventId: string,
+  { routed = false }: { routed?: boolean } = {}
+): Promise<void> {
   const pending = await getPendingAgentTasksByEventId(eventId);
   if (pending.length === 0) {
-    await signalReactionSync(eventId);
+    await signalReactionSync(eventId, routed ? { routed } : {});
   }
 }
 

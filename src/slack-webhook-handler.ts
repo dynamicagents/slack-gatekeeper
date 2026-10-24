@@ -808,10 +808,23 @@ export async function handleSlackEvent(
           // input to that task: no 🛑 of its own, and no budget. Only a message
           // that starts a task for some agent gets them. The workflow decides
           // for good, and gives a join it finds refused the 🛑 itself.
+          // A lookup that fails reads as no task open: the message gets its 🛑
+          // rather than being lost before its workflow starts.
           const threadKey = threadKeyOf(base);
           const open = await Promise.all(
             targets.map((t) =>
-              getOpenAgentTaskInThread(t.agent.name, base.channelId, threadKey)
+              getOpenAgentTaskInThread(
+                t.agent.name,
+                base.channelId,
+                threadKey
+              ).catch((err: unknown) => {
+                console.error("[gatekeeper] open-task lookup failed", {
+                  eventId: base.eventId,
+                  agent: t.agent.name,
+                  err: String(err)
+                });
+                return null;
+              })
             )
           );
           const opens = open.some((row) => !row);

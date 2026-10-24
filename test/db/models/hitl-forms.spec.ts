@@ -187,7 +187,30 @@ describe("hitl-forms model", () => {
       ).not.toBeNull();
     });
 
-    it("leaves the answer when the task is no longer parked", async () => {
+    it("reopens one asked while its task works, which is still open", async () => {
+      // A task asks as it works, so the row is pending, not parked, when the
+      // answer that never reached the agent comes back.
+      await createAgentTask({
+        token: "tok-work",
+        taskId: "task-1",
+        agentName: "remoteagent",
+        channelId: "C1",
+        messageTs: "1700.1",
+        replyThreadTs: "1700.1",
+        eventId: "Ev-work",
+        startedBy: "U1"
+      });
+      await createHitlForm(input("req-work", { token: "tok-work" }));
+      await claimHitlAnswer("req-work", {
+        answeredBy: "U1",
+        answers: { q1: { optionIds: ["a"] } }
+      });
+
+      expect(await reopenHitlForm("req-work")).toBe(true);
+      expect((await getHitlForm("req-work"))?.status).toBe("awaiting");
+    });
+
+    it("leaves the answer when the task has ended", async () => {
       await parkedTask("tok-done");
       await createHitlForm(input("req-over", { token: "tok-done" }));
       await claimHitlAnswer("req-over", {

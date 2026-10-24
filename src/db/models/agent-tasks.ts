@@ -57,18 +57,27 @@ export interface CreateAgentTaskInput {
    * stand-in.
    */
   startedBy: string;
+  /**
+   * Started beside a task its agent has open in the thread, because that one
+   * refused the message: exempt from the one-open-task-per-thread index.
+   */
+  openedBeside?: boolean;
 }
 
 /**
  * Record a pending agent task at dispatch time. Idempotent on the `token` PK so
  * the workflow's `record-task` step can retry (or a duplicate dispatch land)
  * without erroring or clobbering an already-recorded row.
+ *
+ * Returns whether the row is there: `false` when another task of the same
+ * agent already holds the thread (the open-thread index in `schema.ts`), so
+ * the caller joins that one instead.
  */
 export async function createAgentTask(
   input: CreateAgentTaskInput
-): Promise<void> {
+): Promise<boolean> {
   const db = getDb();
-  await db
+  const inserted = await db
     .insert(schema.agentTasks)
     .values({
       token: input.token,
@@ -78,9 +87,14 @@ export async function createAgentTask(
       messageTs: input.messageTs,
       replyThreadTs: input.replyThreadTs,
       eventId: input.eventId,
-      startedBy: input.startedBy
+      startedBy: input.startedBy,
+      openedBeside: input.openedBeside ? 1 : 0
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ token: schema.agentTasks.token });
+  return (
+    inserted.length > 0 || (await getAgentTaskByToken(input.token)) !== null
+  );
 }
 
 /**

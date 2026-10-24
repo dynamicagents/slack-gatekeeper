@@ -9,6 +9,7 @@ import {
   deadlineLabel,
   reactionInstanceId
 } from "@/workflows/reaction";
+import type { ReactionSync } from "@/workflows/reaction-helpers";
 import type { ReactionWorkflowParams } from "@/slack/types";
 import { registerAgent } from "@/db/models/agents";
 import {
@@ -32,13 +33,13 @@ useStorageReset();
 const ENDPOINT = "https://agent.example.com/a2a";
 
 /**
- * The loop's wait step for leg 0. Every backstop test has to time out *both* this
- * and the phase-1 grace wait: the grace only gets the workflow as far as
- * surfacing rejected deliveries, and the budget wait is what decides the task
- * timed out.
+ * The first leg's wait, which the delivery-retry grace cuts short, and the next
+ * one's, which serves the rest of the budget. Every backstop test has to time
+ * out both: the grace only gets the workflow as far as surfacing rejected
+ * deliveries, and the budget wait is what decides the task timed out.
  */
-const GRACE_STEP = "await collect signal";
-const LEG0_STEP = "sync:0";
+const GRACE_STEP = "sync:0";
+const BUDGET_STEP = "sync:1";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -273,7 +274,7 @@ describe("ReactionWorkflow", () => {
       // wait and the budget wait time out and the reaction must still be removed.
       await introspector.modifyAll(async (m) => {
         await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
+        await m.forceEventTimeout({ name: BUDGET_STEP });
       });
 
       const p = makeParams();
@@ -370,7 +371,7 @@ describe("ReactionWorkflow", () => {
 
       await introspector.modifyAll(async (m) => {
         await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
+        await m.forceEventTimeout({ name: BUDGET_STEP });
       });
 
       await env.REACTION_WORKFLOW.create({
@@ -411,7 +412,7 @@ describe("ReactionWorkflow", () => {
 
       await introspector.modifyAll(async (m) => {
         await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
+        await m.forceEventTimeout({ name: BUDGET_STEP });
       });
 
       await env.REACTION_WORKFLOW.create({
@@ -442,12 +443,12 @@ describe("ReactionWorkflow", () => {
       await seedPendingTask(p.eventId, short, undefined, 30 * 60);
       await seedPendingTask(p.eventId, long, undefined, 2 * 60 * 60);
 
-      // A forced timeout fires per step name, so the second leg needs its own:
-      // the short agent expires in leg 0 and the long one in leg 1.
+      // A forced timeout fires per step name, so each leg needs its own: the
+      // short agent expires in leg 1 and the long one in leg 2.
       await introspector.modifyAll(async (m) => {
         await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
-        await m.forceEventTimeout({ name: "sync:1" });
+        await m.forceEventTimeout({ name: BUDGET_STEP });
+        await m.forceEventTimeout({ name: "sync:2" });
       });
 
       await env.REACTION_WORKFLOW.create({
@@ -480,10 +481,10 @@ describe("ReactionWorkflow", () => {
       await seedPendingTask(p.eventId, short, undefined, 30 * 60);
       await seedPendingTask(p.eventId, long, undefined, 2 * 60 * 60);
 
-      // Only leg 0 times out, so the long agent's own wait is left hanging.
+      // Only legs 0 and 1 time out, so the long agent's own wait is left hanging.
       await introspector.modifyAll(async (m) => {
         await m.forceEventTimeout({ name: GRACE_STEP });
-        await m.forceEventTimeout({ name: LEG0_STEP });
+        await m.forceEventTimeout({ name: BUDGET_STEP });
       });
 
       await env.REACTION_WORKFLOW.create({
@@ -491,11 +492,11 @@ describe("ReactionWorkflow", () => {
         params: p
       });
       const [instance] = await introspector.get();
-      await instance.waitForStepResult({ name: "cancel:0" });
+      await instance.waitForStepResult({ name: "cancel:1" });
       // The next leg still has work to do — which is the whole point: a shared
       // budget would have stopped both here.
       expect(
-        await instance.waitForStepResult({ name: "evaluate:1" })
+        await instance.waitForStepResult({ name: "evaluate:2" })
       ).toMatchObject({ state: "working" });
 
       expect((await getAgentTaskByToken(short))?.status).toBe("canceled");
@@ -546,68 +547,161 @@ describe("ReactionWorkflow", () => {
 });
 
 /**
- * What a wake does to the budgets, observed through which tasks the next forced
- * timeout stops. Two tasks on the same hour: `worker` works through leg 0 while
- * `asker` is parked on a prompt. Mid-leg, `asker` goes back to work and the loop
- * is woken, 50 minutes into the leg.
+ * What a signal does to the budgets, observed through which tasks the next
+ * forced timeout stops. The times the loop reads are mocked, so the legs are
+ * the spec's own: the grace leg runs its six minutes, and a signal lands fifty
+ * minutes into the next.
  */
 describe("ReactionWorkflow, woken mid-leg", () => {
-  const LEG_START = 1_000_000;
+  // Never 0: the introspector takes a falsy mock for none.
+  const T0 = 1_000_000;
+  const GRACE_MS = 6 * 60 * 1000;
   const WORKED_MS = 50 * 60 * 1000;
 
-  async function wakeMidLeg(sync: { refresh: boolean }) {
-    const captured = captureWithCancellableAgent();
+  /**
+   * Two tasks on the hour. `first` works throughout; `second` is parked until
+   * the signal when `parked`. Leg 1 ends on `sync`, and leg 2's timeout is
+   * forced, so `cancel:2` stops whichever has run out.
+   */
+  async function wakeMidLeg(
+    sync: (first: string) => ReactionSync,
+    opts: { parked: boolean }
+  ) {
+    captureWithCancellableAgent();
     const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
     const p = makeParams();
-    const worker = `wtok-${p.eventId}`.toLowerCase();
-    const asker = `atok-${p.eventId}`.toLowerCase();
-    await seedPendingTask(p.eventId, worker, undefined, 3600);
-    await seedPendingTask(p.eventId, asker, undefined, 3600);
-    expect(await suspendForInput(asker)).toBe(true);
+    const first = `wtok-${p.eventId}`.toLowerCase();
+    const second = `atok-${p.eventId}`.toLowerCase();
+    await seedPendingTask(p.eventId, first, undefined, 3600);
+    await seedPendingTask(p.eventId, second, undefined, 3600);
+    if (opts.parked) expect(await suspendForInput(second)).toBe(true);
 
     await introspector.modifyAll(async (m) => {
-      await m.forceEventTimeout({ name: GRACE_STEP });
-      // Never 0: the introspector takes a falsy mock for none.
-      await m.mockStepResult({ name: "leg-start:0" }, LEG_START);
-      await m.mockStepResult({ name: "woke:0" }, LEG_START + WORKED_MS);
-      await m.forceEventTimeout({ name: "sync:1" });
+      await m.mockStepResult({ name: "started" }, T0);
+      await m.mockStepResult({ name: "leg-start:0" }, T0);
+      await m.forceEventTimeout({ name: "sync:0" });
+      await m.mockStepResult({ name: "leg-start:1" }, T0 + GRACE_MS);
+      await m.mockStepResult({ name: "woke:1" }, T0 + GRACE_MS + WORKED_MS);
+      await m.forceEventTimeout({ name: "sync:2" });
     });
     await env.REACTION_WORKFLOW.create({
       id: reactionInstanceId(p.eventId),
       params: p
     });
     const [instance] = await introspector.get();
-    await instance.waitForStepResult({ name: "leg-start:0" });
+    await instance.waitForStepResult({ name: "leg-start:1" });
 
-    expect(await resumeFromInput(asker)).toBe(p.eventId);
+    if (opts.parked) expect(await resumeFromInput(second)).toBe(p.eventId);
     const live = await env.REACTION_WORKFLOW.get(reactionInstanceId(p.eventId));
-    await live.sendEvent({ type: REACTION_SYNC_EVENT, payload: sync });
-    await instance.waitForStepResult({ name: "cancel:1" });
-    return { captured, introspector, worker, asker };
+    await live.sendEvent({ type: REACTION_SYNC_EVENT, payload: sync(first) });
+    await instance.waitForStepResult({ name: "cancel:2" });
+    return { introspector, first, second };
   }
 
-  it("charges only the task that worked, when nobody answered", async () => {
-    const { introspector, worker, asker } = await wakeMidLeg({
-      refresh: false
+  it("charges only the task that worked, when a parked one wakes", async () => {
+    const { introspector, first, second } = await wakeMidLeg(() => ({}), {
+      parked: true
     });
     try {
-      // `worker` had ten minutes left, so it is the one stopped; `asker` spent
+      // `first` had four minutes left, so it is the one stopped; `second` spent
       // nothing while parked and carries on with what it had.
-      expect((await getAgentTaskByToken(worker))?.status).toBe("canceled");
-      expect((await getAgentTaskByToken(asker))?.status).toBe("pending");
+      expect((await getAgentTaskByToken(first))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(second))?.status).toBe("pending");
     } finally {
       await introspector.dispose();
     }
   });
 
-  it("gives every task a fresh leg when a person answered", async () => {
-    const { introspector, worker, asker } = await wakeMidLeg({
-      refresh: true
-    });
+  it("starts a fresh leg for the task a person answered, and no other", async () => {
+    const { introspector, first, second } = await wakeMidLeg(
+      (first) => ({ fresh: first }),
+      { parked: false }
+    );
     try {
-      // Both start the hour again, so the next timeout spends both.
-      expect((await getAgentTaskByToken(worker))?.status).toBe("canceled");
-      expect((await getAgentTaskByToken(asker))?.status).toBe("canceled");
+      // Both worked the 56 minutes; only `first`, answered, starts the hour
+      // again, so `second` is the one stopped.
+      expect((await getAgentTaskByToken(second))?.status).toBe("canceled");
+      expect((await getAgentTaskByToken(first))?.status).toBe("pending");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+});
+
+describe("ReactionWorkflow, signals before the grace", () => {
+  it("still reports a rejected delivery at the grace when a sibling parked first", async () => {
+    const { posts } = captureReactionsAndPosts();
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      const broken = `btok-${p.eventId}`.toLowerCase();
+      const asker = `qtok-${p.eventId}`.toLowerCase();
+      await seedPendingTask(
+        p.eventId,
+        broken,
+        "the callback signature expired"
+      );
+      await seedPendingTask(p.eventId, asker);
+      await introspector.modifyAll(async (m) => {
+        await m.forceEventTimeout({ name: "sync:1" });
+      });
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      await instance.waitForStepResult({ name: "leg-start:0" });
+
+      // The sibling asks a minute in and parks, which ends the first leg early.
+      expect(await suspendForInput(asker)).toBe(true);
+      const live = await env.REACTION_WORKFLOW.get(
+        reactionInstanceId(p.eventId)
+      );
+      await live.sendEvent({ type: REACTION_SYNC_EVENT, payload: {} });
+
+      await instance.waitForStepResult({ name: "surface-rejected-deliveries" });
+      expect(posts.map((x) => x.text).join("\n")).toContain(broken);
+    } finally {
+      await introspector.dispose();
+    }
+  });
+});
+
+describe("ReactionWorkflow, while the message still routes", () => {
+  it("does not read nothing open as drained until the MessageWorkflow is done", async () => {
+    const { reactions } = captureReactionsAndPosts();
+    let running = true;
+    vi.spyOn(env.MESSAGE_WORKFLOW, "get").mockResolvedValue({
+      status: async () => ({ status: running ? "running" : "complete" })
+    } as unknown as WorkflowInstance);
+    const introspector = await introspectWorkflow(env.REACTION_WORKFLOW);
+    try {
+      const p = makeParams();
+      await env.REACTION_WORKFLOW.create({
+        id: reactionInstanceId(p.eventId),
+        params: p
+      });
+      const [instance] = await introspector.get();
+      expect(
+        await instance.waitForStepResult({ name: "evaluate:0" })
+      ).toMatchObject({ state: "routing" });
+
+      // A join refused late opens its task, and the workflow says it is done.
+      const token = `rtok-${p.eventId}`.toLowerCase();
+      await seedPendingTask(p.eventId, token);
+      running = false;
+      const live = await env.REACTION_WORKFLOW.get(
+        reactionInstanceId(p.eventId)
+      );
+      await live.sendEvent({
+        type: REACTION_SYNC_EVENT,
+        payload: { routed: true }
+      });
+
+      expect(
+        await instance.waitForStepResult({ name: "route-check:0" })
+      ).toMatchObject({ state: "working" });
+      expect(reactions).toHaveLength(0);
     } finally {
       await introspector.dispose();
     }

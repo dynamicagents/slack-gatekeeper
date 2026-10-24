@@ -13,10 +13,9 @@ import { getAgent, type AgentRow } from "@/db/models/agents";
 import { getWorkspaceByAdminChannel } from "@/db/models/workspaces";
 import {
   getAgentTaskByToken,
-  resumeFromInput,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
-import { signalReactionSync } from "@/workflows/reaction-helpers";
+import { parkTask, wakeTask } from "@/workflows/reaction-helpers";
 import type { HitlAnswer } from "@dynamicagents/g2a-protocol";
 import type { HitlFormRow } from "@/db/models/hitl-forms";
 import { buildHitlResponseParts, buildHitlTimeoutParts } from "@/a2a/hitl";
@@ -567,29 +566,14 @@ function continuationFailureDetail(
 }
 
 /**
- * An answer was taken: un-park the task row if it was parked, and start a fresh
- * processing leg either way, because the workflow measures legs with its own
- * timer rather than a stored timestamp. A task holds several questions, so an
- * answer can land while it works on as much as while it waits; both are the
- * person's turn, and both start a leg. Without the nudge a parked task would
- * sit on the parked wait (the full HITL TTL) instead of the agent's hour.
- */
-async function markResumed(token: string): Promise<void> {
-  const eventId =
-    (await resumeFromInput(token)) ??
-    (await getAgentTaskByToken(token))?.eventId;
-  if (eventId) await signalReactionSync(eventId);
-}
-
-/**
  * Continue a task parked on a human-in-the-loop prompt. Calls the agent the way
  * {@link dispatchToAgent} does but *continues* an existing task rather than
  * starting one: the message carries the paused `taskId` + `contextId` +
  * `referenceTaskIds` (A2A multi-turn), and the push config reuses the original
- * `token` so continued callbacks land on the same `agent_tasks` row. On a
- * successful accept the row is un-parked (`resumeFromInput`) so the resumed
- * turn's callbacks are honored again and `"resumed"` is returned; any failure
- * returns `"failed"` so the caller can tell the user the task did not continue.
+ * `token` so continued callbacks land on the same `agent_tasks` row. An accept
+ * returns `"resumed"`; any failure returns `"failed"` so the caller can tell
+ * the user the task did not continue. The row is the caller's to wake before
+ * this and park again after a failure (`wakeTask`, `parkTask`).
  * Shared by the human-answer path ({@link resumeAgentTask}) and the TTL-timeout
  * path ({@link timeoutAgentTask}); the `messageId` is deterministic so a retried
  * continuation dedupes at the agent.
@@ -663,10 +647,7 @@ async function sendTaskContinuation(
     message,
     remotePushNotificationConfig(issuer, row.token)
   );
-  if (accept.kind === "accepted") {
-    await markResumed(row.token);
-    return { kind: "resumed" };
-  }
+  if (accept.kind === "accepted") return { kind: "resumed" };
   console.error("[hitl] continuation: agent did not accept", {
     agent: agent.name,
     requestId: row.requestId,
@@ -725,7 +706,25 @@ export async function resumeAgentTask(
     ...submission
   });
   const messageId = `${row.token}:r:${row.requestId}`;
+  // Woken before it goes, as a join is, so the answer's turn finds the row
+  // working, and its own leg starts afresh. Parked again if it is not taken.
+  const woke = await wakeTask(row.token, true);
+  const outcome = await sendAnswer(row, parts, messageId);
+  if (outcome !== "resumed" && woke) await parkAgain(row.token);
+  return outcome;
+}
 
+/** Park a row a send woke again, the send having not been taken. */
+async function parkAgain(token: string): Promise<void> {
+  const task = await getAgentTaskByToken(token);
+  if (task) await parkTask(token, task.eventId);
+}
+
+async function sendAnswer(
+  row: HitlFormRow,
+  parts: Message["parts"],
+  messageId: string
+): Promise<ResumeOutcome> {
   for (let attempt = 1; ; attempt++) {
     let outcome: ContinuationOutcome;
     try {
@@ -760,11 +759,13 @@ export async function resumeAgentTask(
  * the agent is down and can fix it — the expiry note alone wouldn't reveal that.
  */
 export async function timeoutAgentTask(row: HitlFormRow): Promise<void> {
+  const woke = await wakeTask(row.token);
   const outcome = await sendTaskContinuation(row, {
     parts: buildHitlTimeoutParts(row.requestId),
     messageId: `${row.token}:t:${row.requestId}`
   });
   if (outcome.kind === "failed") {
+    if (woke) await parkAgain(row.token);
     await notifyHitlContinuationFailed(row, outcome.detail);
   }
 }

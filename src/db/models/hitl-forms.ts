@@ -154,18 +154,20 @@ export async function claimHitlAnswer(
  * Undo a claim whose answer never reached the agent, so the question can be
  * answered again. Returns whether the prompt is open again.
  *
- * Only while the task is still parked on it. A 🛑 or a final status that lands
- * while the answer is being sent closes the task's prompts, but only the
- * `awaiting` ones — this row was `answered` then, so it was skipped. Re-opening
- * it afterwards would bring back a live prompt on a task that is over, which is
- * exactly what closing prompts on a final status exists to prevent.
+ * Only while the task is still open, parked on it or working beside it: a
+ * task asks as it works, so a prompt is answered on either. A 🛑 or a final
+ * status that lands while the answer is being sent closes the task's prompts,
+ * but only the `awaiting` ones (this row was `answered` then, so it was
+ * skipped). Re-opening it afterwards would bring back a live prompt on a task
+ * that is over, which is exactly what closing prompts on a final status exists
+ * to prevent.
  */
 export async function reopenHitlForm(requestId: string): Promise<boolean> {
   const db = getDb();
-  const parked = db
+  const open = db
     .select({ token: schema.agentTasks.token })
     .from(schema.agentTasks)
-    .where(eq(schema.agentTasks.status, "awaiting-input"));
+    .where(inArray(schema.agentTasks.status, ["pending", "awaiting-input"]));
   const rows = await db
     .update(schema.hitlForms)
     .set({
@@ -178,7 +180,7 @@ export async function reopenHitlForm(requestId: string): Promise<boolean> {
       and(
         eq(schema.hitlForms.requestId, requestId),
         eq(schema.hitlForms.status, "answered"),
-        inArray(schema.hitlForms.token, parked)
+        inArray(schema.hitlForms.token, open)
       )
     )
     .returning({ requestId: schema.hitlForms.requestId });

@@ -121,11 +121,15 @@ When nothing applies, the resolver returns an empty list and the gatekeeper stay
 A thread is a task's conversation. A message in a thread where a woken agent already has a
 task open joins that task as its next message, and gets no 🛑, row or deadline of its own:
 the opening message's 🛑 stops the task, and the task keeps its own deadline. Only an agent
-with no task open there, or one that refuses the join, gets a new task.
+with no task open there, or one that refuses the join, gets a new task. A unique index on
+open rows (`idx_agent_tasks_open_thread`) holds this when two messages arrive a moment
+apart: the second's row loses, and it joins the first's task.
 
 At the other end, one message wakes at most **99 agents** (`MAX_WOKEN_AGENTS`). The
 `ReactionWorkflow` stops each woken agent at its own deadline by spending a leg of its
-budget loop per distinct expiry, so the fan-out has to stay below that loop's 100-leg cap.
+budget loop per distinct expiry, besides the first leg, which ends at the delivery-retry
+grace, and the last, which sees the fan-out drained; so the fan-out has to stay two below
+that loop's 101-leg cap.
 A channel wide enough to exceed it is clamped where the fan-out is decided: the first 99 by
 name are woken, the rest are skipped, and the thread is told so.
 

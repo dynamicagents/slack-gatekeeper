@@ -1108,6 +1108,74 @@ describe("joinAgentTask (remote)", () => {
     expect(signals).toEqual([]);
   });
 
+  /** A form the task asked, answered: what `resumeAgentTask` sends. */
+  async function answerable(requestId: string): Promise<HitlFormRow> {
+    await createHitlForm({
+      requestId,
+      token: TOKEN,
+      taskId: TASK_ID,
+      contextId: "C1:1700.1",
+      agentName: "alpha",
+      channelId: "C1",
+      threadTs: "1700.1",
+      request: choiceForm(requestId),
+      deadlineAt: Math.floor(Date.now() / 1000) + 3600
+    });
+    return (await getHitlForm(requestId))!;
+  }
+
+  /** Record the row's status as each send reaches the agent. */
+  function statusAtSend(): string[] {
+    const seen: string[] = [];
+    const inner = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        if (request.method === "POST" && request.url.startsWith(ENDPOINT)) {
+          seen.push((await getAgentTaskByToken(TOKEN))?.status ?? "none");
+        }
+        return inner(input, init);
+      }
+    );
+    return seen;
+  }
+
+  it("wakes a parked task before its answer goes, on a fresh leg of its own", async () => {
+    const posts: RemotePost[] = [];
+    stubRemote(posts);
+    const seen = statusAtSend();
+    await suspendForInput(TOKEN);
+    const form = await answerable("req-wake");
+
+    expect(
+      await resumeAgentTask(form, {
+        answers: { q1: { optionIds: ["q1.o1"] } },
+        answeredBy: "U1"
+      })
+    ).toBe("resumed");
+    expect(seen).toEqual(["pending"]);
+    expect(signals).toEqual([
+      { type: REACTION_SYNC_EVENT, payload: { fresh: TOKEN } }
+    ]);
+  });
+
+  it("parks it again when its answer is refused", async () => {
+    const posts: RemotePost[] = [];
+    stubRemoteRpcError(-32004, posts);
+    await suspendForInput(TOKEN);
+    const form = await answerable("req-refused");
+
+    expect(
+      await resumeAgentTask(form, {
+        answers: { q1: { optionIds: ["q1.o1"] } },
+        answeredBy: "U1"
+      })
+    ).toBe("refused");
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+  });
+
   it("starts a fresh leg for an answer that lands while the task works", async () => {
     const posts: RemotePost[] = [];
     stubRemote(posts);
@@ -1133,7 +1201,7 @@ describe("joinAgentTask (remote)", () => {
     ).toBe("resumed");
     expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
     expect(signals).toEqual([
-      { type: REACTION_SYNC_EVENT, payload: { refresh: true } }
+      { type: REACTION_SYNC_EVENT, payload: { fresh: TOKEN } }
     ]);
   });
 });
