@@ -1,14 +1,16 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import type { MessageWorkflowParams } from "@/slack/types";
-import { buildDispatchId } from "@/a2a/dispatch";
+import { buildDispatchId, type JoinOutcome } from "@/a2a/dispatch";
 import { postReply } from "@/wrappers/slack";
 import {
   createAgentTask,
   updateAgentTaskTaskId,
   deleteAgentTask,
-  isCancelRequested
+  isCancelRequested,
+  type AgentTaskRow
 } from "@/db/models/agent-tasks";
+import { parkTask, wakeTask } from "@/workflows/reaction-helpers";
 import {
   type AgentPlan,
   type TaskOutcome,
@@ -138,6 +140,40 @@ async function runAgentTask(
 }
 
 /**
+ * Send a message onto an agent's open task. A parked task is woken first, so
+ * the turn's first callbacks find it working, and parked again if the message
+ * is not taken. One whose retries ran out may have been taken or not: the
+ * thread is told the agent could not be reached, and no task is started with
+ * it, which could run it twice.
+ */
+async function joinTask(
+  step: WorkflowStep,
+  p: MessageWorkflowParams,
+  plan: AgentPlan,
+  row: Pick<AgentTaskRow, "token" | "taskId" | "eventId">
+): Promise<JoinOutcome | "undelivered"> {
+  const name = plan.agent.name;
+  const woke = await step.do(`wake:${name}`, () => wakeTask(row.token));
+  let outcome: JoinOutcome | "undelivered";
+  try {
+    outcome = await step.do(`join:${name}`, () => joinMessage(p, plan, row));
+  } catch (err) {
+    outcome = "undelivered";
+    await handleUnreachable(
+      step,
+      p,
+      replyThreadTs(p),
+      name,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+  if (outcome !== "joined" && woke) {
+    await step.do(`repark:${name}`, () => parkTask(row.token, row.eventId));
+  }
+  return outcome;
+}
+
+/**
  * Durable workflow for Slack messages dispatched to agents. One instance per
  * Slack `event_id`, handling every woken agent (local built-in and remote
  * custom) for that event.
@@ -156,10 +192,11 @@ async function runAgentTask(
  * budget (its agent's `task_deadline_seconds`, which defaults to
  * `DEFAULT_TASK_DEADLINE_SECONDS`) runs out, so the 🛑 always drains eventually.
  *
- * Steps: `resolve` → `route` → per joining agent `join` → (`ensure-reaction`
- * when the handler gave no 🛑) → one `record-tasks` (every row up front, before
- * any dispatch) → per opening agent `guard-cancel` + `dispatch` + `update-task`
- * (+ `honor-cancel`) → `collect-reaction`.
+ * Steps: `resolve` → `route` → per joining agent `wake` + `join` (+ `repark`)
+ * → (`ensure-reaction` when the handler gave no 🛑) → one `record-tasks`
+ * (every row up front, before any dispatch) → per opening agent
+ * `guard-cancel` + `dispatch` + `update-task` (+ `honor-cancel`) →
+ * `collect-reaction`.
  */
 export class MessageWorkflow extends WorkflowEntrypoint<
   Env,
@@ -178,12 +215,9 @@ export class MessageWorkflow extends WorkflowEntrypoint<
       const plans: AgentPlan[] = [];
       for (const [i, plan] of resolved.entries()) {
         const row = open[i];
-        const joined =
-          row &&
-          (await step.do(`join:${plan.agent.name}`, () =>
-            joinMessage(p, plan, row)
-          ));
-        if (joined !== "joined") plans.push(plan);
+        if (!row || (await joinTask(step, p, plan, row)) === "refused") {
+          plans.push(plan);
+        }
       }
 
       // The handler gave the 🛑 on what it saw a moment earlier: a task can
@@ -197,7 +231,16 @@ export class MessageWorkflow extends WorkflowEntrypoint<
         return;
       }
       if (!p.stopped) {
-        await step.do("ensure-reaction", () => ensureStopReaction(p));
+        try {
+          await step.do("ensure-reaction", () => ensureStopReaction(p));
+        } catch (err) {
+          // Its retries ran out. The tasks start without a deadline rather
+          // than not at all.
+          console.error("[message] could not give the message its 🛑", {
+            eventId: p.eventId,
+            err: err instanceof Error ? err.message : String(err)
+          });
+        }
       }
 
       // Record every fan-out row up front (before any dispatch) so a fast

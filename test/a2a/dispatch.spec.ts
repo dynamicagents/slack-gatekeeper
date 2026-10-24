@@ -1064,7 +1064,7 @@ describe("joinAgentTask (remote)", () => {
     });
   });
 
-  it("sends the message onto the open task, and wakes a parked one on the budget it had", async () => {
+  it("sends the message onto the open task, leaving its row to the caller", async () => {
     const posts: RemotePost[] = [];
     stubRemote(posts);
     await suspendForInput(TOKEN);
@@ -1080,11 +1080,10 @@ describe("joinAgentTask (remote)", () => {
     // The dispatch's own id, so a retried step dedupes at the agent.
     expect(msg.messageId).toBe(await buildDispatchId("Ev-join", AGENT));
     expect(partsText(msg.parts)).toContain("one more thing");
-    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("pending");
-    // A joined message is not an answer: the clock runs on, with no fresh leg.
-    expect(signals).toEqual([
-      { type: REACTION_SYNC_EVENT, payload: { refresh: false } }
-    ]);
+    // Woken before the send and parked again after a refusal, by the workflow
+    // sending it (`wakeTask`, `parkTask`), so nothing changes here.
+    expect((await getAgentTaskByToken(TOKEN))?.status).toBe("awaiting-input");
+    expect(signals).toEqual([]);
   });
 
   it("is refused, without sending, for a task not accepted yet", async () => {

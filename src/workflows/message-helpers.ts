@@ -212,7 +212,7 @@ const ACCEPT_POLL_MS = 500;
 export async function openTasksFor(
   p: MessageWorkflowParams,
   plans: AgentPlan[]
-): Promise<(Pick<AgentTaskRow, "token" | "taskId"> | null)[]> {
+): Promise<(Pick<AgentTaskRow, "token" | "taskId" | "eventId"> | null)[]> {
   const threadKey = threadKeyOf(p);
   return Promise.all(
     plans.map(async (plan) => {
@@ -224,7 +224,9 @@ export async function openTasksFor(
           threadKey
         );
         if (!row) return null;
-        if (row.taskId) return { token: row.token, taskId: row.taskId };
+        if (row.taskId) {
+          return { token: row.token, taskId: row.taskId, eventId: row.eventId };
+        }
         if (Date.now() >= deadline) return null;
         await scheduler.wait(ACCEPT_POLL_MS);
       }
@@ -254,7 +256,9 @@ export async function joinMessage(
  * Put the 🛑 on the trigger message and start its ReactionWorkflow, for a
  * message that starts a task after the handler gave it neither: its join was
  * refused, or the task it would have joined closed in between. Both are
- * idempotent, so a delivery that races the handler's repeats nothing.
+ * idempotent, so a delivery that races the handler's repeats nothing. The 🛑
+ * is best-effort, as the handler's is; a workflow that would not start throws,
+ * so the step tries again: without it the task has no deadline.
  */
 export async function ensureStopReaction(
   p: MessageWorkflowParams
@@ -273,12 +277,7 @@ export async function ensureStopReaction(
       params: { eventId: p.eventId, channelId: p.channelId, ts: p.ts }
     });
   } catch (err) {
-    if (!/already exists/i.test(String(err))) {
-      console.error("[message] could not start the reaction workflow", {
-        eventId: p.eventId,
-        err: String(err)
-      });
-    }
+    if (!/already exists/i.test(String(err))) throw err;
   }
 }
 

@@ -3,7 +3,6 @@ import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import {
   getAgentTaskByToken,
   isTerminalTaskStatus,
-  suspendForInput,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import type { HitlOption, HitlQuestion } from "@dynamicagents/g2a-protocol";
@@ -69,12 +68,12 @@ function sanitizeQuestion(question: HitlQuestion): HitlQuestion {
 }
 
 /**
- * Render a human-in-the-loop form to Slack, and park the task when `park` says
- * its agent has nothing left but its questions to wait on.
+ * Render a human-in-the-loop form to Slack.
  *
  * Called from the delivery boundary when a non-terminal snapshot carries a HITL
- * request data part. A task may have any number open, each its own form,
- * answered on its own. Sanitizes the agent's prompt/options before they are
+ * request data part; whether the task parks is the boundary's, decided by the
+ * update's state. A task may have any number open, each its own form, answered
+ * on its own. Sanitizes the agent's prompt/options before they are
  * stored or shown, persists the request keyed by `requestId` (idempotent: a
  * redelivered push does not double-post), then posts the interactive message
  * and records its ts for later updates.
@@ -84,8 +83,7 @@ export async function deliverHitlRequest(
   row: AgentTaskRow,
   agent: AgentRow,
   snapshot: TaskSnapshot,
-  req: HitlRequest,
-  options: { park: boolean }
+  req: HitlRequest
 ): Promise<void> {
   const request: HitlRequest = {
     ...req,
@@ -132,9 +130,6 @@ export async function deliverHitlRequest(
     if (created) await cancelHitlForm(req.requestId);
     return;
   }
-  // Park the task (pending → awaiting-input) when its agent is idle on its
-  // questions: non-terminal, so 🛑 still cancels and the fan-out doesn't drain.
-  if (options.park) await suspendForInput(token);
 
   const { displayName, iconUrl } = await agentRenderIdentity(
     agent,
@@ -152,7 +147,19 @@ export async function deliverHitlRequest(
     username: displayName,
     iconUrl
   });
-  if (ts) await setHitlFormMessageTs(req.requestId, ts);
+  if (!ts) return;
+  await setHitlFormMessageTs(req.requestId, ts);
+  // A task that ended while this posted closed its prompts before this one had
+  // a message to update, so it is closed here instead, buttons and all.
+  const posted = await getHitlForm(req.requestId);
+  const task = await getAgentTaskByToken(token);
+  if (
+    posted &&
+    (posted.status !== "awaiting" || !task || isTerminalTaskStatus(task.status))
+  ) {
+    if (posted.status === "awaiting") await cancelHitlForm(req.requestId);
+    await markHitlPromptResolved(posted, TASK_ENDED_NOTE);
+  }
 }
 
 /**

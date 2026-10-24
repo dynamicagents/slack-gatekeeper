@@ -484,8 +484,9 @@ export type JoinOutcome = "joined" | "refused";
  * it: the same turn a dispatch would send, wrapped the same way, carrying the
  * task's id and its own push token, so its callbacks land on the same row.
  *
- * A parked task woken this way goes back to work on the budget it had: the
- * joined message is not an answer, and starts no fresh leg.
+ * The row is the caller's to wake before this and park again after a refusal
+ * (`wakeTask`, `parkTask`): woken after the accept instead, the turn's first
+ * callbacks could land on it still parked.
  */
 export async function joinAgentTask(
   agent: DispatchAgentRef,
@@ -524,8 +525,6 @@ export async function joinAgentTask(
     });
     return "refused";
   }
-  const eventId = await resumeFromInput(row.token);
-  if (eventId) await signalReactionSync(eventId, { refresh: false });
   return "joined";
 }
 

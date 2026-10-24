@@ -5,7 +5,8 @@ import { setWorkspaceAdminChannel } from "@/db/models/workspaces";
 import { upsertSlackUser } from "@/db/models/users";
 import {
   getAgentTaskByToken,
-  getPendingAgentTasksByEventId
+  getPendingAgentTasksByEventId,
+  suspendForInput
 } from "@/db/models/agent-tasks";
 import { AGENT_UNREACHABLE_BASE_TEXT } from "@/workflows/message-helpers";
 import { STOP_REACTION } from "@/workflows/reaction";
@@ -324,7 +325,8 @@ describe("MessageWorkflow — remote custom agents", () => {
     slackPosts,
     slackReactions,
     remotePosts,
-    remoteMessages
+    remoteMessages,
+    onJoin
   }: {
     remoteMode?: RemoteMode;
     /** How the agent answers a message sent onto a task it has open. */
@@ -335,6 +337,8 @@ describe("MessageWorkflow — remote custom agents", () => {
     remotePosts?: { count: number };
     /** Every JSON-RPC request the agent was sent, as sent. */
     remoteMessages?: unknown[];
+    /** Runs as a message onto an open task arrives, before it is answered. */
+    onJoin?: () => Promise<void>;
   } = {}) {
     const card = buildAgentCard({
       name: "Remote Test",
@@ -391,6 +395,7 @@ describe("MessageWorkflow — remote custom agents", () => {
         remoteMessages?.push(rpc);
 
         if (rpc.params?.message?.taskId) {
+          await onJoin?.();
           // A message onto an open task: taken, or refused the way core
           // refuses one on a task that has closed.
           return Response.json(
@@ -710,6 +715,84 @@ describe("MessageWorkflow — remote custom agents", () => {
     } finally {
       await msgIntrospector.dispose();
       await reactionIntrospector.dispose();
+    }
+  });
+
+  it("wakes a parked task before the join goes, so the turn's callbacks find it working", async () => {
+    let atJoin: string | undefined;
+    let token = "";
+    stubFetch({
+      onJoin: async () => {
+        atJoin = (await getAgentTaskByToken(token))?.status;
+      }
+    });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      token = await tokenFor(first.eventId);
+      expect(await suspendForInput(token)).toBe(true);
+
+      await trigger(makeChannelMessageRequest(REMOTE_CHANNEL, first.ts).body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      expect(atJoin).toBe("pending");
+      expect((await getAgentTaskByToken(token))?.status).toBe("pending");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("parks it again when the join is refused", async () => {
+    stubFetch({ joinMode: "refused" });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      const token = await tokenFor(first.eventId);
+      await suspendForInput(token);
+
+      await trigger(makeChannelMessageRequest(REMOTE_CHANNEL, first.ts).body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      // Still waiting on its person, as an agent that takes no joins left it.
+      expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
+    } finally {
+      await introspector.dispose();
+    }
+  });
+
+  it("says so, and starts no task, when a join's retries run out", async () => {
+    const slackPosts: PostCall[] = [];
+    stubFetch({ slackPosts });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      const first = await openTask(introspector);
+      const token = await tokenFor(first.eventId);
+      await suspendForInput(token);
+      await introspector.modifyAll(async (m) => {
+        await m.disableRetryDelays([{ name: `join:${AGENT_NAME}` }]);
+        await m.mockStepError(
+          { name: `join:${AGENT_NAME}` },
+          new Error("connection refused")
+        );
+      });
+
+      const reply = makeChannelMessageRequest(REMOTE_CHANNEL, first.ts);
+      await trigger(reply.body);
+      const instances = await introspector.get();
+      await instances[1].waitForStatus("complete");
+
+      // It may have been taken: a task of its own could run it twice.
+      expect(
+        await getAgentTaskByToken(await tokenFor(reply.eventId))
+      ).toBeNull();
+      expect(slackPosts.map((p) => p.text).join("\n")).toContain(
+        AGENT_UNREACHABLE_BASE_TEXT
+      );
+      expect((await getAgentTaskByToken(token))?.status).toBe("awaiting-input");
+    } finally {
+      await introspector.dispose();
     }
   });
 

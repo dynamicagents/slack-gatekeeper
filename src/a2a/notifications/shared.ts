@@ -3,7 +3,6 @@ import { agentRenderIdentity, type AgentRow } from "@/db/models/agents";
 import {
   completeAgentTask,
   recordReceivedMessageId,
-  suspendForInput,
   type AgentTaskRow
 } from "@/db/models/agent-tasks";
 import { isTerminalTaskState, taskStateLabel } from "@/a2a/parts";
@@ -17,6 +16,7 @@ import {
 } from "@/a2a/notifications/hitl";
 import { postReply } from "@/wrappers/slack";
 import { collectIfEventDrained } from "@/workflows/message-helpers";
+import { parkTask } from "@/workflows/reaction-helpers";
 
 /** A malformed task snapshot that is safe to report to a task's owner. */
 export class TaskDeliveryValidationError extends Error {}
@@ -72,15 +72,6 @@ export async function deliverTaskToSlack(
   // it is idle sends both in one update; one that asks in prose is posted below,
   // and the reply that answers it joins the task.
   if (!isTerminalTaskState(state)) {
-    const hitl = parseHitlRequest(snapshot.statusMessage);
-    const waiting = state === TaskState.TASK_STATE_INPUT_REQUIRED;
-    if (hitl) {
-      await deliverHitlRequest(token, row, agent, snapshot, hitl, {
-        park: waiting
-      });
-      return;
-    }
-
     const updateId = snapshot.statusMessage?.messageId;
     if (!updateId) {
       throw new TaskDeliveryValidationError(
@@ -88,12 +79,21 @@ export async function deliverTaskToSlack(
       );
     }
 
-    // A parked row takes no updates: its agent is idle, so one arriving now is
-    // a progress line from before the park. What wakes a parked task is an
-    // answer, a joined message or an expiry, and the gatekeeper un-parks the row
-    // as it sends each one.
+    // Claimed once per update, and only on a row that works: a parked row's
+    // agent is idle, so an update arriving then is a progress line from before
+    // the park, and what wakes a parked task (an answer, a joined message, an
+    // expiry) un-parks it as the gatekeeper sends it. A redelivery repeats
+    // nothing, the park least of all: it would stop the clock of a task an
+    // answer or a join has since resumed. The park goes before the post, so a
+    // post that fails and is retried still leaves the task parked.
     const isNew = await recordReceivedMessageId(token, updateId);
-    if (isNew && text) {
+    if (isNew && state === TaskState.TASK_STATE_INPUT_REQUIRED) {
+      await parkTask(token, row.eventId);
+    }
+    const hitl = parseHitlRequest(snapshot.statusMessage);
+    if (hitl) {
+      await deliverHitlRequest(token, row, agent, snapshot, hitl);
+    } else if (isNew && text) {
       const { displayName, iconUrl } = await renderIdentity();
       await postReply(
         row.channelId,
@@ -103,7 +103,6 @@ export async function deliverTaskToSlack(
         iconUrl
       );
     }
-    if (waiting) await suspendForInput(token);
     return;
   }
 

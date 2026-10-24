@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { resumeFromInput, suspendForInput } from "@/db/models/agent-tasks";
 
 /**
  * Shared vocabulary for the 🛑 reaction: its emoji, the event that wakes the
@@ -9,8 +10,8 @@ import { env } from "cloudflare:workers";
  * Split out to keep the import graph acyclic. `reaction.ts` needs the
  * cancellation machinery in `message-helpers.ts` (and through it `dispatch.ts`),
  * while `dispatch.ts` needs to signal the workflow when a parked task resumes —
- * so the constants and the signal live here, importing nothing of ours, and all
- * three depend on this rather than on each other.
+ * so the constants and the signal live here, importing nothing of ours but the
+ * task ledger, and all three depend on this rather than on each other.
  */
 
 /**
@@ -120,4 +121,30 @@ export async function signalReactionSync(
       err: String(err)
     });
   }
+}
+
+/**
+ * Park a task's row on the person (`awaiting-input`), and end the budget's leg
+ * there. Without the signal the wait in progress would charge the task for the
+ * whole leg once it woke, the time it spent parked included. Returns whether
+ * the row parked.
+ */
+export async function parkTask(
+  token: string,
+  eventId: string
+): Promise<boolean> {
+  const parked = await suspendForInput(token);
+  if (parked) await signalReactionSync(eventId, { refresh: false });
+  return parked;
+}
+
+/**
+ * Wake a parked task's row for a message that joins it, on the budget it had:
+ * a joined message is not an answer, and starts no fresh leg. Returns whether
+ * the row was parked, so a message the task does not take can park it again.
+ */
+export async function wakeTask(token: string): Promise<boolean> {
+  const eventId = await resumeFromInput(token);
+  if (eventId) await signalReactionSync(eventId, { refresh: false });
+  return eventId !== null;
 }
