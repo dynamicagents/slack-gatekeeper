@@ -334,9 +334,10 @@ function payloadFor(
  *
  * Race note: every fan-out row is recorded before any dispatch, so a fast
  * terminal callback can never observe an incomplete sibling set of dispatched
- * tasks. A row a refused join opens is recorded later than its siblings', so the
- * MessageWorkflow says when it is done (`routed`), and until then, or until it
- * stops running, the ReactionWorkflow does not read nothing open as drained.
+ * tasks. The rows are recorded after the message's joins, which can take
+ * minutes against an agent slow to answer, so the MessageWorkflow says when it
+ * is done (`routed`), and until then, or until it stops running, the
+ * ReactionWorkflow does not read nothing open as drained.
  *
  * The drain check keeps the signal to the one the workflow needs: every signal
  * ends a leg, and one per completion would end a leg each time a fast sibling

@@ -435,7 +435,7 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
     // rebuild is what puts the value there is `0023-agent-tasks-started-by.spec`.
     await env.DB.prepare(
       `INSERT INTO agent_tasks (token, task_id, agent_name, channel_id, message_ts, reply_thread_ts, event_id, started_by)
-       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.3', '1700.3', 'Ev-legacy', ?)`
+       VALUES ('tok-legacy', 'task-1', 'remoteagent', 'C1', '1700.1', '1700.1', 'Ev-legacy', ?)`
     )
       .bind(STARTED_BY_UNKNOWN)
       .run();
@@ -456,8 +456,8 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
       taskId: "task-1",
       agentName: "remoteagent",
       channelId: "C1",
-      messageTs: "1700.4",
-      replyThreadTs: "1700.4",
+      messageTs: "1700.1",
+      replyThreadTs: "1700.1",
       eventId: "Ev-feed",
       startedBy: STARTED_BY_PROCESS
     });

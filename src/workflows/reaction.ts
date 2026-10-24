@@ -41,9 +41,10 @@ export const DELIVERY_RETRY_GRACE_SECONDS = 6 * 60;
 
 /**
  * How long the MessageWorkflow is given, at a time, to finish routing before a
- * fan-out with nothing open is read again: its joins run before the rows of the
- * tasks they refuse are recorded, so until it says it is done (`routed`), or
- * stops running, nothing open does not yet mean drained.
+ * fan-out with nothing open is read again: its joins run before any of the
+ * message's rows is recorded, and can take minutes against an agent slow to
+ * answer, so until it says it is done (`routed`), or stops running, nothing
+ * open does not yet mean drained.
  */
 const ROUTING_WAIT_SECONDS = 30;
 

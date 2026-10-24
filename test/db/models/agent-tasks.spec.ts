@@ -36,8 +36,6 @@ beforeEach(async () => {
   });
 });
 
-// Rows one spec holds open at once are given threads of their own: the
-// open-thread index admits one open task per agent and thread.
 function input(token: string, over: Partial<CreateAgentTaskInput> = {}) {
   return {
     token,
@@ -230,11 +228,7 @@ describe("agent-tasks model", () => {
         input("fan-a", { channelId: "C9", messageTs: "1800.1" })
       );
       await createAgentTask(
-        input("fan-b", {
-          channelId: "C9",
-          messageTs: "1800.1",
-          replyThreadTs: "thread-b"
-        })
+        input("fan-b", { channelId: "C9", messageTs: "1800.1" })
       );
       const rows = await getPendingAgentTasksByChannelAndTs("C9", "1800.1");
       expect(rows.map((r) => r.token).sort()).toEqual(["fan-a", "fan-b"]);
@@ -245,11 +239,7 @@ describe("agent-tasks model", () => {
         input("keep", { channelId: "C9", messageTs: "1800.2" })
       );
       await createAgentTask(
-        input("done", {
-          channelId: "C9",
-          messageTs: "1800.2",
-          replyThreadTs: "thread-done"
-        })
+        input("done", { channelId: "C9", messageTs: "1800.2" })
       );
       await completeAgentTask("done");
       await createAgentTask(
@@ -276,13 +266,9 @@ describe("agent-tasks model", () => {
         workspaceId: 0
       });
       await createAgentTask(input("dl-live", { eventId: "EvDl" }));
-      await createAgentTask(
-        input("dl-parked", { eventId: "EvDl", replyThreadTs: "thread-parked" })
-      );
+      await createAgentTask(input("dl-parked", { eventId: "EvDl" }));
       await suspendForInput("dl-parked");
-      await createAgentTask(
-        input("dl-done", { eventId: "EvDl", replyThreadTs: "thread-done" })
-      );
+      await createAgentTask(input("dl-done", { eventId: "EvDl" }));
       await completeAgentTask("dl-done");
       await createAgentTask(
         input("dl-slow", { eventId: "EvDl", agentName: "slowagent" })
@@ -344,9 +330,7 @@ describe("agent-tasks model", () => {
       expect(await updateAgentTaskTaskId("upd-clean", "task-1")).toBe(false);
 
       // Stop recorded first (accept-then-tap handshake) → reports true.
-      await createAgentTask(
-        input("upd-stop", { taskId: null, replyThreadTs: "thread-stop" })
-      );
+      await createAgentTask(input("upd-stop", { taskId: null }));
       await markCancelRequested("upd-stop");
       expect(await updateAgentTaskTaskId("upd-stop", "task-2")).toBe(true);
     });
@@ -387,12 +371,8 @@ describe("agent-tasks model", () => {
 
     it("excludes every terminal status from the pending lookups", async () => {
       await createAgentTask(input("cx-done", { eventId: "EvTerm" }));
-      await createAgentTask(
-        input("cx-stop", { eventId: "EvTerm", replyThreadTs: "thread-stop" })
-      );
-      await createAgentTask(
-        input("cx-live", { eventId: "EvTerm", replyThreadTs: "thread-live" })
-      );
+      await createAgentTask(input("cx-stop", { eventId: "EvTerm" }));
+      await createAgentTask(input("cx-live", { eventId: "EvTerm" }));
       await completeAgentTask("cx-done");
       await markAgentTaskCanceled("cx-stop");
 
@@ -467,45 +447,5 @@ describe("getOpenAgentTaskInThread", () => {
     expect(
       (await getOpenAgentTaskInThread("remoteagent", "C1", "1700.1"))?.status
     ).toBe("awaiting-input");
-  });
-});
-
-describe("one open task per agent and thread", () => {
-  it("refuses a second open task for the agent in the thread", async () => {
-    expect(
-      await createAgentTask(input("first", { replyThreadTs: "1700.1" }))
-    ).toBe(true);
-    expect(
-      await createAgentTask(input("second", { replyThreadTs: "1700.1" }))
-    ).toBe(false);
-    expect(await getAgentTaskByToken("second")).toBeNull();
-    // A replay of the one that holds it still finds it there.
-    expect(
-      await createAgentTask(input("first", { replyThreadTs: "1700.1" }))
-    ).toBe(true);
-  });
-
-  it("keys a top-level message's thread by its own ts", async () => {
-    await createAgentTask(
-      input("top", { messageTs: "1700.1", replyThreadTs: null })
-    );
-    expect(
-      await createAgentTask(
-        input("reply", { messageTs: "1700.2", replyThreadTs: "1700.1" })
-      )
-    ).toBe(false);
-  });
-
-  it("admits one beside it, and another once it has ended", async () => {
-    await createAgentTask(input("open", { replyThreadTs: "1700.1" }));
-    expect(
-      await createAgentTask(
-        input("beside", { replyThreadTs: "1700.1", openedBeside: true })
-      )
-    ).toBe(true);
-    await completeAgentTask("open");
-    expect(
-      await createAgentTask(input("next", { replyThreadTs: "1700.1" }))
-    ).toBe(true);
   });
 });

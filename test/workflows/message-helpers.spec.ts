@@ -332,8 +332,6 @@ describe("collectIfEventDrained (fan-out drain)", () => {
     });
   });
 
-  // Siblings of one fan-out are different agents in life; one agent here, so
-  // each its own thread, which the open-thread index requires.
   const seed = (token: string) =>
     createAgentTask({
       token,
@@ -341,7 +339,7 @@ describe("collectIfEventDrained (fan-out drain)", () => {
       agentName: "wf-agent",
       channelId: "C1",
       messageTs: "1700.1",
-      replyThreadTs: `thread-${token}`,
+      replyThreadTs: null,
       eventId: "EvDrain",
       startedBy: "U1"
     });

@@ -5,7 +5,6 @@ import {
   integer,
   primaryKey,
   index,
-  uniqueIndex,
   check
 } from "drizzle-orm/sqlite-core";
 import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
@@ -300,10 +299,6 @@ export const agentTasks = sqliteTable(
     // Comma-delimited list of intermediate-update `messageId`s already received
     // from the remote, so an at-least-once push retry doesn't double-post it.
     receivedMessageIds: text("received_message_ids"),
-    // 1 for a task started beside one its agent already has open in the
-    // thread, because that one refused the message: the one kind of row the
-    // open-thread index below lets share a thread. 0 for every other.
-    openedBeside: integer("opened_beside").notNull().default(0),
     createdAt: timestamp("created_at"),
     completedAt: integer("completed_at")
   },
@@ -313,19 +308,7 @@ export const agentTasks = sqliteTable(
     index("idx_agent_tasks_channel_message_ts").on(t.channelId, t.messageTs),
     // Drain check: every task leaving the pending set asks "any sibling left for
     // this event?", so this runs N+1 times per fan-out — the table's hottest read.
-    index("idx_agent_tasks_event_id").on(t.eventId),
-    // One open task per agent and thread, keyed as `getOpenAgentTaskInThread`
-    // keys a thread. Two messages a moment apart both find the thread empty;
-    // the second's insert loses here, and it joins the first's task instead.
-    uniqueIndex("idx_agent_tasks_open_thread")
-      .on(
-        t.agentName,
-        t.channelId,
-        sql`coalesce(${t.replyThreadTs}, ${t.messageTs})`
-      )
-      .where(
-        sql`${t.status} in ('pending', 'awaiting-input') and ${t.openedBeside} = 0`
-      )
+    index("idx_agent_tasks_event_id").on(t.eventId)
   ]
 );
 
