@@ -365,47 +365,45 @@ describe("deliverTaskToSlack — HITL input-required branch", () => {
 });
 
 /**
- * The approval reaches the person who asked for the work: the prompt mentions
+ * The question reaches the person who asked for the work: the prompt mentions
  * whoever started the task, from the trusted Slack event's user id carried on
- * the task row since dispatch — never from the agent's own form. This is the
- * delivery path both kinds of agent share: a built-in's in-process push and a
- * remote's authenticated callback both arrive at `deliverTaskToSlack`.
+ * the task row since dispatch — never from the agent's own form. It says what
+ * the form needs of them, which is an approval where the form holds one and an
+ * answer where it asks anything else. This is the delivery path both kinds of
+ * agent share: a built-in's in-process push and a remote's authenticated
+ * callback both arrive at `deliverTaskToSlack`.
  */
-describe("deliverTaskToSlack — an approval tags whoever started the task", () => {
-  it("mentions them in the prompt's blocks and in its notification text", async () => {
-    const posts: SlackPost[] = [];
-    stubFetch(posts);
+describe("deliverTaskToSlack — a prompt tags whoever started the task", () => {
+  it.each([
+    ["an approval", approvalTask, "req-ap-1", "this needs your approval."],
+    ["an ask", hitlTask, "req-ask-1", "this needs your answer."]
+  ])(
+    "mentions them in %s's blocks and in its notification text",
+    async (_what, task, requestId, needs) => {
+      const posts: SlackPost[] = [];
+      stubFetch(posts);
 
-    await deliver(approvalTask("req-ap-1"));
+      await deliver(task(requestId));
 
-    expect(posts).toHaveLength(1);
-    // In the blocks, which is what Slack notifies on...
-    expect(posts[0].blocks).toContain(`<@${STARTER}>`);
-    // ...and in the fallback text, which is what a mobile notification reads.
-    expect(posts[0].text).toContain(`<@${STARTER}>`);
-    expect((await getHitlForm("req-ap-1"))?.status).toBe("awaiting");
-  });
-
-  it("mentions nobody when the form asks for no approval", async () => {
-    const posts: SlackPost[] = [];
-    stubFetch(posts);
-
-    await deliver(hitlTask("req-ap-none"));
-
-    expect(posts).toHaveLength(1);
-    expect(posts[0].blocks).not.toContain("<@");
-    expect(posts[0].text).not.toContain("<@");
-  });
+      expect(posts).toHaveLength(1);
+      // In the blocks, which is what Slack notifies on...
+      expect(posts[0].blocks).toContain(`<@${STARTER}> — ${needs}`);
+      // ...and in the fallback text, which is what a mobile notification reads.
+      expect(posts[0].text).toContain(`<@${STARTER}> — ${needs}`);
+      expect((await getHitlForm(requestId))?.status).toBe("awaiting");
+    }
+  );
 
   /**
-   * Deliver an approval for a task nobody started, and assert the prompt is
-   * posted and asked of nobody in particular — no mention, and no sign of the
-   * sentinel the row carries in place of a person.
+   * Deliver `task` for a row nobody started, and assert the prompt is posted and
+   * asked of nobody in particular — no mention, and no sign of the sentinel the
+   * row carries in place of a person.
    */
-  async function deliverUnstartedApproval(
+  async function deliverUnstarted(
     token: string,
     requestId: string,
-    sentinel: string
+    sentinel: string,
+    task: (requestId: string) => TaskSnapshot = approvalTask
   ): Promise<void> {
     const row = await getAgentTaskByToken(token);
     // Never a null, whichever way nobody started it.
@@ -414,7 +412,7 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
     const posts: SlackPost[] = [];
     stubFetch(posts);
     const agent = await getAgent("remoteagent");
-    await deliverTaskToSlack(token, row!, agent!, approvalTask(requestId));
+    await deliverTaskToSlack(token, row!, agent!, task(requestId));
 
     expect(posts).toHaveLength(1);
     expect(posts[0].blocks).toContain(requestId);
@@ -440,34 +438,34 @@ describe("deliverTaskToSlack — an approval tags whoever started the task", () 
       .bind(STARTED_BY_UNKNOWN)
       .run();
 
-    await deliverUnstartedApproval(
-      "tok-legacy",
-      "req-ap-legacy",
-      STARTED_BY_UNKNOWN
-    );
+    await deliverUnstarted("tok-legacy", "req-ap-legacy", STARTED_BY_UNKNOWN);
   });
 
-  it("posts the approval unmentioned for a feed turn no person started", async () => {
-    // What `startedBy` records for an edit or a delete: the user id on such a
-    // turn is the authored message's author, not whoever acted, so the task is
-    // the gatekeeper's own doing and there is nobody on it to ask.
-    await createAgentTask({
-      token: "tok-feed",
-      taskId: "task-1",
-      agentName: "remoteagent",
-      channelId: "C1",
-      messageTs: "1700.1",
-      replyThreadTs: "1700.1",
-      eventId: "Ev-feed",
-      startedBy: STARTED_BY_PROCESS
-    });
+  // Both kinds of prompt, because the sentinel is the row's and neither kind may
+  // mention it: the approval's wording is one code path, the ask's the other.
+  it.each([
+    ["the approval", approvalTask, "req-ap-feed"],
+    ["an ask", hitlTask, "req-ask-feed"]
+  ])(
+    "posts %s unmentioned for a feed turn no person started",
+    async (_what, task, requestId) => {
+      // What `startedBy` records for an edit or a delete: the user id on such a
+      // turn is the authored message's author, not whoever acted, so the task is
+      // the gatekeeper's own doing and there is nobody on it to ask.
+      await createAgentTask({
+        token: "tok-feed",
+        taskId: "task-1",
+        agentName: "remoteagent",
+        channelId: "C1",
+        messageTs: "1700.1",
+        replyThreadTs: "1700.1",
+        eventId: "Ev-feed",
+        startedBy: STARTED_BY_PROCESS
+      });
 
-    await deliverUnstartedApproval(
-      "tok-feed",
-      "req-ap-feed",
-      STARTED_BY_PROCESS
-    );
-  });
+      await deliverUnstarted("tok-feed", requestId, STARTED_BY_PROCESS, task);
+    }
+  );
 
   it("still mentions the starter after somebody else answered an earlier approval", async () => {
     const posts: SlackPost[] = [];
