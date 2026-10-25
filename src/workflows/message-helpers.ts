@@ -107,11 +107,12 @@ export function feedText(p: MessageWorkflowParams): string {
 }
 
 /**
- * Who to mention if a task from this turn later asks a person to approve
- * something — recorded on the task row at dispatch (`agent_tasks.started_by`).
+ * Who to mention if a task from this turn later stops to ask a person something
+ * — an approval to decide or words to answer — recorded on the task row at
+ * dispatch (`agent_tasks.started_by`).
  *
  * A plain turn was sent by somebody, so the work is theirs and so is the
- * approval, and `p.userId` is that person: the classifier ignores a message
+ * question, and `p.userId` is that person: the classifier ignores a message
  * event without a user id, so it is always a real id from the signature-verified
  * envelope.
  *

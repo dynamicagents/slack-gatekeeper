@@ -340,34 +340,113 @@ describe("the open prompt", () => {
 });
 
 /**
- * An approval is the one thing an agent cannot settle on its own, so it is put
- * in front of the person who asked for the work: a mention of them, which is
- * what Slack notifies on, in the message and in the notification beside it.
+ * A question an agent stopped to ask is put in front of the person who asked for
+ * the work: a mention of them, which is what Slack notifies on, in the message
+ * and in the notification beside it. The words say what the form needs — an
+ * approval is the one thing the agent cannot settle on its own, and anything
+ * else is an ask, a pick or words, which leaves the agent just as idle until
+ * somebody answers.
+ *
  * `startedBy` is the trigger event's own Slack user, carried on the task row —
  * or, where no person started the task, one of that column's sentinels, which
  * name nobody.
  */
-describe("an approval's mention of whoever started the task", () => {
-  const PING = "<@U1> — this needs your approval.";
+describe("a prompt's mention of whoever started the task", () => {
+  const APPROVAL_PING = "<@U1> — this needs your approval.";
+  const ASK_PING = "<@U1> — this needs your answer.";
   const APPROVAL_BUTTONS = ["Approve", "Reject", "Comment…"];
 
-  it("mentions them in the message and leads the notification with it", () => {
-    const request = approvalForm("req-ping");
+  /**
+   * One form of every kind a prompt can hold: what it asks the starter for, the
+   * question it is still asking, and the controls it is answered by — which the
+   * mention leaves exactly as they were.
+   */
+  const FORMS = [
+    {
+      what: "an approval",
+      build: () => approvalForm("req-ping-ap"),
+      ping: APPROVAL_PING,
+      asks: "Approve the plan?",
+      buttons: APPROVAL_BUTTONS
+    },
+    {
+      what: "a pick",
+      build: () =>
+        choiceForm("req-ping-ch", "Which rollout?", [
+          { id: "now", label: "Now" },
+          { id: "later", label: "Later" }
+        ]),
+      ping: ASK_PING,
+      asks: "Which rollout?",
+      buttons: ["Now", "Later", "Other…"]
+    },
+    {
+      what: "words",
+      build: () =>
+        form(
+          [{ kind: "text", id: "q1", prompt: "Name it?" }],
+          undefined,
+          "req-ping-tx"
+        ),
+      ping: ASK_PING,
+      asks: "Name it?",
+      buttons: ["Answer"]
+    }
+  ];
+
+  it.each(FORMS)(
+    "mentions them for $what, and leads the notification with it",
+    ({ build, ping, buttons }) => {
+      const request = build();
+      const blocks = requestBlocks(request, "U1");
+      expect(messageViolations(blocks)).toEqual([]);
+      // First, and a block of its own — not folded into the agent's words, whose
+      // budget it would then eat into.
+      expect(blocks[0]).toEqual({
+        type: "section",
+        text: { type: "mrkdwn", text: ping }
+      });
+      // Leading the fallback: a mobile notification is drawn from this text
+      // alone, and a long form's is cut from the end. Everything after it is the
+      // same form's fallback with nobody to name.
+      expect(requestFallbackText(request, "U1")).toBe(
+        `${ping}\n\n${requestFallbackText(request)}`
+      );
+      // The question is still asked the same way, by its own controls.
+      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(buttons);
+    }
+  );
+
+  /**
+   * An approval anywhere in the form wins the wording, because it is the part a
+   * person has to settle: a form holding both says so once, and says approval.
+   */
+  it("names the approval on a form that asks for one beside a pick", () => {
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which rollout?",
+          options: [{ id: "now", label: "Now" }]
+        },
+        {
+          kind: "approval",
+          id: "q2",
+          prompt: "Approve the rollout?",
+          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+        }
+      ],
+      undefined,
+      "req-ping-both"
+    );
     const blocks = requestBlocks(request, "U1");
     expect(messageViolations(blocks)).toEqual([]);
-    // First, and a block of its own — not folded into the agent's words, whose
-    // budget it would then eat into.
     expect(blocks[0]).toEqual({
       type: "section",
-      text: { type: "mrkdwn", text: PING }
+      text: { type: "mrkdwn", text: APPROVAL_PING }
     });
-    // Leading the fallback: a mobile notification is drawn from this text alone,
-    // and a long form's is cut from the end.
-    expect(requestFallbackText(request, "U1")).toBe(
-      `${PING}\n\nApprove the plan?`
-    );
-    // The question is still asked the same way, by its own buttons.
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
+    expect(blocksText(blocks)).not.toContain(ASK_PING);
   });
 
   it("mentions them for an approval among questions answered in the modal", () => {
@@ -386,8 +465,10 @@ describe("an approval's mention of whoever started the task", () => {
     );
     const blocks = requestBlocks(request, "U1");
     expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain(PING);
-    expect(requestFallbackText(request, "U1").startsWith(PING)).toBe(true);
+    expect(blocksText(blocks)).toContain(APPROVAL_PING);
+    expect(requestFallbackText(request, "U1").startsWith(APPROVAL_PING)).toBe(
+      true
+    );
     expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
   });
 
@@ -397,7 +478,7 @@ describe("an approval's mention of whoever started the task", () => {
    * whose user id is the authored message's author, not the actor), `unknown` for
    * a row written before the column existed and backfilled by migration 0023.
    * Neither is shaped like a Slack user id, so neither is mentioned — and the
-   * approval is still worth asking.
+   * question is still worth asking, whichever kind it is.
    *
    * The ids below are the same thing from the other side: nothing but the
    * signature-verified envelope writes this column today, but the value is
@@ -418,19 +499,21 @@ describe("an approval's mention of whoever started the task", () => {
     ["closing the mention early", "U1> ping <!channel"],
     ["a channel id rather than a user's", "C123ABC"],
     ["not an id at all", "not an id"]
-  ])("asks the approval of nobody when the starter is %s", (_what, starter) => {
-    const request = approvalForm("req-nobody");
-    const blocks = requestBlocks(request, starter);
-    expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).not.toContain("<@");
-    // Not as a mention, and not as text either.
-    if (starter) expect(blocksText(blocks)).not.toContain(starter);
-    expect(blocksText(blocks)).toContain("Approve the plan?");
-    // The question is still asked the same way, by its own buttons.
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(APPROVAL_BUTTONS);
-    expect(requestFallbackText(request, starter)).toBe(
-      requestFallbackText(request)
-    );
+  ])("asks nobody when the starter is %s", (_what, starter) => {
+    for (const { build, asks, buttons } of FORMS) {
+      const request = build();
+      const blocks = requestBlocks(request, starter);
+      expect(messageViolations(blocks)).toEqual([]);
+      expect(blocksText(blocks)).not.toContain("<@");
+      // Not as a mention, and not as text either.
+      if (starter) expect(blocksText(blocks)).not.toContain(starter);
+      // The question is still asked, and asked the same way, by its own controls.
+      expect(blocksText(blocks)).toContain(asks);
+      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(buttons);
+      expect(requestFallbackText(request, starter)).toBe(
+        requestFallbackText(request)
+      );
+    }
   });
 
   /**
@@ -454,22 +537,33 @@ describe("an approval's mention of whoever started the task", () => {
     const blocks = requestBlocks(request, "U1");
     expect(messageViolations(blocks)).toEqual([]);
     expect(blocksText(blocks)).toBe(
-      `${PING}\n${blocksText(requestBlocks(request))}`
+      `${APPROVAL_PING}\n${blocksText(requestBlocks(request))}`
     );
     // The cut falls where it did, and the mention is not what was cut.
     expect(blocksText(blocks)).toContain("Cut here to fit Slack");
   });
 
-  it("mentions nobody on a form that asks for no approval", () => {
-    const forms = [
-      choiceForm("req-choice", "Proceed?"),
-      form([{ kind: "text", id: "q1", prompt: "Name it?" }], undefined, "req-t")
-    ];
-    for (const request of forms) {
-      expect(blocksText(requestBlocks(request, "U1"))).not.toContain("<@");
-      expect(requestFallbackText(request, "U1")).toBe(
-        requestFallbackText(request)
-      );
+  /**
+   * A prompt that is over pings nobody again. {@link resolvedBlocks} and
+   * {@link answeredBlocks} take no starter at all — there is nothing left for
+   * the person to do, so a second notification would only tell them so.
+   */
+  it("leaves a resolved or an answered prompt unpinged", () => {
+    for (const { build, asks } of FORMS) {
+      const request = build();
+      const resolved = resolvedBlocks(request, "⏰ Expired — nobody answered.");
+      expect(blocksText(resolved)).toContain(asks);
+      expect(blocksText(resolved)).not.toContain("<@");
+
+      const answered = answeredBlocks({
+        request,
+        answers: { q1: { text: "ok" } },
+        answeredBy: "U1"
+      });
+      // The one mention an answered prompt carries is who answered it.
+      expect(blocksText(answered)).toContain("Answered by <@U1>");
+      expect(blocksText(answered).match(/<@/g)).toHaveLength(1);
+      expect(blocksText(answered)).not.toContain("needs your");
     }
   });
 });

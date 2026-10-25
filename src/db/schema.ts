@@ -251,10 +251,10 @@ export const agentTasks = sqliteTable(
     eventId: text("event_id").notNull(),
     // Slack user who started this task: the sender of the message that woke the
     // agent, as the webhook classified it. The one thing it is for is mentioning
-    // that person when their agent comes back asking a human to approve
-    // something, so the approval reaches whoever asked for the work rather than
-    // waiting in a thread nobody is watching (see `requestBlocks` in
-    // `src/slack/hitl/render.ts`).
+    // that person when their agent comes back with a question for a human — an
+    // approval to decide or words to answer — so the question reaches whoever
+    // asked for the work rather than waiting in a thread nobody is watching (see
+    // `requestBlocks` in `src/slack/hitl/render.ts`).
     //
     // It comes from the signature-verified Slack envelope and from nowhere else,
     // never from the agent's own HITL form — so the line the gatekeeper writes in

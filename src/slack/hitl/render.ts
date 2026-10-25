@@ -32,10 +32,11 @@ import { sanitizeSlackText } from "@/util/slack-text";
  * an option has more to it than a control shows, its options are listed in full
  * above the controls, which then carry only their numbers.
  *
- * A form asking someone to approve something mentions whoever started the task,
- * so it reaches the person who asked for the work instead of waiting in a thread
- * nobody is watching (see {@link approvalPing}). Anyone in the thread may still
- * answer it.
+ * A form mentions whoever started the task, so it reaches the person who asked
+ * for the work instead of waiting in a thread nobody is watching — naming the
+ * decision where it asks for an approval, and asking for an answer where it asks
+ * anything else (see {@link starterPing}). Anyone in the thread may still answer
+ * it.
  */
 
 /** Slack's cap on one section's text. */
@@ -468,10 +469,39 @@ function controlBlocks(request: HitlRequest): unknown[] {
 }
 
 /**
- * The line that puts an approval in front of the person who started the task: a
- * mention of them, which is what Slack notifies on. None when the form asks for
- * no approval — a question is the agent's to raise, but waking somebody up is
- * not, so only the decision it cannot make without a person gets a ping.
+ * What the form needs of the person it names, as the sentence that follows the
+ * mention in {@link starterPing} — or nothing, when the form holds no question
+ * anybody has to answer.
+ *
+ * An approval anywhere in the form decides the wording: it is the one thing the
+ * agent cannot settle on its own, and saying so is what tells the reader a
+ * decision is wanted of them and not an answer. Anything else is an ask — a
+ * pick, or words — which asks for the answer and claims no decision. An ask
+ * stalls the task just as hard: the agent is idle until somebody answers, so it
+ * is worth the same notification.
+ *
+ * The kinds are named here rather than taken as "any question at all", so a kind
+ * added to the protocol later has to be listed before it wakes anybody. Whether
+ * a new shape is worth a notification is a decision, not a default.
+ */
+function pingNeed(request: HitlRequest): string | undefined {
+  const kinds = request.questions.map((q) => q.kind);
+  if (kinds.includes("approval")) return "this needs your approval.";
+  if (kinds.some((k) => k === "choice" || k === "text")) {
+    return "this needs your answer.";
+  }
+  return undefined;
+}
+
+/**
+ * The line that puts an open prompt in front of the person who started the task:
+ * a mention of them, which is what Slack notifies on, and what the form needs of
+ * them (see {@link pingNeed}).
+ *
+ * Only the open prompt carries it. {@link resolvedBlocks} and
+ * {@link answeredBlocks} take no starter, so a prompt that is over — expired,
+ * closed, or answered — never notifies anybody a second time about a question
+ * there is nothing left to do about.
  *
  * `startedBy` is the Slack user id of whoever sent the message that woke the
  * agent, carried on the task row (`agent_tasks.started_by`) since dispatch. It
@@ -488,18 +518,18 @@ function controlBlocks(request: HitlRequest): unknown[] {
  * (the re-opened prompt in `slack-interactivity-handler`), which is the same
  * outcome by the same route.
  */
-function approvalPing(
+function starterPing(
   request: HitlRequest,
   startedBy: string | undefined
 ): string | undefined {
-  const asksApproval = request.questions.some((q) => q.kind === "approval");
-  return startedBy && SLACK_USER_ID.test(startedBy) && asksApproval
-    ? `<@${startedBy}> — this needs your approval.`
+  const need = pingNeed(request);
+  return need && startedBy && SLACK_USER_ID.test(startedBy)
+    ? `<@${startedBy}> — ${need}`
     : undefined;
 }
 
 /**
- * The open prompt: who it is for when it asks for an approval, what
+ * The open prompt: who it is for and what it needs of them, what
  * {@link messageText} says, then the controls.
  *
  * The mention is a block of its own rather than part of the message's text, so
@@ -510,7 +540,7 @@ export function requestBlocks(
   request: HitlRequest,
   startedBy?: string
 ): unknown[] {
-  const ping = approvalPing(request, startedBy);
+  const ping = starterPing(request, startedBy);
   return [
     ...(ping ? [section(ping)] : []),
     ...sections(messageText(request), MESSAGE_TEXT, CUT_PROMPT),
@@ -829,7 +859,7 @@ export function fallbackText(text: string): string {
 }
 
 /**
- * The form in a line or two, for a notification. An approval's mention leads it,
+ * The form in a line or two, for a notification. The starter's mention leads it,
  * because this text is the fallback Slack falls back *to* — on a surface that
  * does not render the blocks, it is all there is — and leading it is what keeps
  * the mention out of the cut when a long form runs past {@link FALLBACK_TEXT}.
@@ -840,7 +870,7 @@ export function requestFallbackText(
 ): string {
   return fallbackText(
     [
-      approvalPing(request, startedBy),
+      starterPing(request, startedBy),
       request.prompt,
       ...request.questions.map((q) => q.prompt)
     ]
