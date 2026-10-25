@@ -469,8 +469,9 @@ function controlBlocks(request: HitlRequest): unknown[] {
 }
 
 /**
- * What the form needs of the person it names, in the words the ping says it in,
- * or nothing when the form holds no question for anybody.
+ * What the form needs of the person it names, as the sentence that follows the
+ * mention in {@link starterPing} — or nothing, when the form holds no question
+ * anybody has to answer.
  *
  * An approval anywhere in the form decides the wording: it is the one thing the
  * agent cannot settle on its own, and saying so is what tells the reader a
