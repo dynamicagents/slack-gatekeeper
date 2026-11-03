@@ -1,4 +1,5 @@
 import type { WorkersAIModelOptions } from "@dynamicagents/core/model";
+import type { Reconcile } from "@dynamicagents/core/workflow";
 
 /** Name of the Slack channel whose members are org-level admins. */
 export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
@@ -24,9 +25,10 @@ export const ORG_ADMIN_CHANNEL_NAME = "da-org-admin";
  * that would have checked.
  *
  * `satisfies` checks the level against both: the model's enum as the generated
- * types declare it, and core's option type, which is `workers-ai-provider`'s
- * `low | medium | high` — a generation behind the runtime, which is why `max`
- * is out of reach here even where a model offers it.
+ * types declare it, and core's own `low | medium | high` — a generation behind
+ * the runtime, which is why `max` is out of reach here even where a model offers
+ * it. Core declares that level itself as of 0.17.1, where it used to borrow
+ * `workers-ai-provider`'s; the three values are the same, so the check is too.
  */
 export const CHAT_MODEL = {
   // @cf/zai-org/glm-5.3-flash — reasoning_effort: low | high | max
@@ -66,6 +68,28 @@ export const AI_GATEWAY_ID = "default";
  */
 export const COMPACT_AFTER_TOKENS = 12_000;
 export const COMPACT_TAIL_TOKENS = 4_000;
+
+/**
+ * How a built-in's step bounds each wait for its next event — core's
+ * `reconcile`, which ships no numbers because the cost of a late wake is the
+ * consumer's to weigh. One policy for every built-in.
+ *
+ * A wait gives up after `afterMs` and pulls both writers over RPC; one that
+ * finds nothing owed doubles the next, up to `maxMs`, and anything arriving
+ * resets it to `afterMs`.
+ *
+ * **This is what an undelivered event now costs.** Workflows can accept a
+ * `sendEvent` that never wakes the instance, and before core 0.17 the wait it
+ * should have ended ran to a 365-day ceiling — so one lost event cost the task,
+ * which is how a task went silent for good on 23 October. The cost is now a
+ * delay of at most `maxMs`. The numbers match `dynamicagents/starter`'s, taken
+ * in the same train: long enough that a healthy task does not pay for pulls it
+ * does not need, short enough that nobody waits out a working day on one.
+ */
+export const TASK_RECONCILE: Reconcile = {
+  afterMs: 5 * 60_000,
+  maxMs: 30 * 60_000
+};
 
 /**
  * How long a human-in-the-loop prompt (an `input-required` task parked on a

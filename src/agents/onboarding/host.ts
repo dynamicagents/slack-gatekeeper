@@ -2,8 +2,9 @@ import { TaskHost } from "@dynamicagents/core/task";
 import { copy } from "../copy";
 
 /**
- * The onboarding tenant's task host, one per direct-message channel
- * (`onboarding:{dmChannelId}`);
+ * The onboarding tenant's task host, one per direct-message channel, named by
+ * the caller scope core composes from this gatekeeper's origin and the identity
+ * key dispatch mints (`{origin}#onboarding:{dmChannelId}`);
  * `OnboardingWorkflow` runs its tasks.
  */
 export class OnboardingHost extends TaskHost<Env> {

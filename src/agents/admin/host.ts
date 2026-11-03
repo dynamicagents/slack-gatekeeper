@@ -4,7 +4,8 @@ import { copy } from "../copy";
 /**
  * The admin tenant's task host: it owns each A2A task the gatekeeper hands the
  * admin, and `AdminWorkflow` runs it. One instance per workspace, named by the
- * identity key dispatch mints (`admin:{wsId}`).
+ * caller scope core composes from this gatekeeper's origin and the identity key
+ * dispatch mints (`{origin}#admin:{wsId}`).
  */
 export class AdminHost extends TaskHost<Env> {
   protected readonly copy = copy;

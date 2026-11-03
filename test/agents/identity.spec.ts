@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   adminIdentity,
   adminWorkspaceOf,
+  callerKeyOf,
   isBuiltinIdentity,
   onboardingChannelOf,
   onboardingIdentity
@@ -53,6 +54,27 @@ describe("the built-in identities", () => {
     ]) {
       expect(onboardingChannelOf(key)).toBeNull();
     }
+  });
+
+  it("reads the key out of the scope core serves an object under", () => {
+    expect(callerKeyOf("https://gw.example.com#admin:7")).toBe("admin:7");
+    expect(callerKeyOf("https://gw.example.com#onboarding:D123")).toBe(
+      "onboarding:D123"
+    );
+
+    // The first `#` is the boundary: an origin cannot hold one, so a key that
+    // does still comes back whole.
+    expect(callerKeyOf("https://gw.example.com#remote:0:a#b")).toBe(
+      "remote:0:a#b"
+    );
+
+    // Composed and read back is the identity, which is what the admin relies on
+    // to recover its workspace from its own name.
+    expect(adminWorkspaceOf(callerKeyOf("https://gw.test#admin:7"))).toBe(7);
+
+    // No separator: returned whole, so the shape checks stay the only judge.
+    expect(callerKeyOf("admin:7")).toBe("admin:7");
+    expect(callerKeyOf("")).toBe("");
   });
 });
 

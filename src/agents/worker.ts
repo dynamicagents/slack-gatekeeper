@@ -71,6 +71,11 @@ const hostManifest: AgentManifest = {
  * gatekeeper also mints for remote agents — and a remote row registered against
  * this origin, with tenant `admin`, would carry a valid token here. Its
  * identity says `kind: "remote"`, so this is where it stops.
+ *
+ * Reading `caller.identity` is right even though core stopped routing by it: the
+ * question here is what *this* gatekeeper minted the token for, and the claim is
+ * the only thing that records that. `caller.issuer` has already been verified to
+ * be this origin, so the claim is this gatekeeper's own writing.
  */
 function builtin<TAgent extends TaskAgent & Rpc.DurableObjectBranded>(
   tenant: BuiltinTenant,
@@ -80,13 +85,13 @@ function builtin<TAgent extends TaskAgent & Rpc.DurableObjectBranded>(
   const mounted = defineAgent<Env, TAgent>({ tenant, manifest, agent });
   return {
     ...mounted,
-    resolveAgent(env, identity) {
-      if (!isBuiltinIdentity(tenant, identity)) {
+    resolveAgent(env, caller) {
+      if (!isBuiltinIdentity(tenant, caller.identity)) {
         throw new Error(
           `the ${tenant} tenant accepts only the gatekeeper's own ${tenant} identity`
         );
       }
-      return mounted.resolveAgent(env, identity);
+      return mounted.resolveAgent(env, caller);
     }
   };
 }

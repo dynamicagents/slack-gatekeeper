@@ -14,9 +14,7 @@ import type { A2ACopy } from "@dynamicagents/core/task";
 export const copy: A2ACopy = {
   failed: "I couldn't finish that request. Check the error logs for details.",
   emptyReply:
-    "I finished, but had nothing to report. Ask again if you expected an answer.",
-  questionExpired:
-    "I stopped here: I asked a question and nobody answered in time. Send the request again whenever you're ready."
+    "I finished, but had nothing to report. Ask again if you expected an answer."
 };
 
 /** The opening identity every built-in soul starts with, so they do not drift. */

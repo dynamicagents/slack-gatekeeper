@@ -23,7 +23,12 @@ import {
 import { buildAgentCard } from "@/a2a/card";
 import { AgentCard, SendMessageResponse, TaskState } from "@a2a-js/sdk";
 import { agentMessage, makeTask } from "../helpers/a2a";
-import { SCRIPTED_REPLY, eventually, stubOutbound } from "../helpers/agents";
+import {
+  SCRIPTED_REPLY,
+  eventually,
+  stubOutbound,
+  useTestLatch
+} from "../helpers/agents";
 import {
   trigger,
   makeAppMentionRequest,
@@ -100,6 +105,39 @@ describe("MessageWorkflow — built-in agents", () => {
       }
     });
     return { body, eventId };
+  }
+
+  /**
+   * An admin-channel mention, as a thread reply when `threadTs` is given. Its
+   * own `ts` is returned, which `makeAppMentionRequest` pins and does not.
+   */
+  function makeAdminMentionRequest(text: string, threadTs?: string) {
+    const eventId = `Ev-local-admin-${++seq}`;
+    const ts = `1701.${String(seq).padStart(6, "0")}`;
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: eventId,
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        channel: "C_ORGADMIN",
+        user: "U1",
+        text,
+        ts,
+        event_ts: ts,
+        ...(threadTs ? { thread_ts: threadTs } : {})
+      }
+    });
+    return { body, eventId, ts };
+  }
+
+  /** The push token the workflow derives for this event and the admin. */
+  function adminTokenFor(eventId: string): Promise<string> {
+    return buildDispatchId(eventId, {
+      name: ADMIN_AGENT_NAME,
+      kind: "local",
+      workspaceId: 0
+    });
   }
 
   it("admin-channel mention: dispatched to the admin tenant, its reply posted at channel level", async () => {
@@ -299,6 +337,71 @@ describe("MessageWorkflow — built-in agents", () => {
       await introspector.dispose();
     }
   });
+
+  it("a mention in the thread of a built-in's open task joins it, with no task or 🛑 of its own", async () => {
+    const posts: PostCall[] = [];
+    const reactions: ReactionCall[] = [];
+    stubOutbound(ORIGIN, (method, body) => {
+      if (method === "chat.postMessage")
+        posts.push({
+          channel: body.get("channel") ?? "",
+          thread_ts: body.get("thread_ts") ?? undefined,
+          text: body.get("text") ?? ""
+        });
+      if (method === "reactions.add" || method === "reactions.remove")
+        reactions.push({
+          method,
+          channel: body.get("channel") ?? "",
+          timestamp: body.get("timestamp") ?? "",
+          name: body.get("name") ?? ""
+        });
+      return { ok: true, ts: "1700.2" };
+    });
+    const latch = useTestLatch();
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      // The turn is held in a tool rather than for a number of seconds, so the
+      // reply cannot arrive after the task finished however slow the runner is.
+      const first = makeAdminMentionRequest("<@UBOT> hold");
+      expect((await trigger(first.body)).status).toBe(200);
+
+      // Synchronized on the turn reaching the tool, not on the task being
+      // accepted: core notes the step and the `joins: true` on it before
+      // starting the job, so a task whose turn is running is joinable, while one
+      // that is merely accepted may not be yet.
+      await eventually(latch.entered);
+
+      // A tool call, so what comes back names the turn that ran it.
+      const reply = makeAdminMentionRequest(
+        "<@UBOT> tool:agents_read",
+        first.ts
+      );
+      expect((await trigger(reply.body)).status).toBe(200);
+      const instances = await introspector.get();
+      expect(instances).toHaveLength(2);
+      // Completes while the turn is still held: sending the join is all this
+      // workflow waits for.
+      await instances[1].waitForStatus("complete");
+
+      // It joined rather than started: no row of its own, and no 🛑, since the
+      // opening message's 🛑 already stops the task it joined. Asserted before
+      // the release, so a second task could not have been opened and finished.
+      expect(
+        await getAgentTaskByToken(await adminTokenFor(reply.eventId))
+      ).toBeNull();
+      expect(reactions.filter((r) => r.timestamp === reply.ts)).toEqual([]);
+
+      // Let the held turn finish, and the joined message runs as the next one.
+      latch.release();
+
+      // Taken by the open task: the admin ran the joined message as a turn and
+      // answered it, which only a step with `joins: true` does.
+      await eventually(() => posts.some((p) => p.text.includes('"agents"')));
+    } finally {
+      latch.release();
+      await introspector.dispose();
+    }
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

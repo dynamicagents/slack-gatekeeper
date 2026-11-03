@@ -15,7 +15,7 @@ import { exports } from "cloudflare:workers";
  * The model is the one thing faked, in `test/worker.ts`.
  */
 
-export { SCRIPTED_REPLY } from "../worker";
+export { SCRIPTED_REPLY, useTestLatch } from "../worker";
 
 /**
  * Stub global fetch: a request to `origin` — the gatekeeper's own `public_url`
