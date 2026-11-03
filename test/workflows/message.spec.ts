@@ -381,7 +381,7 @@ describe("MessageWorkflow — built-in agents", () => {
       expect(instances).toHaveLength(2);
       // Completes while the turn is still held: sending the join is all this
       // workflow waits for.
-      await instances[1]!.waitForStatus("complete");
+      await instances[1].waitForStatus("complete");
 
       // It joined rather than started: no row of its own, and no 🛑, since the
       // opening message's 🛑 already stops the task it joined. Asserted before
