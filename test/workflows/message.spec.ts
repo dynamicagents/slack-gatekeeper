@@ -102,6 +102,39 @@ describe("MessageWorkflow — built-in agents", () => {
     return { body, eventId };
   }
 
+  /**
+   * An admin-channel mention, as a thread reply when `threadTs` is given. Its
+   * own `ts` is returned, which `makeAppMentionRequest` pins and does not.
+   */
+  function makeAdminMentionRequest(text: string, threadTs?: string) {
+    const eventId = `Ev-local-admin-${++seq}`;
+    const ts = `1701.${String(seq).padStart(6, "0")}`;
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: eventId,
+      team_id: "T1",
+      event: {
+        type: "app_mention",
+        channel: "C_ORGADMIN",
+        user: "U1",
+        text,
+        ts,
+        event_ts: ts,
+        ...(threadTs ? { thread_ts: threadTs } : {})
+      }
+    });
+    return { body, eventId, ts };
+  }
+
+  /** The push token the workflow derives for this event and the admin. */
+  function adminTokenFor(eventId: string): Promise<string> {
+    return buildDispatchId(eventId, {
+      name: ADMIN_AGENT_NAME,
+      kind: "local",
+      workspaceId: 0
+    });
+  }
+
   it("admin-channel mention: dispatched to the admin tenant, its reply posted at channel level", async () => {
     const calls = captureSlack();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
@@ -299,6 +332,61 @@ describe("MessageWorkflow — built-in agents", () => {
       await introspector.dispose();
     }
   });
+
+  it("a mention in the thread of a built-in's open task joins it, with no task or 🛑 of its own", async () => {
+    const posts: PostCall[] = [];
+    const reactions: ReactionCall[] = [];
+    stubOutbound(ORIGIN, (method, body) => {
+      if (method === "chat.postMessage")
+        posts.push({
+          channel: body.get("channel") ?? "",
+          thread_ts: body.get("thread_ts") ?? undefined,
+          text: body.get("text") ?? ""
+        });
+      if (method === "reactions.add" || method === "reactions.remove")
+        reactions.push({
+          method,
+          channel: body.get("channel") ?? "",
+          timestamp: body.get("timestamp") ?? "",
+          name: body.get("name") ?? ""
+        });
+      return { ok: true, ts: "1700.2" };
+    });
+    const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
+    try {
+      // The turn is held inside a tool, so the reply lands on a task that is
+      // still working — which is when a join has somewhere to go.
+      const first = makeAdminMentionRequest("<@UBOT> wait:6");
+      expect((await trigger(first.body)).status).toBe(200);
+      const firstToken = await adminTokenFor(first.eventId);
+      await eventually(
+        async () => (await getAgentTaskByToken(firstToken))?.taskId != null
+      );
+
+      // A tool call, so what comes back names the turn that ran it.
+      const reply = makeAdminMentionRequest(
+        "<@UBOT> tool:agents_read",
+        first.ts
+      );
+      expect((await trigger(reply.body)).status).toBe(200);
+      const instances = await introspector.get();
+      expect(instances).toHaveLength(2);
+      await instances[1]!.waitForStatus("complete");
+
+      // Taken by the open task: the admin ran the joined message as its next
+      // turn and answered it, which only a step with `joins: true` does.
+      await eventually(() => posts.some((p) => p.text.includes('"agents"')));
+
+      // It joined rather than started: no row of its own, and no 🛑, since the
+      // opening message's 🛑 already stops the task it joined.
+      expect(
+        await getAgentTaskByToken(await adminTokenFor(reply.eventId))
+      ).toBeNull();
+      expect(reactions.filter((r) => r.timestamp === reply.ts)).toEqual([]);
+    } finally {
+      await introspector.dispose();
+    }
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

@@ -11,14 +11,14 @@ import {
 } from "@/db/models/workspace-configs";
 import { COMPACT_AFTER_TOKENS, COMPACT_TAIL_TOKENS } from "@/config";
 import { avatarStoreFor } from "../avatar-store";
-import { adminWorkspaceOf } from "../identity";
+import { adminWorkspaceOf, callerKeyOf } from "../identity";
 import { agentModel } from "../model";
 import { generateAvatar } from "./avatar";
 import { ADMIN_MEMORY, adminSoul } from "./soul";
 import { buildAdminTools, type EndpointVerifier } from "./tools";
 
 /**
- * The admin agent: one per workspace (`admin:{wsId}`), managing that
+ * The admin agent: one per workspace (`{origin}#admin:{wsId}`), managing that
  * workspace's registry from its admin channel.
  *
  * The job, the turn and the A2A task are core's. What is actually this agent is
@@ -28,9 +28,13 @@ export class AdminStepAgent extends StepAgent<Env> {
   protected readonly compactAfterTokens = COMPACT_AFTER_TOKENS;
   protected readonly keepRecentTokens = COMPACT_TAIL_TOKENS;
 
-  /** The workspace this instance manages, read off its own name. */
+  /**
+   * The workspace this instance manages, read off its own name — durable, and
+   * correct by construction, where a turn's claim is neither. The name is core's
+   * caller scope, so the key comes out of it first.
+   */
   private get wsId(): number {
-    const wsId = adminWorkspaceOf(this.name);
+    const wsId = adminWorkspaceOf(callerKeyOf(this.name));
     if (wsId === null) {
       throw new Error(
         `AdminStepAgent: not an admin instance name: ${this.name}`

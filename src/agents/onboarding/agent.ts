@@ -11,8 +11,9 @@ import { buildOnboardingTools } from "./tools";
 
 /**
  * The onboarding concierge: one per direct-message channel
- * (`onboarding:{dmChannelId}`), which is one per person. The job, the turn and the A2A task are core's; this is its
- * soul, its memory of the person, and the directory tools.
+ * (`{origin}#onboarding:{dmChannelId}`), which is one per person. The job, the
+ * turn and the A2A task are core's; this is its soul, its memory of the person,
+ * and the directory tools.
  */
 export class OnboardingStepAgent extends StepAgent<Env> {
   protected readonly compactAfterTokens = COMPACT_AFTER_TOKENS;

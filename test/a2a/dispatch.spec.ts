@@ -52,8 +52,23 @@ import {
 import { useStorageReset } from "../helpers/storage";
 import { choiceForm } from "../helpers/hitl";
 import { REACTION_SYNC_EVENT } from "@/workflows/reaction-helpers";
+import { verifiedCaller } from "@dynamicagents/core/a2a";
+import type {
+  GatekeeperIdentity,
+  RemoteIdentity
+} from "@dynamicagents/g2a-protocol";
+import { adminIdentity, onboardingIdentity } from "@/agents/identity";
 
 useStorageReset();
+
+/**
+ * The Durable Object name core serves a caller under: the `iss` origin
+ * verification established, composed with the key the gatekeeper claimed. Built
+ * through core's own composer so this spec cannot drift from the way core spells
+ * it.
+ */
+const scopeOf = (identity: GatekeeperIdentity): string =>
+  verifiedCaller("https://gatekeeper.test", identity).scope;
 
 const user = (slackUserId: string): UserAuthContext => ({
   slackUserId,
@@ -317,8 +332,10 @@ describe("dispatchToAgent (built-in)", () => {
     expect(result.taskId.length).toBeGreaterThan(0);
     expect(result.token).toBe(await buildDispatchId("Ev-admin", ADMIN));
 
-    // The task lives in the workspace's admin host, `admin:{wsId}`.
-    const host = env.AdminHost.get(env.AdminHost.idFromName("admin:0"));
+    // The task lives in the workspace's admin host, `{origin}#admin:{wsId}`.
+    const host = env.AdminHost.get(
+      env.AdminHost.idFromName(scopeOf(adminIdentity(0)))
+    );
     expect((await host.getTask(result.taskId))?.id).toBe(result.taskId);
     // Nothing left the isolate but core reading our own JWKS: the call itself
     // never touched the network.
@@ -333,7 +350,7 @@ describe("dispatchToAgent (built-in)", () => {
     expect(result.kind).toBe("accepted");
     if (result.kind !== "accepted") return;
     const host = env.OnboardingHost.get(
-      env.OnboardingHost.idFromName("onboarding:D1")
+      env.OnboardingHost.idFromName(scopeOf(onboardingIdentity("D1", 0)))
     );
     expect((await host.getTask(result.taskId))?.id).toBe(result.taskId);
   });
@@ -350,16 +367,17 @@ describe("dispatchToAgent (built-in)", () => {
   it("the tenants refuse a token minted for a remote agent", async () => {
     // A remote row pointed at this origin with tenant `admin` carries a valid
     // gatekeeper token. Its identity says `remote`, which the mount refuses.
+    const evil: RemoteIdentity = {
+      key: "remote:0:evil",
+      name: "evil",
+      kind: "remote",
+      workspaceId: 0
+    };
     const token = await signGatekeeperToken({
       audience: builtinEndpoint(ORIGIN),
       issuer: ORIGIN,
       tenant: "admin",
-      identity: {
-        key: "remote:0:evil",
-        name: "evil",
-        kind: "remote",
-        workspaceId: 0
-      }
+      identity: evil
     });
     const res = await agentsWorker(
       new Request(builtinEndpoint(ORIGIN), {
@@ -399,7 +417,7 @@ describe("dispatchToAgent (built-in)", () => {
     expect(body.result).toBeUndefined();
     expect(
       await env.AdminHost.get(
-        env.AdminHost.idFromName("remote:0:evil")
+        env.AdminHost.idFromName(scopeOf(evil))
       ).listTasks({ includeArtifacts: false, limit: 10, offset: 0 })
     ).toMatchObject({ totalSize: 0 });
   });
@@ -861,7 +879,9 @@ describe("cancelAgentTask", () => {
 
     const out = await cancelAgentTask(admin, accepted.taskId, "C_ORG");
     expect(out.kind).toBe("canceled");
-    const host = env.AdminHost.get(env.AdminHost.idFromName("admin:0"));
+    const host = env.AdminHost.get(
+      env.AdminHost.idFromName(scopeOf(adminIdentity(0)))
+    );
     expect((await host.getTask(accepted.taskId))?.status.state).toBe(
       TaskState.TASK_STATE_CANCELED
     );
