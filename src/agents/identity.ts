@@ -57,7 +57,7 @@ const SCOPE_SEPARATOR = "#";
  * The key half of the scope core serves an object under, so an object can read
  * back what it was minted for from the one thing it is sure of — its own name.
  *
- * Core 0.17 composes that name as `{issuer}#{key}` and splits it at the **first**
+ * Core composes that name as `{issuer}#{key}` and splits it at the **first**
  * `#`: an origin cannot contain one, so the first occurrence is the boundary
  * whatever the key holds. Core states that rule in `src/a2a/caller-scope.ts` and
  * exports no splitter for it, so it is spelled here — the one `#` this repo
