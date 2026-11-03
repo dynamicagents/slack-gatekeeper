@@ -23,7 +23,12 @@ import {
 import { buildAgentCard } from "@/a2a/card";
 import { AgentCard, SendMessageResponse, TaskState } from "@a2a-js/sdk";
 import { agentMessage, makeTask } from "../helpers/a2a";
-import { SCRIPTED_REPLY, eventually, stubOutbound } from "../helpers/agents";
+import {
+  SCRIPTED_REPLY,
+  eventually,
+  stubOutbound,
+  useTestLatch
+} from "../helpers/agents";
 import {
   trigger,
   makeAppMentionRequest,
@@ -352,16 +357,19 @@ describe("MessageWorkflow — built-in agents", () => {
         });
       return { ok: true, ts: "1700.2" };
     });
+    const latch = useTestLatch();
     const introspector = await introspectWorkflow(env.MESSAGE_WORKFLOW);
     try {
-      // The turn is held inside a tool, so the reply lands on a task that is
-      // still working — which is when a join has somewhere to go.
-      const first = makeAdminMentionRequest("<@UBOT> wait:6");
+      // The turn is held in a tool rather than for a number of seconds, so the
+      // reply cannot arrive after the task finished however slow the runner is.
+      const first = makeAdminMentionRequest("<@UBOT> hold");
       expect((await trigger(first.body)).status).toBe(200);
-      const firstToken = await adminTokenFor(first.eventId);
-      await eventually(
-        async () => (await getAgentTaskByToken(firstToken))?.taskId != null
-      );
+
+      // Synchronized on the turn reaching the tool, not on the task being
+      // accepted: core notes the step and the `joins: true` on it before
+      // starting the job, so a task whose turn is running is joinable, while one
+      // that is merely accepted may not be yet.
+      await eventually(latch.entered);
 
       // A tool call, so what comes back names the turn that ran it.
       const reply = makeAdminMentionRequest(
@@ -371,19 +379,26 @@ describe("MessageWorkflow — built-in agents", () => {
       expect((await trigger(reply.body)).status).toBe(200);
       const instances = await introspector.get();
       expect(instances).toHaveLength(2);
+      // Completes while the turn is still held: sending the join is all this
+      // workflow waits for.
       await instances[1]!.waitForStatus("complete");
 
-      // Taken by the open task: the admin ran the joined message as its next
-      // turn and answered it, which only a step with `joins: true` does.
-      await eventually(() => posts.some((p) => p.text.includes('"agents"')));
-
       // It joined rather than started: no row of its own, and no 🛑, since the
-      // opening message's 🛑 already stops the task it joined.
+      // opening message's 🛑 already stops the task it joined. Asserted before
+      // the release, so a second task could not have been opened and finished.
       expect(
         await getAgentTaskByToken(await adminTokenFor(reply.eventId))
       ).toBeNull();
       expect(reactions.filter((r) => r.timestamp === reply.ts)).toEqual([]);
+
+      // Let the held turn finish, and the joined message runs as the next one.
+      latch.release();
+
+      // Taken by the open task: the admin ran the joined message as a turn and
+      // answered it, which only a step with `joins: true` does.
+      await eventually(() => posts.some((p) => p.text.includes('"agents"')));
     } finally {
+      latch.release();
       await introspector.dispose();
     }
   }, 60_000);
