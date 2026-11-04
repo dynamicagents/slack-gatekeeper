@@ -21,16 +21,24 @@ import { sanitizeSlackText } from "@/util/slack-text";
  * question nobody was asked: one prompt lost every numbered question it held
  * that way, because they all started past the 3,000th character.
  *
- * Each thing is said once, where it is answered. One question picked from a
- * short list is answered in the thread, by a button per option, so the message
- * holds the question. Anything else — several questions, several picks, words —
- * opens a modal with an input per question, from one "Answer" button, paged when
- * one modal cannot hold them all (see {@link formPages}): the message then holds
- * only the agent's words, and the modal only the questions.
+ * Each thing is said once, where it is answered. Every form — one question or
+ * forty, a pick, an approval or words — is answered in a modal with an input per
+ * question, opened from one "Answer" button and paged when one modal cannot hold
+ * them all (see {@link formPages}). The message holds only what the agent said
+ * around the questions, or their headings where it said nothing (see
+ * {@link glance}); the modal holds the questions themselves, with their options,
+ * their links and their controls.
  *
- * A control holds at most 75 characters, and a button shows about 30, so where
- * an option has more to it than a control shows, its options are listed in full
- * above the controls, which then carry only their numbers.
+ * A short form used to be answered in the thread instead, by a button per option
+ * or by Approve and Reject ({@link controlBlocks} has why it no longer is). A
+ * prompt posted while that was so keeps the controls it was posted with —
+ * nothing here rewrites a message already in a thread — so `./answer.ts` goes on
+ * reading {@link PICK_ACTION} and a per-question {@link OPEN_ACTION} for as long
+ * as one of those prompts can still be clicked.
+ *
+ * A control holds at most 75 characters, so where an option has more to it than
+ * one shows, its options are listed in full above the controls, which then carry
+ * only their numbers.
  *
  * A form mentions whoever started the task, so it reaches the person who asked
  * for the work instead of waiting in a thread nobody is watching — naming the
@@ -48,9 +56,6 @@ const SECTION_TEXT = 3_000;
  * (`msg_blocks_too_long`); this stays under that.
  */
 const MESSAGE_TEXT = 12_000;
-
-/** Past roughly this many characters Slack's client clips a button's label. */
-const VISIBLE_BUTTON_LABEL = 30;
 
 /** Slack's cap on a button's, or a radio or select option's, text. */
 const CONTROL_TEXT = 75;
@@ -81,9 +86,14 @@ const SLACK_USER_ID = /^[UW][A-Z0-9]+$/;
 /** The `callback_id` of the modal a form is answered in. */
 export const FORM_CALLBACK_ID = "hitl-form";
 
-/** Action ids on the prompt's controls: a pick (`-<n>` per option), and "open a modal". */
-export const PICK_ACTION = "hitl-pick";
+/**
+ * Action ids on the prompt's controls: "open a modal", and a pick (`-<n>` per
+ * option). Only the first is written now — every form is answered in the modal
+ * — and {@link PICK_ACTION} is kept because prompts posted before that are still
+ * open in their threads and their buttons still have to answer.
+ */
 export const OPEN_ACTION = "hitl-open";
+export const PICK_ACTION = "hitl-pick";
 
 /** Action id of the Back button on a paged form's later pages. */
 export const BACK_ACTION = "hitl-back";
@@ -320,15 +330,17 @@ function artifactLink(url: string): string {
 
 /**
  * Whether a question's options are listed in full above its controls: when a
- * control showing `shown` characters cannot carry one whole — a longer label, a
- * description, an example. Otherwise the controls carry the labels alone.
+ * control cannot carry one whole — a longer label, a description, an example.
+ * Otherwise the controls carry the labels alone.
  */
-function listsOptions(question: HitlQuestion, shown: number): boolean {
+function listsOptions(question: HitlQuestion): boolean {
   return (
     question.kind === "choice" &&
     question.options.some(
       (o) =>
-        o.label.length > shown || Boolean(o.description) || Boolean(o.example)
+        o.label.length > CONTROL_TEXT ||
+        Boolean(o.description) ||
+        Boolean(o.example)
     )
   );
 }
@@ -352,67 +364,37 @@ function questionMrkdwn(question: HitlQuestion, withOptions: boolean): string {
   return lines.join("\n\n");
 }
 
-/** A question answered in the thread as its message shows it: the agent's words over it. */
-function quickMrkdwn(request: HitlRequest, question: HitlQuestion): string {
-  return [
-    request.prompt ? toMrkdwn(request.prompt) : "",
-    questionMrkdwn(question, listsOptions(question, VISIBLE_BUTTON_LABEL))
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-/**
- * The one question answered by buttons in the thread: when the form is that,
- * and it fits one message whole. One that does not is answered in the modal,
- * which shows it whole — a message shortened to fit would show buttons beside
- * options nobody can read in full.
- */
-function quickQuestion(request: HitlRequest): HitlQuestion | undefined {
-  if (request.questions.length !== 1) return undefined;
-  const [question] = request.questions;
-  const answeredHere =
-    question.kind === "approval" ||
-    (question.kind === "choice" &&
-      !question.multiple &&
-      question.options.length <= GROUP_OPTIONS);
-  return answeredHere && quickMrkdwn(request, question).length <= MESSAGE_TEXT
-    ? question
-    : undefined;
-}
-
 /**
  * The questions named in a line each, for a form whose agent said nothing
- * around them: the message then still says what is being asked.
+ * around them: the message then still says what is being asked. One question is
+ * not a list, so it is named without a bullet to mark one.
  */
 function glance(request: HitlRequest): string {
-  return request.questions
-    .map((q) =>
-      q.header
-        ? `• *${toMrkdwn(q.header)}*`
-        : `• ${clipMrkdwn(toMrkdwn(q.prompt.split("\n")[0] ?? ""), GLANCE)}`
-    )
-    .join("\n");
+  const named = request.questions.map((q) =>
+    q.header
+      ? `*${toMrkdwn(q.header)}*`
+      : clipMrkdwn(toMrkdwn(q.prompt.split("\n")[0] ?? ""), GLANCE)
+  );
+  return named.length === 1
+    ? named.join("")
+    : named.map((line) => `• ${line}`).join("\n");
 }
 
 /** Whether the agent's words run past the message, so the modal opens with them. */
 function promptCut(request: HitlRequest): boolean {
   return (
-    quickQuestion(request) === undefined &&
     request.prompt !== undefined &&
     toMrkdwn(request.prompt).length > MESSAGE_TEXT
   );
 }
 
 /**
- * What the message says above its controls. A question answered in the thread
- * is in it, with its options, since its buttons answer it there. A form answered
- * in the modal is not: the message holds only the agent's words, and the modal
- * the questions.
+ * What the message says above its one control: the agent's words, or the
+ * questions named in a line each where it wrote none. Never the questions
+ * themselves, their options or their links — those are the modal's, which is
+ * where they are answered, and a reader asked them twice reads them twice.
  */
 function messageText(request: HitlRequest): string {
-  const quick = quickQuestion(request);
-  if (quick) return quickMrkdwn(request, quick);
   return request.prompt ? toMrkdwn(request.prompt) : glance(request);
 }
 
@@ -431,41 +413,27 @@ function button(
   };
 }
 
-/** The prompt's controls. */
+/**
+ * The prompt's one control, whatever the form holds: one question or forty, a
+ * pick, an approval or words are all answered in the modal it opens.
+ *
+ * A short form used to be answered in the thread instead, by a button per option
+ * or Approve and Reject. What that cost is that how much of its own question a
+ * prompt showed depended on how short the form was, and a button carries an
+ * option's label alone — never its description, its sample, or the artifact an
+ * approval is about. One modal is a click more and the same prompt every time,
+ * with every question whole where it is answered.
+ */
 function controlBlocks(request: HitlRequest): unknown[] {
-  const r = request.requestId;
-  const question = quickQuestion(request);
-  let elements: unknown[];
-  if (!question) {
-    elements = [button("Answer", OPEN_ACTION, { r }, "primary")];
-  } else if (question.kind === "approval") {
-    elements = [
-      button(
-        "Approve",
-        `${PICK_ACTION}-0`,
-        { r, q: 0, o: "approve" },
-        "primary"
-      ),
-      button("Reject", `${PICK_ACTION}-1`, { r, q: 0, o: "reject" }, "danger"),
-      button("Comment…", OPEN_ACTION, { r, q: 0 })
-    ];
-  } else if (question.kind === "choice") {
-    // Numbers, when the message lists the options they stand for.
-    const numbers = listsOptions(question, VISIBLE_BUTTON_LABEL);
-    elements = [
-      ...question.options.map((o, j) =>
-        button(numbers ? String(j + 1) : o.label, `${PICK_ACTION}-${j}`, {
-          r,
-          q: 0,
-          o: j
-        })
-      ),
-      button("Other…", OPEN_ACTION, { r, q: 0 })
-    ];
-  } else {
-    elements = [];
-  }
-  return [{ type: "actions", block_id: "hitl-controls", elements }];
+  return [
+    {
+      type: "actions",
+      block_id: "hitl-controls",
+      elements: [
+        button("Answer", OPEN_ACTION, { r: request.requestId }, "primary")
+      ]
+    }
+  ];
 }
 
 /**
@@ -654,7 +622,7 @@ function inputElement(question: HitlQuestion, answer?: HitlAnswer): unknown {
     }
     case "choice": {
       const few = question.options.length <= GROUP_OPTIONS;
-      const numbered = listsOptions(question, CONTROL_TEXT);
+      const numbered = listsOptions(question);
       const options = question.options
         .slice(0, SELECT_OPTIONS)
         .map((o, j) => choiceOption(o, j, numbered));
@@ -722,9 +690,9 @@ function questionBlocks(
   answer?: HitlAnswer
 ): unknown[] {
   const blocks: unknown[] = [
-    ...splitMrkdwn(
-      questionMrkdwn(question, listsOptions(question, CONTROL_TEXT))
-    ).map(section),
+    ...splitMrkdwn(questionMrkdwn(question, listsOptions(question))).map(
+      section
+    ),
     {
       type: "input",
       block_id: inputBlockId(index, question),
@@ -825,8 +793,11 @@ export function formView(
 }
 
 /**
- * One question's words alone — what "Other…" and "Comment…" open, from a
- * message that already lists its options.
+ * One question's words alone — what "Other…" and "Comment…" open, on a prompt
+ * posted while a short form was still answered in the thread. Its options are on
+ * that message, so only the words it did not offer are asked for here. Nothing
+ * posted now carries those buttons (see {@link controlBlocks}), and one still
+ * open in a thread has to go on answering.
  */
 export function wordsView(
   request: HitlRequest,

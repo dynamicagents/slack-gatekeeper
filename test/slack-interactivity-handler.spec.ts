@@ -38,7 +38,7 @@ import {
   PICK_ACTION,
   requestBlocks
 } from "@/slack/hitl/render";
-import { choiceForm } from "./helpers/hitl";
+import { approvalForm, choiceForm } from "./helpers/hitl";
 import {
   HITL_REQUEST_TYPE,
   MAX_MESSAGE_TEXT_BYTES,
@@ -218,7 +218,12 @@ async function interactivityRequest(payload: unknown): Promise<Request> {
   });
 }
 
-/** A typed answer submitted from the "Other…" modal, as Slack posts it. */
+/**
+ * A typed answer submitted from the "Other…" modal, as Slack posts it: one
+ * question's words alone, carrying no page in its metadata — what the "Other…"
+ * button on a {@link promptBlocks} prompt opens, and the submission shape the
+ * handler has to go on taking for as long as one of those is open.
+ */
 function freeformSubmission(requestId: string, text: string) {
   return {
     type: "view_submission",
@@ -237,9 +242,28 @@ function freeformSubmission(requestId: string, text: string) {
   };
 }
 
-/** The prompt `seedParkedRequest` stands for, as `deliverHitlRequest` posts it. */
+/**
+ * A one-question prompt as it was posted while a short form was answered in the
+ * thread: the question, and a button per option. Written out rather than
+ * rendered, because `requestBlocks` now posts one Answer button for every form —
+ * and a prompt posted before that is still open in its thread, where a click on
+ * one of these buttons still has to answer it. That is what the clicks below
+ * stand for.
+ */
 function promptBlocks(requestId: string): unknown[] {
-  return requestBlocks(choiceForm(requestId));
+  return [
+    { type: "section", text: { type: "mrkdwn", text: "Proceed?" } },
+    {
+      type: "actions",
+      block_id: "hitl-controls",
+      elements: ["Approve", "Reject"].map((label, index) => ({
+        type: "button",
+        action_id: `${PICK_ACTION}-${index}`,
+        text: { type: "plain_text", text: label },
+        value: JSON.stringify({ r: requestId, q: 0, o: index })
+      }))
+    }
+  ];
 }
 
 /**
@@ -852,6 +876,132 @@ describe("the answered state", () => {
       })
     );
     errors.mockRestore();
+  });
+});
+
+/**
+ * A form of one question: answered in the same modal as a form of forty, from
+ * the same one button. The message offers no option and no verdict of its own,
+ * so that button is the only way in, and what it opens has to hold the question
+ * and the inputs to answer it.
+ */
+describe("a form of one question", () => {
+  const emptyCapture = (): Captured => ({
+    slackUpdates: [],
+    slackEphemerals: [],
+    slackReplies: [],
+    resumeMessages: [],
+    views: []
+  });
+
+  async function send(payload: unknown): Promise<Response> {
+    const ctx = createExecutionContext();
+    const res = await handleSlackInteractivity(
+      await interactivityRequest(payload),
+      ctx
+    );
+    await waitOnExecutionContext(ctx);
+    return res;
+  }
+
+  const rollout = () =>
+    choiceForm("req-one", "Which rollout?", [
+      { id: "now", label: "Now" },
+      { id: "later", label: "Later" }
+    ]);
+
+  /** A click on the prompt's only button, as Slack sends one. */
+  function answerAction(request: HitlRequestData) {
+    const blocks = requestBlocks(request);
+    const elements = (
+      blocks.find((b) => (b as { type?: string }).type === "actions") as {
+        elements: { action_id: string; value: string }[];
+      }
+    ).elements;
+    expect(elements).toHaveLength(1);
+    return {
+      type: "block_actions",
+      user: { id: "U1" },
+      trigger_id: "trig-1",
+      channel: { id: "C1" },
+      message: { ts: "1700.9", blocks },
+      actions: [{ ...elements[0], type: "button" }]
+    };
+  }
+
+  it.each([
+    ["a pick", rollout, ["q0:choice", "q0:other"], "Which rollout?"],
+    [
+      "an approval",
+      () => approvalForm("req-one"),
+      ["q0:approval", "q0:other"],
+      "Approve the plan?"
+    ]
+  ])(
+    "opens %s in the modal, from the prompt's Answer button",
+    async (_what, build, inputs, asks) => {
+      const request = build();
+      await seedParkedRequest("req-one", "", request);
+      const captured = emptyCapture();
+      stub(captured);
+
+      const res = await send(answerAction(request));
+      expect(res.status).toBe(200);
+
+      expect(captured.views).toHaveLength(1);
+      const view = captured.views![0]!;
+      expect(view).toMatchObject({
+        callback_id: FORM_CALLBACK_ID,
+        private_metadata: JSON.stringify({ r: "req-one", p: 0 })
+      });
+      // The question, and the inputs it is answered with, are in what opened.
+      expect(blocksText(view.blocks)).toContain(asks);
+      expect(
+        (view.blocks as { type: string; block_id?: string }[])
+          .filter((b) => b.type === "input")
+          .map((b) => b.block_id)
+      ).toEqual(inputs);
+      // Opening it claims nothing: the prompt is still open for anyone.
+      expect((await getHitlForm("req-one"))?.status).toBe("awaiting");
+      expect(captured.resumeMessages).toEqual([]);
+      expect(captured.slackUpdates).toEqual([]);
+    }
+  );
+
+  it("sends the pick made in that modal, and leaves the prompt answered", async () => {
+    await seedParkedRequest("req-one", "", rollout());
+    const captured = emptyCapture();
+    stub(captured);
+
+    const res = await send({
+      type: "view_submission",
+      user: { id: "U1" },
+      view: {
+        callback_id: FORM_CALLBACK_ID,
+        private_metadata: JSON.stringify({ r: "req-one", p: 0 }),
+        state: {
+          values: {
+            "q0:choice": {
+              value: { type: "radio_buttons", selected_option: { value: "1" } }
+            },
+            "q0:other": { value: { type: "plain_text_input", value: null } }
+          }
+        }
+      }
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    const resume = captured.resumeMessages[0]!;
+    expect(resume.parts.map(dataOf).find((d) => d !== undefined)).toMatchObject(
+      {
+        requestId: "req-one",
+        answers: { q1: { optionIds: ["later"] } }
+      }
+    );
+    expect(partsText(resume.parts)).toBe("Later");
+    expect((await getHitlForm("req-one"))?.status).toBe("answered");
+    expect(isAnswered(captured.slackUpdates.at(-1))).toBe(true);
   });
 });
 

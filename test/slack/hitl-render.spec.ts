@@ -12,6 +12,8 @@ import {
   fallbackText,
   formPages,
   formView,
+  OPEN_ACTION,
+  PICK_ACTION,
   requestBlocks,
   requestFallbackText,
   resolvedBlocks,
@@ -122,6 +124,19 @@ function inputsOf(view: Record<string, unknown>) {
   }[];
 }
 
+/** Each input's options as its control shows them, in order. */
+function optionTexts(view: Record<string, unknown>): string[][] {
+  return inputsOf(view).flatMap((b) =>
+    b.element.options
+      ? [
+          (b.element.options as { text: { text: string } }[]).map(
+            (o) => o.text.text
+          )
+        ]
+      : []
+  );
+}
+
 /** A modal's state as Slack reports it, one entry per input. */
 function state(
   ...entries: [string, { picks?: string[]; text?: string }][]
@@ -165,46 +180,69 @@ describe("splitMrkdwn", () => {
 });
 
 describe("the open prompt", () => {
-  it("answers one short choice by its own buttons, with Other… beside them", () => {
-    const blocks = requestBlocks(
-      choiceForm("req-short", "Proceed?", [
-        { id: "yes", label: "Yes" },
-        { id: "no", label: "No" }
-      ])
-    );
-    expect(messageViolations(blocks)).toEqual([]);
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
-      "Yes",
-      "No",
-      "Other…"
+  /**
+   * One question is answered where forty are: in the modal, from one Answer
+   * button. The message names what is being asked and offers no part of the
+   * answer — the question, its options and an approval's artifact are all shown
+   * where they are answered, and shown there whole.
+   */
+  it("answers a one-question choice in the modal, from one Answer button", () => {
+    const request = choiceForm("req-short", "Proceed?", [
+      { id: "yes", label: "Yes" },
+      { id: "no", label: "No" }
     ]);
-    // Short labels on their buttons: no list repeating them.
-    expect(blocksText(blocks)).not.toContain("*1.*");
+    const blocks = requestBlocks(request);
+    expect(messageViolations(blocks)).toEqual([]);
+    expect(buttonsOf(blocks).map((b) => [b.text.text, b.style])).toEqual([
+      ["Answer", "primary"]
+    ]);
+    // The question is named; nothing on the message answers it.
+    expect(blocksText(blocks)).toBe("Proceed?");
+
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    expect(blocksText(view.blocks as unknown[])).toContain("Proceed?");
+    expect(
+      inputsOf(view).map((b) => [b.block_id, b.element.type, b.label.text])
+    ).toEqual([
+      ["q0:choice", "radio_buttons", "Pick one"],
+      ["q0:other", "plain_text_input", "Other"]
+    ]);
+    // Short labels on the controls: no list above them repeating the options.
+    expect(optionTexts(view)).toEqual([["Yes", "No"]]);
+    expect(blocksText(view.blocks as unknown[])).not.toContain("*1.*");
   });
 
-  it("lists long options in full above buttons that show their numbers", () => {
-    const blocks = requestBlocks(
-      choiceForm(
-        "req-opts",
-        "Which merge?",
-        longLabels.map((label, i) => ({ id: `o${i}`, label }))
-      )
+  it("lists long options in full in the modal, above controls carrying their numbers", () => {
+    const request = choiceForm(
+      "req-opts",
+      "Which merge?",
+      longLabels.map((label, i) => ({ id: `o${i}`, label }))
     );
+    const blocks = requestBlocks(request);
     expect(messageViolations(blocks)).toEqual([]);
     const text = blocksText(blocks);
-    for (const label of longLabels) expect(text).toContain(label);
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
-      "1",
-      "2",
-      "3",
-      "4",
-      "Other…"
+    for (const label of longLabels) expect(text).not.toContain(label);
+
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    const modal = blocksText(view.blocks as unknown[]);
+    longLabels.forEach((label, i) => {
+      expect(modal).toContain(`*${i + 1}.* ${label}`);
+    });
+    // A control holds 75 characters, which these labels run past, so each
+    // carries the number it is listed under.
+    expect(optionTexts(view)[0]!.map((t) => t.slice(0, 3))).toEqual([
+      "1. ",
+      "2. ",
+      "3. ",
+      "4. "
     ]);
   });
 
   it("shows each option's description, and its example as a code block", () => {
     const text = blocksText(
-      requestBlocks(
+      formView(
         choiceForm("req-ex", "How should it merge?", [
           {
             id: "squash",
@@ -214,7 +252,7 @@ describe("the open prompt", () => {
           },
           { id: "rebase", label: "Rebase" }
         ])
-      )
+      ).blocks as unknown[]
     );
     expect(text).toContain(
       "*1.* Squash\nOne commit on main.\n```\nfeat: forms (#142)\n```"
@@ -222,28 +260,34 @@ describe("the open prompt", () => {
     expect(text).toContain("*2.* Rebase");
   });
 
-  it("asks an approval by Approve, Reject and Comment…, with the link to look at", () => {
-    const blocks = requestBlocks(
-      form([
-        {
-          kind: "approval",
-          id: "q1",
-          prompt: "Approve the plan?",
-          artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
-        }
-      ])
-    );
-    expect(blocksText(blocks)).toContain("<https://agents.example/a/tok>");
+  it("asks a one-question approval in the modal, with the link to look at", () => {
+    const request = approvalForm("req-ap");
+    const blocks = requestBlocks(request);
+    expect(messageViolations(blocks)).toEqual([]);
     expect(buttonsOf(blocks).map((b) => [b.text.text, b.style])).toEqual([
-      ["Approve", "primary"],
-      ["Reject", "danger"],
-      ["Comment…", undefined]
+      ["Answer", "primary"]
     ]);
+    // Neither verdict is one click away on the message, and nor is the artifact:
+    // the decision and the thing it is about are both in the modal.
+    expect(blocksText(blocks)).toBe("Approve the plan?");
+
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    expect(blocksText(view.blocks as unknown[])).toContain(
+      "<https://agents.example/a/tok>"
+    );
+    expect(
+      inputsOf(view).map((b) => [b.block_id, b.element.type, b.label.text])
+    ).toEqual([
+      ["q0:approval", "radio_buttons", "Approve or reject"],
+      ["q0:other", "plain_text_input", "Comment"]
+    ]);
+    expect(optionTexts(view)).toEqual([["Approve", "Reject"]]);
   });
 
   it("does not link an artifact that is not https", () => {
     const text = blocksText(
-      requestBlocks(
+      formView(
         form([
           {
             kind: "approval",
@@ -252,7 +296,7 @@ describe("the open prompt", () => {
             artifact: { id: "p", url: "javascript:alert(1)" }
           }
         ])
-      )
+      ).blocks as unknown[]
     );
     expect(text).not.toContain("<javascript:");
   });
@@ -293,6 +337,15 @@ describe("the open prompt", () => {
       )
     );
     expect(text).toBe("• *Database*\n• Name it?");
+  });
+
+  /** One question is not a list, so no bullet marks it as one of several. */
+  it("names one question without a bullet", () => {
+    expect(
+      blocksText(
+        requestBlocks(form([{ kind: "text", id: "q1", prompt: "Name it?" }]))
+      )
+    ).toBe("Name it?");
   });
 
   /**
@@ -354,20 +407,18 @@ describe("the open prompt", () => {
 describe("a prompt's mention of whoever started the task", () => {
   const APPROVAL_PING = "<@U1> — this needs your approval.";
   const ASK_PING = "<@U1> — this needs your answer.";
-  const APPROVAL_BUTTONS = ["Approve", "Reject", "Comment…"];
 
   /**
-   * One form of every kind a prompt can hold: what it asks the starter for, the
-   * question it is still asking, and the controls it is answered by — which the
-   * mention leaves exactly as they were.
+   * One form of every kind a prompt can hold: what it asks the starter for, and
+   * the question it is still asking — which the mention leaves exactly as it
+   * was, as it leaves the one button every form is answered from.
    */
   const FORMS = [
     {
       what: "an approval",
       build: () => approvalForm("req-ping-ap"),
       ping: APPROVAL_PING,
-      asks: "Approve the plan?",
-      buttons: APPROVAL_BUTTONS
+      asks: "Approve the plan?"
     },
     {
       what: "a pick",
@@ -377,8 +428,7 @@ describe("a prompt's mention of whoever started the task", () => {
           { id: "later", label: "Later" }
         ]),
       ping: ASK_PING,
-      asks: "Which rollout?",
-      buttons: ["Now", "Later", "Other…"]
+      asks: "Which rollout?"
     },
     {
       what: "words",
@@ -389,14 +439,13 @@ describe("a prompt's mention of whoever started the task", () => {
           "req-ping-tx"
         ),
       ping: ASK_PING,
-      asks: "Name it?",
-      buttons: ["Answer"]
+      asks: "Name it?"
     }
   ];
 
   it.each(FORMS)(
     "mentions them for $what, and leads the notification with it",
-    ({ build, ping, buttons }) => {
+    ({ build, ping }) => {
       const request = build();
       const blocks = requestBlocks(request, "U1");
       expect(messageViolations(blocks)).toEqual([]);
@@ -412,8 +461,8 @@ describe("a prompt's mention of whoever started the task", () => {
       expect(requestFallbackText(request, "U1")).toBe(
         `${ping}\n\n${requestFallbackText(request)}`
       );
-      // The question is still asked the same way, by its own controls.
-      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(buttons);
+      // The question is still asked the same way, from the one Answer button.
+      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
     }
   );
 
@@ -500,16 +549,16 @@ describe("a prompt's mention of whoever started the task", () => {
     ["a channel id rather than a user's", "C123ABC"],
     ["not an id at all", "not an id"]
   ])("asks nobody when the starter is %s", (_what, starter) => {
-    for (const { build, asks, buttons } of FORMS) {
+    for (const { build, asks } of FORMS) {
       const request = build();
       const blocks = requestBlocks(request, starter);
       expect(messageViolations(blocks)).toEqual([]);
       expect(blocksText(blocks)).not.toContain("<@");
       // Not as a mention, and not as text either.
       if (starter) expect(blocksText(blocks)).not.toContain(starter);
-      // The question is still asked, and asked the same way, by its own controls.
+      // The question is still asked, and asked the same way, from one button.
       expect(blocksText(blocks)).toContain(asks);
-      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(buttons);
+      expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
       expect(requestFallbackText(request, starter)).toBe(
         requestFallbackText(request)
       );
@@ -569,28 +618,71 @@ describe("a prompt's mention of whoever started the task", () => {
 });
 
 describe("the controls", () => {
-  it("read back as the pick or the modal they stand for", () => {
-    const request = choiceForm("req-c", "Which?", [
+  it("read the prompt's one button back as the modal it opens", () => {
+    const buttons = buttonsOf(
+      requestBlocks(
+        choiceForm("req-c", "Which?", [
+          { id: "first", label: "First" },
+          { id: "second", label: "Second" }
+        ])
+      )
+    );
+    expect(buttons).toHaveLength(1);
+    const [answer] = buttons;
+    expect(
+      readControl({ actionId: answer!.action_id, value: answer!.value })
+    ).toEqual({ kind: "open", requestId: "req-c" });
+  });
+
+  /**
+   * A prompt posted while a short form was answered in the thread is still open
+   * in its thread, and a click on it still has to answer. Its controls are
+   * written out here rather than rendered, because nothing renders them any
+   * more — which is exactly why reading them has to be pinned.
+   */
+  it("still read a pick and a words button on a prompt posted before the modal", () => {
+    const choice = choiceForm("req-old", "Which?", [
       { id: "first", label: "First" },
       { id: "second", label: "Second" }
     ]);
-    const [, second, other] = buttonsOf(requestBlocks(request));
     const pick = readControl({
-      actionId: second!.action_id,
-      value: second!.value
+      actionId: `${PICK_ACTION}-1`,
+      value: JSON.stringify({ r: "req-old", q: 0, o: 1 })
     });
     expect(pick).toEqual({
       kind: "pick",
-      requestId: "req-c",
+      requestId: "req-old",
       question: 0,
       option: 1
     });
     expect(
-      pickAnswers(request, pick as Extract<typeof pick, { kind: "pick" }>)
+      pickAnswers(choice, pick as Extract<typeof pick, { kind: "pick" }>)
     ).toEqual({ q1: { optionIds: ["second"] } });
+
+    const verdict = readControl({
+      actionId: `${PICK_ACTION}-1`,
+      value: JSON.stringify({ r: "req-old", q: 0, o: "reject" })
+    });
+    expect(verdict).toEqual({
+      kind: "pick",
+      requestId: "req-old",
+      question: 0,
+      option: "reject"
+    });
     expect(
-      readControl({ actionId: other!.action_id, value: other!.value })
-    ).toEqual({ kind: "open", requestId: "req-c", question: 0 });
+      pickAnswers(
+        approvalForm("req-old"),
+        verdict as Extract<typeof verdict, { kind: "pick" }>
+      )
+    ).toEqual({ q1: { optionIds: ["reject"] } });
+
+    // Other… and Comment… named their question, and open its words alone.
+    expect(
+      readControl({
+        actionId: OPEN_ACTION,
+        value: JSON.stringify({ r: "req-old", q: 0 })
+      })
+    ).toEqual({ kind: "open", requestId: "req-old", question: 0 });
   });
 
   it("carry an agent's long request id in the value, not the capped action id", () => {
@@ -1077,11 +1169,11 @@ describe("what a cut may not lose", () => {
   });
 
   /**
-   * A message shortened to fit would show buttons beside options nobody can
-   * read in full, so a question too long for one is answered in the modal,
-   * which shows it whole.
+   * The agent's words are cut where the message cannot hold them, and the
+   * question they are about is not on the message to cut: the modal shows it
+   * whole, options and all.
    */
-  it("answers in the modal a question too long for one message, shown whole there", () => {
+  it("shows a question too long for one message whole in the modal", () => {
     const request = form(
       [
         {
@@ -1111,34 +1203,34 @@ describe("what a cut may not lose", () => {
     expect(text).toContain("the end of it.");
   });
 
-  it("answers a question in the thread when it fits one message whole", () => {
-    const blocks = requestBlocks(
-      form(
-        [
-          {
-            kind: "choice",
-            id: "q1",
-            prompt: "Which?",
-            options: [
-              {
-                id: "a",
-                label: "First choice",
-                description: "d ".repeat(2_000)
-              },
-              { id: "b", label: "Second choice" }
-            ]
-          }
-        ],
-        "p ".repeat(2_000)
-      )
+  /** The same question where it would have fitted: answered in the same place. */
+  it("answers a question in the modal when it would fit one message whole", () => {
+    const request = form(
+      [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which?",
+          options: [
+            { id: "a", label: "First choice", description: "d ".repeat(2_000) },
+            { id: "b", label: "Second choice" }
+          ]
+        }
+      ],
+      "p ".repeat(2_000)
     );
+    const blocks = requestBlocks(request);
     expect(messageViolations(blocks)).toEqual([]);
-    expect(blocksText(blocks)).toContain("*2.* Second choice");
-    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual([
-      "1",
-      "2",
-      "Other…"
-    ]);
+    // The agent's words whole — they fit — and nothing of the question.
+    expect(blocksText(blocks)).toContain("p p p");
+    expect(blocksText(blocks)).not.toContain("Second choice");
+    expect(blocksText(blocks)).not.toContain("Cut here to fit Slack");
+    expect(buttonsOf(blocks).map((b) => b.text.text)).toEqual(["Answer"]);
+    const view = formView(request);
+    expect(viewViolations(view)).toEqual([]);
+    expect(blocksText(view.blocks as unknown[])).toContain(
+      "*2.* Second choice"
+    );
   });
 
   it("cuts agent words past the message between links, and opens the modal with them whole", () => {
