@@ -364,7 +364,10 @@ async function handleBlockActions(
 
     if (!payload.triggerId) continue;
     // The Answer button opens where this person left a paged form, with what
-    // they had entered; Other… and Comment… open one question's words.
+    // they had entered. A control naming a question is Other… or Comment… on a
+    // prompt posted while a short form was answered in the thread — it opens
+    // that question's words alone, since its options are on the message.
+    // Nothing posted now carries one; one still open in a thread has to work.
     const draft = hitlDraftOf(row, payload.userId);
     const view =
       control.question === undefined
