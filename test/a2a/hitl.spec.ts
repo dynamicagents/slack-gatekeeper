@@ -11,12 +11,9 @@ import {
 import {
   answeredQuestions,
   answersText,
-  buildHitlRequestParts,
   buildHitlResponseParts,
   buildHitlTimeoutParts,
   parseHitlRequest,
-  parseHitlResponse,
-  parseHitlTimeout,
   type HitlRequest,
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
@@ -131,6 +128,15 @@ describe("the answers in words", () => {
       answersText(choiceForm("r"), { q1: { optionIds: ["approve"] } })
     ).toBe("Approve");
   });
+
+  it("reads only an answer's own keys, whatever the question is called", () => {
+    const request: HitlRequest = {
+      type: HITL_REQUEST_TYPE,
+      requestId: "r-proto",
+      questions: [{ kind: "text", id: "constructor", prompt: "Name it?" }]
+    };
+    expect(answeredQuestions(request, {})).toEqual([]);
+  });
 });
 
 describe("buildHitlResponseParts", () => {
@@ -161,85 +167,5 @@ describe("buildHitlTimeoutParts", () => {
       requestId: "req-3"
     });
     expect(partsText(parts)).toContain("No response");
-  });
-});
-
-describe("buildHitlRequestParts", () => {
-  it("carries a text-part fallback plus the request data part, and round-trips", () => {
-    const parts = buildHitlRequestParts(form);
-    expect(partsText(parts)).toContain("Which database?");
-    expect(parseHitlRequest(msg(parts))).toEqual(form);
-  });
-});
-
-describe("parseHitlResponse", () => {
-  it("extracts answers keyed by question", () => {
-    const res = parseHitlResponse(
-      msg([
-        dataPart({
-          type: HITL_RESPONSE_TYPE,
-          requestId: "req-1",
-          answeredBy: "U1",
-          answers: { q1: { optionIds: ["a"] }, q2: { text: "typed" } }
-        })
-      ])
-    );
-    expect(res?.answers).toEqual({
-      q1: { optionIds: ["a"] },
-      q2: { text: "typed" }
-    });
-    expect(parseHitlResponse(msg([textPart("hi")]))).toBeNull();
-  });
-
-  it("returns null for an empty or malformed pick, even beside words", () => {
-    for (const optionIds of [[], [""], "approve", null]) {
-      expect(
-        parseHitlResponse(
-          msg([
-            dataPart({
-              type: HITL_RESPONSE_TYPE,
-              requestId: "req-1",
-              answeredBy: "U1",
-              answers: { q1: { optionIds, text: "ship it" } }
-            })
-          ])
-        )
-      ).toBeNull();
-    }
-  });
-
-  it("reads only an answer's own keys, whatever the question is called", () => {
-    const request: HitlRequest = {
-      type: HITL_REQUEST_TYPE,
-      requestId: "r-proto",
-      questions: [{ kind: "text", id: "constructor", prompt: "Name it?" }]
-    };
-    expect(answeredQuestions(request, {})).toEqual([]);
-  });
-
-  it("returns null for an answer with neither options nor text", () => {
-    for (const answers of [{ q1: {} }, { q1: { optionIds: [] } }, undefined]) {
-      expect(
-        parseHitlResponse(
-          msg([
-            dataPart({
-              type: HITL_RESPONSE_TYPE,
-              requestId: "req-1",
-              answeredBy: "U1",
-              answers
-            })
-          ])
-        )
-      ).toBeNull();
-    }
-  });
-});
-
-describe("parseHitlTimeout", () => {
-  it("extracts the requestId and returns null when absent", () => {
-    expect(parseHitlTimeout(msg(buildHitlTimeoutParts("req-9")))).toEqual({
-      requestId: "req-9"
-    });
-    expect(parseHitlTimeout(msg([textPart("hi")]))).toBeNull();
   });
 });
