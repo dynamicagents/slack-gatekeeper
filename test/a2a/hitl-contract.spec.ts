@@ -40,9 +40,10 @@ import { messageViolations, viewViolations } from "../helpers/slack-limits";
  * retyped upstream fails these — assignability breaks in one direction or the
  * other. A field *added* upstream does not: an optional property is assignable
  * both ways, so a request carrying a new field parses fine and the gatekeeper
- * ignores it, which is the behaviour you want from a reader anyway. Both sides
- * are pinned at one resolved version of core, so nothing here substitutes for
- * reading a protocol or core bump's diff.
+ * ignores it, which is the behaviour you want from a reader anyway. And the core
+ * it compares against is whichever one is installed, so it reports on that
+ * version and no other: nothing here substitutes for reading a protocol or core
+ * bump's diff.
  */
 
 /** A message carrying `parts`, as the far side would have sent it. */
@@ -54,9 +55,17 @@ function sent(parts: Part[], role: Role = Role.ROLE_AGENT): Message {
  * The status message a core agent asks with, built by core's own encoder: the
  * questions as data, for the gatekeeper, and as the form text beside it, for a
  * client that renders none of it.
+ *
+ * `status` is optional only because the SDK's types are generated from the
+ * protobuf schema, and core always builds one. Narrowed here rather than at each
+ * call site because {@link parseHitlRequest} answers `null` to an absent message
+ * as well as to a bad one, so a refusal below would pass on a message that was
+ * never built.
  */
-function asked(request: HitlRequestData): Message | undefined {
-  return buildAskingTask("t1", "ctx-1", request).status?.message;
+function asked(request: HitlRequestData): Message {
+  const message = buildAskingTask("t1", "ctx-1", request).status?.message;
+  if (!message) throw new Error("core's asking task carried no status message");
+  return message;
 }
 
 /** One question of each kind, every optional field set. */
